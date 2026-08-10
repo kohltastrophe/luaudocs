@@ -1,0 +1,58 @@
+name: Bug report
+description: Something LuauDocs generated, or refused to generate, is wrong.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Most extractor bugs come down to one Luau construct the symbolic
+        evaluator reads differently than you do, so the smallest source snippet
+        that reproduces it is worth more than anything else here.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did LuauDocs do, and what did you expect instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: |
+        The smallest `.luau` source that shows the problem, plus the relevant
+        part of your `luaudocs.toml`. A link to a public repo works too.
+      render: lua
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Output of `luaudocs build --emit-only`
+      description: |
+        Run it in the affected project and paste the full output: it prints
+        every diagnostic without running VitePress.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: versions
+    attributes:
+      label: Versions
+      description: |
+        Output of `luaudocs --version` and `node --version`, plus your OS.
+        luaudocs installs the Lute it pins, so leave that line empty unless you
+        set LUAUDOCS_LUTE: extraction is tied to the Lute version, so a Lute of
+        your own matters even when the bug looks like a rendering problem.
+      placeholder: |
+        luaudocs:
+        node:
+        OS:
+        LUAUDOCS_LUTE (if set):
+      render: shell
+    validations:
+      required: true

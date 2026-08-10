@@ -1,0 +1,6 @@
+{
+	// alias used by main.luau (mixed case: Luau aliases are case-insensitive)
+	"aliases": {
+		"Pkg": "vendor"
+	}
+}

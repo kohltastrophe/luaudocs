@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    # id-token lets the codecov upload authenticate via OIDC, with no stored
+    # secret; naming it means naming the rest of the defaults too
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v6
+      # the exact engines floor, so the matrix proves the minimum we claim
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22.12"
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
+
+      # the Lute the extractor runs on is pinned in src/lute.ts and downloaded
+      # on first use, so there is no toolchain step here to keep in sync
+      - name: Cache the pinned Lute
+        uses: actions/cache@v4
+        with:
+          # the per-user cache dir on each runner; the one that does not exist
+          # is skipped, and a change to the pin misses the key on purpose
+          path: |
+            ~/.cache/luaudocs
+            ~/AppData/Local/luaudocs
+          key: lute-${{ runner.os }}-${{ hashFiles('src/lute.ts') }}
+
+      - run: bun install --frozen-lockfile
+
+      - name: Generate src/generated
+        run: bun run generate
+
+      - name: Typecheck (src + tests + runtime templates)
+        run: bunx tsc --noEmit
+
+      - name: Formatting (prettier + stylua)
+        run: bun run format:check && bun run format:luau:check
+
+      - name: Extractor specs (lute)
+        run: bun run test:lute
+
+      - name: Extractor output matches the checked-in doc-models
+        run: bun run regen:docmodels --check
+
+      - name: Unit tests
+        run: bun run test:coverage
+
+      # one leg suffices for the badge
+      - name: Upload coverage to Codecov
+        if: runner.os == 'Linux'
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage/lcov.info
+          use_oidc: true
+
+      - name: Build
+        run: bun run build
+
+      - name: End-to-end (init -> build on the sample fixture)
+        run: bun run test:e2e
+
+      # Drives the CLI out of an extracted `npm pack` tarball with production
+      # deps only: e2e runs against dist inside the repo checkout, which masks
+      # packaging gaps. Linux only: packaging is platform-independent.
+      - name: Packed tarball smoke test
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          # --ignore-scripts: dist/ and src/generated already exist from the
+          # steps above; prepare would only rebuild them
+          tarball="$(npm pack --ignore-scripts | tail -n1)"
+          smoke="$(mktemp -d)"
+          tar -xzf "$tarball" -C "$smoke"
+          pkg="$smoke/package"
+          # production deps only, and --ignore-scripts again: the shipped
+          # prepare script needs devDependencies (tsup) that must not be pulled
+          npm install --omit=dev --ignore-scripts --no-audit --no-fund --prefix "$pkg"
+          proj="$smoke/project"
+          cp -r test/fixtures/sample-project "$proj"
+          cd "$proj"
+          node "$pkg/dist/cli.js" init . --title Smoke --force
+          node "$pkg/dist/cli.js" build . --emit-only
+          # at least one generated API page proves extract -> emit ran
+          ls .luaudocs/api/*.md
+          # the templates/project tree scaffolds into a dot-directory, which is
+          # the kind of path an npm tarball is apt to drop
+          ls .github/workflows/docs.yml

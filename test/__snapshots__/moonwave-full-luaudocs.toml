@@ -1,0 +1,40 @@
+title = "Brume"
+description = "An invented library for exercising the converter."
+
+[source]
+entries = [ "src" ]
+
+[repo]
+url = "https://github.com/brume-labs/brume"
+branch = "trunk"
+
+[site]
+siteTitle = "BrumeNav"
+favicon = "/icon.svg"
+
+[site.logo]
+light = "/logo-light.svg"
+dark = "/logo-dark.svg"
+
+[site.footer]
+copyright = "© Brume Labs"
+
+[[site.nav]]
+text = "Guide"
+link = "/guide/getting-started"
+activeMatch = "^/guide/"
+
+[[site.nav]]
+text = "API"
+link = "/api/"
+activeMatch = "^/api/"
+
+[[site.nav]]
+text = "Discord"
+link = "https://discord.gg/brume"
+
+[docs]
+changelog = false
+includeReadme = true
+url = "https://brume-labs.github.io/brume/"
+

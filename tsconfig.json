@@ -1,0 +1,26 @@
+{
+	"compilerOptions": {
+		"target": "ES2022",
+		"module": "ESNext",
+		"moduleResolution": "bundler",
+		"lib": ["ES2022"],
+		"types": ["node"],
+		"strict": true,
+		"noUncheckedIndexedAccess": true,
+		"noImplicitOverride": true,
+		"noUnusedLocals": true,
+		"verbatimModuleSyntax": true,
+		"skipLibCheck": true,
+		"resolveJsonModule": true,
+		"noEmit": true
+	},
+	"include": [
+		"src",
+		"test",
+		"scripts",
+		"templates/runtime",
+		"tsup.config.ts",
+		"vitest.config.ts",
+		"vitest.e2e.config.ts"
+	]
+}

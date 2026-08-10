@@ -1,0 +1,129 @@
+# Publishes to npm on a `v*` tag. The CI ladder reruns here: the tag is what
+# gets published, so the tag is what gets tested. Actions are pinned by SHA
+# because this workflow holds `id-token: write`.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # create the GitHub Release
+  id-token: write # npm provenance
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3.14"
+
+      # a mismatched tag publishes the wrong version, which cannot be taken back
+      - name: Tag matches package.json
+        run: |
+          set -euo pipefail
+          tagged="${GITHUB_REF_NAME#v}"
+          declared="$(node -p "require('./package.json').version")"
+          if [ "$tagged" != "$declared" ]; then
+            echo "tag $GITHUB_REF_NAME does not match package.json version $declared" >&2
+            exit 1
+          fi
+
+      - run: bun install --frozen-lockfile
+
+      - name: Generate src/generated
+        run: bun run generate
+
+      - name: Typecheck (src + tests + runtime templates)
+        run: bunx tsc --noEmit
+
+      - name: Formatting (prettier + stylua)
+        run: bun run format:check && bun run format:luau:check
+
+      - name: Extractor specs (lute)
+        run: bun run test:lute
+
+      - name: Extractor output matches the checked-in doc-models
+        run: bun run regen:docmodels --check
+
+      - name: Unit tests
+        run: bun run test
+
+      - name: Build
+        run: bun run build
+
+      - name: End-to-end (init -> build on the sample fixture)
+        run: bun run test:e2e
+
+      # Same guard as CI: drive the CLI out of an extracted tarball with
+      # production deps only, so a packaging gap fails before publish, not after.
+      - name: Packed tarball smoke test
+        run: |
+          set -euo pipefail
+          tarball="$(npm pack --ignore-scripts | tail -n1)"
+          smoke="$(mktemp -d)"
+          tar -xzf "$tarball" -C "$smoke"
+          pkg="$smoke/package"
+          npm install --omit=dev --ignore-scripts --no-audit --no-fund --prefix "$pkg"
+          proj="$smoke/project"
+          cp -r test/fixtures/sample-project "$proj"
+          cd "$proj"
+          node "$pkg/dist/cli.js" init . --title Smoke --force
+          node "$pkg/dist/cli.js" build . --emit-only
+          ls .luaudocs/api/*.md
+          ls .github/workflows/docs.yml
+
+      # Before publish: npm's version is immutable, so an empty or missing
+      # changelog section has to fail while the tag is still recoverable
+      - name: Release notes
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            $0 ~ "^## \\[" v "\\]" { inside = 1; next }
+            inside && /^## \[/ { exit }
+            inside { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "CHANGELOG.md has no '## [$version]' section to release from" >&2
+            exit 1
+          fi
+
+      # --ignore-scripts: publish the dist/ and src/generated/ the steps above
+      # tested, not a fresh prepare rebuild nothing exercised.
+      # Both steps below are idempotent, so a failure in either can be re-run:
+      # npm rejects a republish outright, and gh fails on an existing tag.
+      - name: Publish to npm
+        run: |
+          set -euo pipefail
+          version="$(node -p 'require("./package.json").version')"
+          if npm view "luaudocs@$version" version >/dev/null 2>&1; then
+            echo "luaudocs@$version is already on the registry; skipping publish"
+          else
+            npm publish --ignore-scripts
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" \
+              --title "$GITHUB_REF_NAME" \
+              --notes-file release-notes.md
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --title "$GITHUB_REF_NAME" \
+              --notes-file release-notes.md
+          fi

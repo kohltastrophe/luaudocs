@@ -1,0 +1,4 @@
+# Spec inputs, not source: these trees exist to be resolved, not read, and the
+# require specs assert against their exact shape. Keeping the formatter out
+# means a fixture changes only when the rule it encodes does.
+*

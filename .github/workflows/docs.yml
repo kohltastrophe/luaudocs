@@ -1,0 +1,34 @@
+# Deploys luaudocs.kohl.gg on every push to main. The repo dogfoods itself:
+# `bun install`'s prepare hook builds the CLI, which then builds its own
+# guide-only site ([source] entries = []), so the extractor never runs. No
+# configure-pages step: [docs] url supplies the base path.
+name: Docs
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with: { node-version: "22" }
+      - uses: oven-sh/setup-bun@v2
+        with: { bun-version: "1.3.14" }
+      - run: bun install --frozen-lockfile
+      - run: node dist/cli.js build
+      - uses: actions/upload-pages-artifact@v5
+        with: { path: ".luaudocs/.vitepress/dist" }
+      - id: deployment
+        uses: actions/deploy-pages@v5
