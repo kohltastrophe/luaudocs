@@ -1,0 +1,1124 @@
+{
+	"diagnostics": [],
+	"modules": [
+		{
+			"classes": [],
+			"doc": "A small sample library, written to exercise the renderer: every construct\nbelow is one the doc-model diff or a page snapshot pins.",
+			"id": "src/init.luau",
+			"instancePath": [
+				"Sample"
+			],
+			"members": [
+				{
+					"doc": "A symbol marking cleanup entries passed to [Sample.edit]",
+					"id": "src/init.luau#prop.Sample.Clean",
+					"kind": "prop",
+					"name": "Clean",
+					"readonly": false,
+					"source": { "file": "src/init.luau", "line": 12 },
+					"tags": { "custom": [] },
+					"type": [
+						{ "id": "src/Type.luau#type.Symbol", "text": "Type.Symbol" }
+					],
+					"visibility": "public"
+				},
+				{
+					"doc": "Sets the deferred-update behaviour, defaults to false",
+					"errors": [],
+					"id": "src/init.luau#fn.Sample.deferUpdates",
+					"kind": "function",
+					"name": "deferUpdates",
+					"signature": {
+						"callee": "Sample.deferUpdates",
+						"params": [
+							{
+								"name": "value",
+								"type": [
+									{ "text": "boolean" },
+									"?"
+								]
+							}
+						],
+						"returns": [],
+						"segs": [
+							"(value: ",
+							{ "text": "boolean" },
+							"?)"
+						]
+					},
+					"source": { "endLine": 35, "file": "src/init.luau", "line": 33 },
+					"tags": { "custom": [] },
+					"visibility": "public"
+				},
+				{
+					"doc": "Creates an action that runs logic against a named target",
+					"errors": [],
+					"id": "src/init.luau#fn.Sample.action",
+					"kind": "function",
+					"name": "action",
+					"signature": {
+						"callee": "Sample.action",
+						"params": [
+							{
+								"name": "callback",
+								"type": [
+									"(",
+									{ "text": "string" },
+									") -> ()"
+								]
+							}
+						],
+						"returns": [
+							{
+								"type": [
+									{ "id": "src/init.luau#type.Action", "text": "Action" }
+								]
+							}
+						],
+						"segs": [
+							"(callback: (",
+							{ "text": "string" },
+							") -> ()): ",
+							{ "id": "src/init.luau#type.Action", "text": "Action" }
+						]
+					},
+					"source": { "endLine": 48, "file": "src/init.luau", "line": 46 },
+					"tags": { "custom": [] },
+					"visibility": "public"
+				},
+				{
+					"doc": "Creates a computed state that tracks its dependencies automatically",
+					"errors": [],
+					"id": "src/init.luau#fn.Sample.compute",
+					"kind": "function",
+					"name": "compute",
+					"signature": {
+						"callee": "Sample.compute",
+						"params": [
+							{
+								"name": "computation",
+								"type": [
+									"() -> T"
+								]
+							}
+						],
+						"returns": [
+							{
+								"type": [
+									{ "id": "src/State.luau#type.State", "text": "State.State" },
+									"<T>"
+								]
+							}
+						],
+						"segs": [
+							"<T>(computation: () -> T): ",
+							{ "id": "src/State.luau#type.State", "text": "State.State" },
+							"<T>"
+						]
+					},
+					"source": { "endLine": 55, "file": "src/init.luau", "line": 51 },
+					"tags": { "custom": [] },
+					"visibility": "public"
+				},
+				{
+					"doc": "Creates a new state holding an initial value",
+					"errors": [],
+					"id": "src/init.luau#fn.Sample.state",
+					"kind": "function",
+					"name": "state",
+					"signature": {
+						"callee": "Sample.state",
+						"params": [
+							{
+								"name": "initialValue",
+								"type": [
+									"T?"
+								]
+							}
+						],
+						"returns": [
+							{
+								"type": [
+									{ "id": "src/State.luau#type.State", "text": "State.State" },
+									"<T>"
+								]
+							}
+						],
+						"segs": [
+							"<T>(initialValue: T?): ",
+							{ "id": "src/State.luau#type.State", "text": "State.State" },
+							"<T>"
+						]
+					},
+					"source": { "endLine": 67, "file": "src/init.luau", "line": 58 },
+					"tags": { "custom": [] },
+					"visibility": "public"
+				},
+				{
+					"doc": "Applies a table of properties to an existing target",
+					"errors": [],
+					"id": "src/init.luau#fn.Sample.edit",
+					"kind": "function",
+					"name": "edit",
+					"signature": {
+						"callee": "Sample.edit",
+						"params": [
+							{
+								"name": "target",
+								"type": [
+									"T"
+								]
+							},
+							{
+								"name": "properties",
+								"type": [
+									{ "id": "src/Type.luau#type.Dict", "text": "Type.Dict" },
+									"<",
+									{ "text": "any" },
+									">"
+								]
+							}
+						],
+						"returns": [
+							{
+								"type": [
+									"T"
+								]
+							}
+						],
+						"segs": [
+							"<T>(target: T, properties: ",
+							{ "id": "src/Type.luau#type.Dict", "text": "Type.Dict" },
+							"<",
+							{ "text": "any" },
+							">): T"
+						]
+					},
+					"source": { "endLine": 75, "file": "src/init.luau", "line": 70 },
+					"tags": { "custom": [] },
+					"visibility": "public"
+				},
+				{
+					"doc": "Creates a target of the given class and applies a table of properties to it",
+					"errors": [],
+					"id": "src/init.luau#fn.Sample.new",
+					"kind": "function",
+					"name": "new",
+					"signature": {
+						"callee": "Sample.new",
+						"params": [
+							{
+								"name": "className",
+								"type": [
+									{ "text": "string" }
+								]
+							}
+						],
+						"returns": [
+							{
+								"type": [
+									"(",
+									{ "id": "src/Type.luau#type.Dict", "text": "Type.Dict" },
+									"<",
+									{ "text": "any" },
+									">) -> ",
+									{ "text": "string" }
+								]
+							}
+						],
+						"segs": [
+							"(className: ",
+							{ "text": "string" },
+							"): (",
+							{ "id": "src/Type.luau#type.Dict", "text": "Type.Dict" },
+							"<",
+							{ "text": "any" },
+							">) -> ",
+							{ "text": "string" }
+						]
+					},
+					"source": { "endLine": 84, "file": "src/init.luau", "line": 78 },
+					"tags": { "custom": [] },
+					"visibility": "public"
+				}
+			],
+			"name": "Sample",
+			"reexports": [
+				{ "id": "src/init.luau#reexport.Color", "name": "Color", "targetModule": "src/Color.luau" },
+				{ "id": "src/init.luau#reexport.Interpolate", "name": "Interpolate", "targetModule": "src/Interpolate.luau" },
+				{ "doc": "<strong>Query</strong>: counts states, and is callable itself.", "id": "src/init.luau#reexport.Query", "name": "Query", "targetModule": "src/Query.luau" },
+				{ "id": "src/init.luau#reexport.State", "name": "State", "targetModule": "src/State.luau" },
+				{ "id": "src/init.luau#reexport.Type", "name": "Type", "targetModule": "src/Type.luau" },
+				{ "id": "src/init.luau#reexport.isState", "name": "isState", "targetId": "src/State.luau#fn.State.isState", "targetMember": "isState", "targetModule": "src/State.luau" },
+				{ "id": "src/init.luau#reexport.raw", "name": "raw", "targetId": "src/State.luau#fn.State.raw", "targetMember": "raw", "targetModule": "src/State.luau" },
+				{ "doc": "The linear-light helpers, lifted out of [Color]", "id": "src/init.luau#reexport.Linear", "name": "Linear", "targetId": "src/Color.luau#class.Color.Linear", "targetMember": "Linear", "targetModule": "src/Color.luau" },
+				{ "doc": "Reaches a member *through* a nested class: two path segments, which no\nlookup by bare name can spell", "id": "src/init.luau#reexport.fromGamma", "name": "fromGamma", "targetId": "src/Color.luau#fn.Color.Linear.fromGamma", "targetMember": "Linear.fromGamma", "targetModule": "src/Color.luau" }
+			],
+			"source": { "file": "src/init.luau", "line": 1 },
+			"types": [
+				{
+					"definition": [
+						[
+							"{"
+						],
+						[
+							"\tcallback: (",
+							{ "text": "string" },
+							") -> (),"
+						],
+						[
+							"}"
+						]
+					],
+					"exported": false,
+					"fields": [
+						{
+							"line": 2,
+							"name": "callback",
+							"type": [
+								"(",
+								{ "text": "string" },
+								") -> ()"
+							]
+						}
+					],
+					"generics": [],
+					"id": "src/init.luau#type.Action",
+					"kind": "alias",
+					"name": "Action",
+					"source": { "endLine": 41, "file": "src/init.luau", "line": 39 },
+					"tags": { "custom": [] },
+					"visibility": "public"
+				}
+			]
+		},
+		{
+			"classes": [
+				{
+					"constructors": [],
+					"id": "src/Color.luau#class.Color.Linear",
+					"members": [
+						{
+							"doc": "Converts a gamma-encoded channel to linear",
+							"errors": [],
+							"id": "src/Color.luau#fn.Color.Linear.fromGamma",
+							"kind": "function",
+							"name": "fromGamma",
+							"signature": {
+								"callee": "Color.Linear.fromGamma",
+								"params": [
+									{
+										"name": "channel",
+										"type": [
+											{ "text": "number" }
+										]
+									}
+								],
+								"returns": [
+									{
+										"type": [
+											{ "text": "number" }
+										]
+									}
+								],
+								"segs": [
+									"(channel: ",
+									{ "text": "number" },
+									"): ",
+									{ "text": "number" }
+								]
+							},
+							"source": { "endLine": 6, "file": "src/Color.luau", "line": 4 },
+							"tags": { "custom": [] },
+							"visibility": "public"
+						},
+						{
+							"doc": "Converts a linear channel back to gamma-encoded",
+							"errors": [],
+							"id": "src/Color.luau#fn.Color.Linear.toGamma",
+							"kind": "function",
+							"name": "toGamma",
+							"signature": {
+								"callee": "Color.Linear.toGamma",
+								"params": [
+									{
+										"name": "channel",
+										"type": [
+											{ "text": "number" }
+										]
+									}
+								],
+								"returns": [
+									{
+										"type": [
+											{ "text": "number" }
+										]
+									}
+								],
+								"segs": [
+									"(channel: ",
+									{ "text": "number" },
+									"): ",
+									{ "text": "number" }
+								]
+							},
+							"source": { "endLine": 11, "file": "src/Color.luau", "line": 9 },
+							"tags": { "custom": [] },
+							"visibility": "public"
+						}
+					],
+					"name": "Linear",
+					"source": { "file": "src/Color.luau", "line": 27 },
+					"tags": { "custom": [] },
+					"within": "Color"
+				},
+				{
+					"constructors": [],
+					"id": "src/Color.luau#class.Color.Polar",
+					"members": [
+						{
+							"doc": "Converts cartesian coordinates to an angle",
+							"errors": [],
+							"id": "src/Color.luau#fn.Color.Polar.fromCartesian",
+							"kind": "function",
+							"name": "fromCartesian",
+							"signature": {
+								"callee": "Color.Polar.fromCartesian",
+								"params": [
+									{
+										"name": "x",
+										"type": [
+											{ "text": "number" }
+										]
+									},
+									{
+										"name": "y",
+										"type": [
+											{ "text": "number" }
+										]
+									}
+								],
+								"returns": [
+									{
+										"type": [
+											{ "text": "number" }
+										]
+									}
+								],
+								"segs": [
+									"(x: ",
+									{ "text": "number" },
+									", y: ",
+									{ "text": "number" },
+									"): ",
+									{ "text": "number" }
+								]
+							},
+							"source": { "endLine": 18, "file": "src/Color.luau", "line": 16 },
+							"tags": { "custom": [] },
+							"visibility": "public"
+						},
+						{
+							"doc": "Converts an angle back to cartesian coordinates",
+							"errors": [],
+							"id": "src/Color.luau#fn.Color.Polar.toCartesian",
+							"kind": "function",
+							"name": "toCartesian",
+							"signature": {
+								"callee": "Color.Polar.toCartesian",
+								"params": [
+									{
+										"name": "angle",
+										"type": [
+											{ "text": "number" }
+										]
+									}
+								],
+								"returns": [
+									{
+										"type": [
+											{ "text": "number" }
+										]
+									},
+									{
+										"type": [
+											{ "text": "number" }
+										]
+									}
+								],
+								"segs": [
+									"(angle: ",
+									{ "text": "number" },
+									"): (",
+									{ "text": "number" },
+									", ",
+									{ "text": "number" },
+									")"
+								]
+							},
+							"source": { "endLine": 23, "file": "src/Color.luau", "line": 21 },
+							"tags": { "custom": [] },
+							"visibility": "public"
+						}
+					],
+					"name": "Polar",
+					"source": { "file": "src/Color.luau", "line": 28 },
+					"tags": { "custom": [] },
+					"within": "Color"
+				}
+			],
+			"doc": "Two nested tables, so each becomes its own section on the page.",
+			"id": "src/Color.luau",
+			"instancePath": [
+				"Sample",
+				"Color"
+			],
+			"members": [],
+			"name": "Color",
+			"reexports": [],
+			"source": { "file": "src/Color.luau", "line": 1 },
+			"types": []
+		},
+		{
+			"classes": [],
+			"doc": "Blends two values, falling back to a hard switch at the midpoint. The module\n*is* this function, so its page has no members.",
+			"id": "src/Interpolate.luau",
+			"instancePath": [
+				"Sample",
+				"Interpolate"
+			],
+			"members": [
+				{
+					"doc": "Blends two values, falling back to a hard switch at the midpoint. The module\n*is* this function, so its page has no members.",
+					"errors": [],
+					"id": "src/Interpolate.luau#fn.Interpolate",
+					"kind": "function",
+					"name": "Interpolate",
+					"signature": {
+						"callee": "Interpolate",
+						"params": [
+							{
+								"name": "a",
+								"type": [
+									{ "text": "any" }
+								]
+							},
+							{
+								"name": "b",
+								"type": [
+									{ "text": "any" }
+								]
+							},
+							{
+								"name": "t",
+								"type": [
+									{ "text": "number" }
+								]
+							}
+						],
+						"returns": [
+							{
+								"type": [
+									{ "text": "any" }
+								]
+							}
+						],
+						"segs": [
+							"(a: ",
+							{ "text": "any" },
+							", b: ",
+							{ "text": "any" },
+							", t: ",
+							{ "text": "number" },
+							"): ",
+							{ "text": "any" }
+						]
+					},
+					"source": { "endLine": 8, "file": "src/Interpolate.luau", "line": 3 },
+					"tags": { "custom": [] },
+					"visibility": "public"
+				}
+			],
+			"name": "Interpolate",
+			"reexports": [],
+			"source": { "file": "src/Interpolate.luau", "line": 1 },
+			"types": []
+		},
+		{
+			"classes": [],
+			"doc": "Tiny state-query helpers, documented in the plain block style.",
+			"id": "src/Query.luau",
+			"instancePath": [
+				"Sample",
+				"Query"
+			],
+			"members": [
+				{
+					"doc": "Counts how many of the given values are states.",
+					"errors": [],
+					"id": "src/Query.luau#fn.Query.countStates",
+					"kind": "function",
+					"name": "countStates",
+					"signature": {
+						"callee": "Query.countStates",
+						"params": [
+							{
+								"doc": "The values to inspect.",
+								"name": "objects",
+								"type": [
+									"{ ",
+									{ "text": "any" },
+									" }"
+								]
+							}
+						],
+						"returns": [
+							{
+								"doc": "How many of them are states.",
+								"type": [
+									{ "text": "number" }
+								]
+							}
+						],
+						"segs": [
+							"(objects: { ",
+							{ "text": "any" },
+							" }): ",
+							{ "text": "number" }
+						]
+					},
+					"source": { "file": "src/Query.luau", "line": 25 },
+					"tags": { "custom": [] },
+					"visibility": "public"
+				},
+				{
+					"doc": "Calling the module counts states directly: `Query(objects)`.",
+					"errors": [],
+					"id": "src/Query.luau#fn.Query.__call",
+					"kind": "metamethod",
+					"name": "__call",
+					"signature": {
+						"callee": "Query.__call",
+						"params": [
+							{
+								"name": "self",
+								"type": [
+									{ "text": "any" }
+								]
+							},
+							{
+								"doc": "The values to inspect.",
+								"name": "objects",
+								"type": [
+									"{ ",
+									{ "text": "any" },
+									" }"
+								]
+							}
+						],
+						"returns": [
+							{
+								"type": [
+									{ "text": "number" }
+								]
+							}
+						],
+						"segs": [
+							"(self: ",
+							{ "text": "any" },
+							", objects: { ",
+							{ "text": "any" },
+							" }): ",
+							{ "text": "number" }
+						]
+					},
+					"source": { "endLine": 36, "file": "src/Query.luau", "line": 34 },
+					"tags": { "custom": [] },
+					"visibility": "public"
+				}
+			],
+			"name": "Query",
+			"reexports": [],
+			"source": { "file": "src/Query.luau", "line": 1 },
+			"types": []
+		},
+		{
+			"classes": [
+				{
+					"constructors": [
+						"src/init.luau#fn.Sample.compute",
+						"src/init.luau#fn.Sample.state"
+					],
+					"id": "src/State.luau#class.State",
+					"members": [
+						{
+							"id": "src/State.luau#prop.State.deferUpdates",
+							"kind": "prop",
+							"name": "deferUpdates",
+							"readonly": false,
+							"source": { "file": "src/State.luau", "line": 3 },
+							"tags": { "custom": [] },
+							"type": [
+								"boolean"
+							],
+							"visibility": "public"
+						},
+						{
+							"doc": "Checks whether an object is a state",
+							"errors": [],
+							"id": "src/State.luau#fn.State.isState",
+							"kind": "function",
+							"name": "isState",
+							"signature": {
+								"callee": "State.isState",
+								"params": [
+									{
+										"name": "object",
+										"type": [
+											{ "text": "any" }
+										]
+									}
+								],
+								"returns": [
+									{
+										"type": [
+											{ "text": "boolean" }
+										]
+									}
+								],
+								"segs": [
+									"(object: ",
+									{ "text": "any" },
+									"): ",
+									{ "text": "boolean" }
+								]
+							},
+							"source": { "endLine": 9, "file": "src/State.luau", "line": 7 },
+							"tags": { "custom": [] },
+							"visibility": "public"
+						},
+						{
+							"doc": "Gets the raw value of a state, or the input itself when it is not a state",
+							"errors": [],
+							"id": "src/State.luau#fn.State.raw",
+							"kind": "function",
+							"name": "raw",
+							"signature": {
+								"callee": "State.raw",
+								"params": [
+									{
+										"name": "object",
+										"type": [
+											"T"
+										]
+									}
+								],
+								"returns": [
+									{
+										"type": [
+											{ "text": "any" }
+										]
+									}
+								],
+								"segs": [
+									"<T>(object: T): ",
+									{ "text": "any" }
+								]
+							},
+							"source": { "endLine": 14, "file": "src/State.luau", "line": 12 },
+							"tags": { "custom": [] },
+							"visibility": "public"
+						},
+						{
+							"doc": "Tracks this state as a dependency of the computation currently running",
+							"errors": [],
+							"id": "src/State.luau#fn.State._updateDependence",
+							"kind": "method",
+							"name": "_updateDependence",
+							"signature": {
+								"callee": "State:_updateDependence",
+								"params": [],
+								"returns": [],
+								"segs": [
+									"()"
+								]
+							},
+							"source": { "endLine": 32, "file": "src/State.luau", "line": 30 },
+							"tags": { "custom": [] },
+							"visibility": "private"
+						},
+						{
+							"doc": "Adds a hook to run whenever the value changes, returning a disconnect function",
+							"errors": [],
+							"id": "src/State.luau#fn.State.Connect",
+							"kind": "method",
+							"name": "Connect",
+							"signature": {
+								"callee": "State:Connect",
+								"params": [
+									{
+										"name": "callback",
+										"type": [
+											{ "id": "src/Type.luau#type.Function", "text": "Type.Function" }
+										]
+									}
+								],
+								"returns": [
+									{
+										"type": [
+											{ "id": "src/Type.luau#type.Function", "text": "Type.Function" }
+										]
+									}
+								],
+								"segs": [
+									"(callback: ",
+									{ "id": "src/Type.luau#type.Function", "text": "Type.Function" },
+									"): ",
+									{ "id": "src/Type.luau#type.Function", "text": "Type.Function" }
+								]
+							},
+							"source": { "endLine": 49, "file": "src/State.luau", "line": 44 },
+							"tags": { "custom": [] },
+							"visibility": "public"
+						},
+						{
+							"doc": "Destroys the state, clearing its dependencies and hooks",
+							"errors": [],
+							"id": "src/State.luau#fn.State.Destroy",
+							"kind": "method",
+							"name": "Destroy",
+							"signature": {
+								"callee": "State:Destroy",
+								"params": [],
+								"returns": [],
+								"segs": [
+									"()"
+								]
+							},
+							"source": { "endLine": 56, "file": "src/State.luau", "line": 52 },
+							"tags": { "custom": [] },
+							"visibility": "public"
+						}
+					],
+					"name": "State",
+					"source": { "file": "src/State.luau", "line": 3 },
+					"tags": { "custom": [] }
+				}
+			],
+			"id": "src/State.luau",
+			"instancePath": [
+				"Sample",
+				"State"
+			],
+			"members": [],
+			"name": "State",
+			"reexports": [],
+			"source": { "file": "src/State.luau", "line": 1 },
+			"types": [
+				{
+					"definition": [
+						[
+							"{"
+						],
+						[
+							"\t--- Hooks registered through [State:Connect]"
+						],
+						[
+							"\t_connections: ",
+							{ "id": "src/Type.luau#type.Dict", "text": "Type.Dict" },
+							"<",
+							{ "id": "src/Type.luau#type.Function", "text": "Type.Function" },
+							">,"
+						],
+						[
+							"\t_computation: ",
+							{ "id": "src/Type.luau#type.Function", "text": "Type.Function" },
+							"?,"
+						],
+						[
+							"\t_dependencies: ",
+							{ "id": "src/Type.luau#type.Set", "text": "Type.Set" },
+							"<",
+							{ "id": "src/State.luau#type.State", "text": "State" },
+							"<T>>,"
+						],
+						[
+							"\t_dependents: ",
+							{ "id": "src/Type.luau#type.Set", "text": "Type.Set" },
+							"<",
+							{ "id": "src/State.luau#type.State", "text": "State" },
+							"<T>>,"
+						],
+						[
+							"\t_value: T,"
+						],
+						[
+							"}"
+						]
+					],
+					"exported": true,
+					"fields": [
+						{
+							"doc": "Hooks registered through [State:Connect]",
+							"docInDisplay": true,
+							"line": 3,
+							"name": "_connections",
+							"type": [
+								{ "id": "src/Type.luau#type.Dict", "text": "Type.Dict" },
+								"<",
+								{ "id": "src/Type.luau#type.Function", "text": "Type.Function" },
+								">"
+							]
+						},
+						{
+							"line": 4,
+							"name": "_computation",
+							"type": [
+								{ "id": "src/Type.luau#type.Function", "text": "Type.Function" },
+								"?"
+							]
+						},
+						{
+							"line": 5,
+							"name": "_dependencies",
+							"type": [
+								{ "id": "src/Type.luau#type.Set", "text": "Type.Set" },
+								"<",
+								{ "id": "src/State.luau#type.State", "text": "State" },
+								"<T>>"
+							]
+						},
+						{
+							"line": 6,
+							"name": "_dependents",
+							"type": [
+								{ "id": "src/Type.luau#type.Set", "text": "Type.Set" },
+								"<",
+								{ "id": "src/State.luau#type.State", "text": "State" },
+								"<T>>"
+							]
+						},
+						{
+							"line": 7,
+							"name": "_value",
+							"type": [
+								"T"
+							]
+						}
+					],
+					"generics": [
+						{ "isPack": false, "name": "T" }
+					],
+					"id": "src/State.luau#type.StateData",
+					"kind": "alias",
+					"name": "StateData",
+					"source": { "endLine": 23, "file": "src/State.luau", "line": 16 },
+					"tags": { "custom": [] },
+					"visibility": "public"
+				},
+				{
+					"definition": [
+						[
+							"typeof(setmetatable({} :: ",
+							{ "id": "src/State.luau#type.StateData", "text": "StateData" },
+							"<T>, State))"
+						]
+					],
+					"doc": "A state is its data plus this metatable: the class type the page is built from.",
+					"exported": true,
+					"generics": [
+						{ "isPack": false, "name": "T" }
+					],
+					"id": "src/State.luau#type.State",
+					"kind": "alias",
+					"name": "State",
+					"source": { "file": "src/State.luau", "line": 25 },
+					"tags": { "custom": [] },
+					"visibility": "public"
+				},
+				{
+					"definition": [
+						[
+							"T | ",
+							{ "id": "src/State.luau#type.State", "text": "State" },
+							"<T>"
+						]
+					],
+					"doc": "Either a plain value or a state holding one.",
+					"exported": true,
+					"generics": [
+						{ "isPack": false, "name": "T" }
+					],
+					"id": "src/State.luau#type.Stateful",
+					"kind": "alias",
+					"name": "Stateful",
+					"source": { "file": "src/State.luau", "line": 27 },
+					"tags": { "custom": [] },
+					"visibility": "public"
+				}
+			]
+		},
+		{
+			"classes": [],
+			"doc": "Shared aliases, and the only module that names Roblox classes: the `New<>`\narms below are what `linkRobloxTypes` resolves against, so engine linking is\ncovered in one place instead of leaking into every other fixture module.",
+			"id": "src/Type.luau",
+			"instancePath": [
+				"Sample",
+				"Type"
+			],
+			"members": [],
+			"name": "Type",
+			"reexports": [],
+			"source": { "file": "src/Type.luau", "line": 1 },
+			"types": [
+				{
+					"definition": [
+						[
+							"(...",
+							{ "text": "any" },
+							") -> ...",
+							{ "text": "any" }
+						]
+					],
+					"exported": true,
+					"generics": [],
+					"id": "src/Type.luau#type.Function",
+					"kind": "alias",
+					"name": "Function",
+					"source": { "file": "src/Type.luau", "line": 5 },
+					"tags": { "custom": [] },
+					"visibility": "public"
+				},
+				{
+					"definition": [
+						[
+							"{ [T]: ",
+							{ "text": "any" },
+							" }"
+						]
+					],
+					"exported": true,
+					"generics": [
+						{ "isPack": false, "name": "T" }
+					],
+					"id": "src/Type.luau#type.Dict",
+					"kind": "alias",
+					"name": "Dict",
+					"source": { "file": "src/Type.luau", "line": 6 },
+					"tags": { "custom": [] },
+					"visibility": "public"
+				},
+				{
+					"definition": [
+						[
+							"{ [T]: ",
+							{ "text": "boolean" },
+							" }"
+						]
+					],
+					"exported": true,
+					"generics": [
+						{ "isPack": false, "name": "T" }
+					],
+					"id": "src/Type.luau#type.Set",
+					"kind": "alias",
+					"name": "Set",
+					"source": { "file": "src/Type.luau", "line": 7 },
+					"tags": { "custom": [] },
+					"visibility": "public"
+				},
+				{
+					"definition": [
+						[
+							"{ type: \"Symbol\" }"
+						]
+					],
+					"exported": true,
+					"fields": [
+						{
+							"line": 1,
+							"name": "type",
+							"type": [
+								"\"Symbol\""
+							]
+						}
+					],
+					"generics": [],
+					"id": "src/Type.luau#type.Symbol",
+					"kind": "alias",
+					"name": "Symbol",
+					"source": { "file": "src/Type.luau", "line": 8 },
+					"tags": { "custom": [] },
+					"visibility": "public"
+				},
+				{
+					"definition": [
+						[
+							"(Name) -> (Class & ",
+							{ "id": "src/Type.luau#type.Dict", "text": "Dict" },
+							"<",
+							{ "text": "any" },
+							">) -> Class"
+						]
+					],
+					"doc": "Maps a class name to a constructor for that class.",
+					"exported": true,
+					"generics": [
+						{ "isPack": false, "name": "Name" },
+						{ "isPack": false, "name": "Class" }
+					],
+					"id": "src/Type.luau#type.New",
+					"kind": "alias",
+					"name": "New",
+					"source": { "file": "src/Type.luau", "line": 11 },
+					"tags": { "custom": [] },
+					"visibility": "public"
+				},
+				{
+					"definition": [
+						[
+							{ "id": "src/Type.luau#type.New", "text": "New" },
+							"<\"Frame\", ",
+							{ "text": "Frame" },
+							"> & ",
+							{ "id": "src/Type.luau#type.New", "text": "New" },
+							"<",
+							{ "text": "string" },
+							", ",
+							{ "text": "Instance" },
+							">"
+						]
+					],
+					"doc": "One arm per resolvable form: a string-literal class name, and the `string`\nfallback whose class is named as a plain identifier.",
+					"exported": true,
+					"generics": [],
+					"id": "src/Type.luau#type.Constructor",
+					"kind": "alias",
+					"name": "Constructor",
+					"source": { "file": "src/Type.luau", "line": 15 },
+					"tags": { "custom": [] },
+					"visibility": "public"
+				}
+			]
+		},
+		{
+			"classes": [],
+			"id": "src/Tween.luau",
+			"instancePath": [
+				"Sample",
+				"Tween"
+			],
+			"members": [],
+			"name": "Tween",
+			"reexports": [],
+			"source": { "file": "src/Tween.luau", "line": 1 },
+			"types": []
+		}
+	],
+	"project": {
+		"entryPoints": [
+			"src/init.luau"
+		]
+	},
+	"schemaVersion": 1
+}

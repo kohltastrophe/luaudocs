@@ -1,0 +1,9 @@
+{
+	"name": "Inst",
+	"tree": {
+		"$path": "src",
+		"Ext": { "$path": "ext" },
+		"Pkg": { "$path": "pkg" },
+		"Wire": { "$path": "wire/wire.project.json" }
+	}
+}

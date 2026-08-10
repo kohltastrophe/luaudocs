@@ -1,0 +1,30 @@
+title = "LuauDocs"
+description = "Documentation generator for Luau."
+
+# luaudocs dogfoods itself: the only Luau it documents is examples/Flux, a demo
+# library whose generated pages the guides embed inline. Nothing in it is
+# tagged beyond the two members the tag guide points at.
+[source]
+entries = ["examples/Flux"]
+
+[[site.nav]]
+text = "Guide"
+link = "/guide/getting-started"
+activeMatch = "^/guide/"
+[[site.nav]]
+text = "Example API"
+link = "/api/"
+activeMatch = "^/api/"
+[[site.nav]]
+text = "Changelog"
+link = "/changelog"
+
+[repo]
+url = "https://github.com/kohltastrophe/luaudocs"
+
+[site]
+logo = "/logo.svg"
+favicon = "/logo.svg"
+
+[docs]
+url = "https://luaudocs.kohl.gg"

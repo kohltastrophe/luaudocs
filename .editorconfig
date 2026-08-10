@@ -1,0 +1,20 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.{ts,mts,cts,vue,luau,json,jsonc,css}]
+indent_style = tab
+indent_width = 4
+
+# YAML forbids tabs.
+[*.{yml,yaml}]
+indent_style = space
+indent_size = 2
+
+# Two trailing spaces are a hard line break in markdown.
+[*.md]
+trim_trailing_whitespace = false

@@ -1,0 +1,22 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+*.log
+
+# fetched by `bun run generate` (prepare hook + CI), never checked in
+src/generated/
+extractor/generated/
+
+# vitepress output from e2e/spike runs
+**/.vitepress/dist/
+**/.vitepress/cache/
+
+# local `npm pack` output
+*.tgz
+
+# editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
