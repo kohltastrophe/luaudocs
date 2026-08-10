@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" aria-label="LuauDocs">
+	<linearGradient id="g" gradientUnits="userSpaceOnUse">
+		<stop stop-color="#08f" />
+		<stop offset="1" stop-color="#0f8" />
+	</linearGradient>
+	<path d="M2 2v12h8M8 2h2M8 8h6" fill="none" stroke="url(#g)" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" />
+</svg>

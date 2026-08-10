@@ -1,0 +1,30 @@
+name: Feature request
+description: Something LuauDocs should be able to do.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to document
+      description: |
+        Describe the situation rather than the feature, if you can. LuauDocs
+        prefers inferring things over adding a knob, so the underlying case
+        often has a shorter answer than the proposal.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you have in mind
+      description: Config, tag, CLI flag, or output change, as concretely as you can put it.
+    validations:
+      required: false
+
+  - type: input
+    id: moonwave
+    attributes:
+      label: Moonwave equivalent
+      description: If Moonwave does this today, name the tag or option so parity can be checked.
+    validations:
+      required: false

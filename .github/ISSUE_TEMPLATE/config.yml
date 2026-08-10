@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Documentation
+    url: https://luaudocs.kohl.gg
+    about: Guides for configuration, documenting your library, and deploying.
+  - name: Migrating from Moonwave
+    url: https://luaudocs.kohl.gg/guide/migrating-from-moonwave
+    about: What converts automatically, and what keeps working untouched.
+  - name: Report a security vulnerability
+    url: https://github.com/kohltastrophe/luaudocs/security/advisories/new
+    about: Please report security issues privately, not as a public issue.

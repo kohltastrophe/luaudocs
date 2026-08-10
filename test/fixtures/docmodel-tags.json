@@ -1,0 +1,1052 @@
+{
+	"diagnostics": [
+		{ "code": "ignored-tag", "file": "src/Widget.luau", "line": 2, "message": "@__index is ignored: implementation tables are detected automatically", "severity": "info" }
+	],
+	"externals": { "Promise": "https://eryn.io/roblox-lua-promise/lib/" },
+	"modules": [
+		{
+			"classes": [
+				{
+					"constructors": [],
+					"id": "src/init.luau#class.Tagged",
+					"members": [
+						{
+							"doc": "Creates a widget.",
+							"errors": [],
+							"id": "src/init.luau#fn.Tagged.create",
+							"kind": "function",
+							"name": "create",
+							"signature": {
+								"callee": "Tagged.create",
+								"params": [
+									{
+										"doc": "the display name",
+										"name": "name",
+										"type": [
+											{ "text": "string" }
+										]
+									}
+								],
+								"returns": [
+									{
+										"doc": "the new widget",
+										"type": [
+											{ "id": "src/Widget.luau#type.Widget", "text": "Widget" }
+										]
+									}
+								],
+								"segs": [
+									"(name: ",
+									{ "text": "string" },
+									"): ",
+									{ "id": "src/Widget.luau#type.Widget", "text": "Widget.Widget" }
+								]
+							},
+							"source": { "endLine": 20, "file": "src/init.luau", "line": 18 },
+							"tags": {
+								"custom": [
+									"constructor"
+								]
+							},
+							"visibility": "public"
+						},
+						{
+							"doc": "Blocks until the widget is saved.",
+							"errors": [
+								{ "doc": "when the datastore is unavailable", "type": "string" }
+							],
+							"id": "src/init.luau#fn.Tagged.save",
+							"kind": "function",
+							"name": "save",
+							"signature": {
+								"callee": "Tagged.save",
+								"params": [
+									{
+										"name": "widget",
+										"type": [
+											{ "id": "src/Widget.luau#type.Widget", "text": "Widget.Widget" }
+										]
+									}
+								],
+								"returns": [
+									{
+										"type": [
+											{ "text": "boolean" }
+										]
+									}
+								],
+								"segs": [
+									"(widget: ",
+									{ "id": "src/Widget.luau#type.Widget", "text": "Widget.Widget" },
+									"): ",
+									{ "text": "boolean" }
+								]
+							},
+							"source": { "endLine": 29, "file": "src/init.luau", "line": 27 },
+							"tags": {
+								"custom": [],
+								"realm": [
+									"server",
+									"plugin"
+								],
+								"yields": true
+							},
+							"visibility": "public"
+						},
+						{
+							"doc": "Waits for the registry to settle: the Yields badge is detected, not tagged.",
+							"errors": [],
+							"id": "src/init.luau#fn.Tagged.flush",
+							"kind": "function",
+							"name": "flush",
+							"signature": {
+								"callee": "Tagged.flush",
+								"params": [],
+								"returns": [],
+								"segs": [
+									"()"
+								]
+							},
+							"source": { "endLine": 34, "file": "src/init.luau", "line": 32 },
+							"tags": { "custom": [], "yields": true },
+							"visibility": "public"
+						},
+						{
+							"doc": "The realm badge comes from the tag, not the body: the fire is incidental.",
+							"errors": [],
+							"id": "src/init.luau#fn.Tagged.mirror",
+							"kind": "function",
+							"name": "mirror",
+							"signature": {
+								"callee": "Tagged.mirror",
+								"params": [
+									{
+										"name": "remote",
+										"type": [
+											{ "text": "any" }
+										]
+									}
+								],
+								"returns": [],
+								"segs": [
+									"(remote: ",
+									{ "text": "any" },
+									")"
+								]
+							},
+							"source": { "endLine": 40, "file": "src/init.luau", "line": 38 },
+							"tags": {
+								"custom": [],
+								"realm": [
+									"server"
+								]
+							},
+							"visibility": "public"
+						},
+						{
+							"doc": "The prototype every draft copies. Nothing here declares its type: it comes\nfrom what `Widget.new` returns, resolved in Widget.luau's own scope.",
+							"id": "src/init.luau#prop.Tagged.blank",
+							"kind": "prop",
+							"name": "blank",
+							"readonly": false,
+							"source": { "file": "src/init.luau", "line": 44 },
+							"tags": { "custom": [] },
+							"type": [
+								{ "id": "src/Widget.luau#type.Widget", "text": "Widget" }
+							],
+							"visibility": "public"
+						},
+						{
+							"doc": "Where saved widgets land, mounted only where the guard passes: the Server\nbadge and the optional type both come off that one expression, untagged.",
+							"id": "src/init.luau#prop.Tagged.storage",
+							"kind": "prop",
+							"name": "storage",
+							"readonly": false,
+							"source": { "file": "src/init.luau", "line": 48 },
+							"tags": {
+								"custom": [],
+								"realm": [
+									"server"
+								]
+							},
+							"type": [
+								{ "text": "Instance" },
+								"?"
+							],
+							"visibility": "public"
+						},
+						{
+							"doc": "The old spelling of [Tagged.Limits]. One table under two names: the first\nbecame the section, so this one is typed as a link to it.",
+							"id": "src/init.luau#prop.Tagged.Caps",
+							"kind": "prop",
+							"name": "Caps",
+							"readonly": false,
+							"source": { "file": "src/init.luau", "line": 58 },
+							"tags": { "custom": [] },
+							"type": [
+								{ "id": "src/init.luau#class.Tagged.Limits", "text": "Limits" }
+							],
+							"visibility": "public"
+						},
+						{
+							"errors": [],
+							"id": "src/init.luau#fn.Tagged.make",
+							"kind": "function",
+							"name": "make",
+							"signature": {
+								"callee": "Tagged.make",
+								"params": [
+									{
+										"name": "name",
+										"type": [
+											{ "text": "string" }
+										]
+									}
+								],
+								"returns": [
+									{
+										"type": [
+											{ "id": "src/Widget.luau#type.Widget", "text": "Widget.Widget" }
+										]
+									}
+								],
+								"segs": [
+									"(name: ",
+									{ "text": "string" },
+									"): ",
+									{ "id": "src/Widget.luau#type.Widget", "text": "Widget.Widget" }
+								]
+							},
+							"source": { "endLine": 72, "file": "src/init.luau", "line": 70 },
+							"tags": {
+								"custom": [],
+								"deprecated": { "note": "use [Tagged.create] instead", "version": "v2" },
+								"since": "v0.9.0"
+							},
+							"visibility": "public"
+						},
+						{
+							"errors": [],
+							"id": "src/init.luau#fn.Tagged.internalReset",
+							"kind": "function",
+							"name": "internalReset",
+							"signature": {
+								"callee": "Tagged.internalReset",
+								"params": [],
+								"returns": [],
+								"segs": [
+									"()"
+								]
+							},
+							"source": { "file": "src/init.luau", "line": 75 },
+							"tags": { "custom": [] },
+							"visibility": "private"
+						},
+						{
+							"errors": [],
+							"id": "src/init.luau#fn.Tagged.preview",
+							"kind": "function",
+							"name": "preview",
+							"signature": {
+								"callee": "Tagged.preview",
+								"params": [],
+								"returns": [
+									{
+										"type": [
+											{ "text": "string" }
+										]
+									}
+								],
+								"segs": [
+									"(): ",
+									{ "text": "string" }
+								]
+							},
+							"source": { "endLine": 84, "file": "src/init.luau", "line": 82 },
+							"tags": {
+								"custom": [],
+								"deprecated": {},
+								"unreleased": true
+							},
+							"visibility": "public"
+						}
+					],
+					"name": "Tagged",
+					"source": { "file": "src/init.luau", "line": 10 },
+					"tags": { "custom": [] }
+				},
+				{
+					"constructors": [],
+					"doc": "Hard caps, frozen: the prop below renders Read Only without a tag.",
+					"id": "src/init.luau#class.Tagged.Limits",
+					"members": [
+						{
+							"doc": "The registry stops accepting widgets past this.",
+							"id": "src/init.luau#prop.Tagged.Limits.maxWidgets",
+							"kind": "prop",
+							"name": "maxWidgets",
+							"readonly": true,
+							"source": { "file": "src/init.luau", "line": 53 },
+							"tags": { "custom": [] },
+							"type": [
+								"number"
+							],
+							"visibility": "public"
+						}
+					],
+					"name": "Limits",
+					"source": { "endLine": 54, "file": "src/init.luau", "line": 51 },
+					"tags": { "custom": [] },
+					"within": "Tagged"
+				},
+				{
+					"constructors": [],
+					"doc": "An in-progress widget kept off the registry (factory pattern: the class\nnever joins the module surface).",
+					"id": "src/init.luau#class.Draft",
+					"members": [
+						{
+							"doc": "Discards the draft.",
+							"errors": [],
+							"id": "src/init.luau#fn.Draft.discard",
+							"kind": "method",
+							"name": "discard",
+							"signature": {
+								"callee": "Draft:discard",
+								"params": [],
+								"returns": [],
+								"segs": [
+									"()"
+								]
+							},
+							"source": { "file": "src/init.luau", "line": 66 },
+							"tags": { "custom": [] },
+							"visibility": "public"
+						}
+					],
+					"name": "Draft",
+					"source": { "file": "src/init.luau", "line": 63 },
+					"tags": { "custom": [] }
+				}
+			],
+			"doc": "Tag-torture fixture: every moonwave tag on a path from extractor to\nrendered page. See [Widget] and [Promise] for prose links.",
+			"id": "src/init.luau",
+			"instancePath": [
+				"src"
+			],
+			"members": [],
+			"name": "Tagged",
+			"reexports": [
+				{ "id": "src/init.luau#reexport.Widget", "name": "Widget", "targetModule": "src/Widget.luau" }
+			],
+			"source": { "file": "src/init.luau", "line": 1 },
+			"types": [
+				{
+					"definition": [
+						[
+							"\"error\" | \"rename\""
+						]
+					],
+					"doc": "How name collisions resolve during creation.",
+					"exported": true,
+					"generics": [],
+					"id": "src/Widget.luau#type.CreatePolicy",
+					"kind": "alias",
+					"name": "CreatePolicy",
+					"source": { "file": "src/Widget.luau", "line": 95 },
+					"tags": { "custom": [] },
+					"visibility": "public"
+				}
+			]
+		},
+		{
+			"classes": [
+				{
+					"constructors": [
+						"src/init.luau#fn.Tagged.create",
+						"src/init.luau#fn.Tagged.make",
+						"src/Widget.luau#fn.Widget.new"
+					],
+					"doc": "A stateful widget.\n\n:::caution\nThe rendering pipeline is experimental.\n:::\n\n<Tabs>\n<TabItem value=\"named\" label=\"Named\">\n\n```luau\nlocal widget = Widget.new(\"panel\")\n```\n\n</TabItem>\n<TabItem value=\"blank\">\n\n```luau\nlocal widget = Widget.new(\"\")\n```\n\n</TabItem>\n</Tabs>",
+					"id": "src/Widget.luau#class.Widget",
+					"members": [
+						{
+							"doc": "The semantic version of the widget system.",
+							"id": "src/Widget.luau#prop.Widget.version",
+							"kind": "prop",
+							"name": "version",
+							"readonly": true,
+							"source": { "file": "src/Widget.luau", "line": 46 },
+							"tags": { "custom": [] },
+							"type": [
+								"string"
+							],
+							"visibility": "public"
+						},
+						{
+							"doc": "Named render slots; Widget.luau spells the value, this spells the type.",
+							"id": "src/Widget.luau#prop.Widget.slots",
+							"kind": "prop",
+							"name": "slots",
+							"readonly": false,
+							"source": { "file": "src/Widget.luau", "line": 50 },
+							"tags": { "custom": [] },
+							"type": [
+								"{ ",
+								{ "text": "string" },
+								" }"
+							],
+							"visibility": "public"
+						},
+						{
+							"doc": "Makes a widget.",
+							"errors": [],
+							"id": "src/Widget.luau#fn.Widget.new",
+							"kind": "function",
+							"name": "new",
+							"signature": {
+								"callee": "Widget.new",
+								"params": [
+									{
+										"doc": "the display name",
+										"name": "name",
+										"type": [
+											{ "text": "string" }
+										]
+									}
+								],
+								"returns": [
+									{
+										"type": [
+											{ "id": "src/Widget.luau#type.Widget", "text": "Widget" }
+										]
+									}
+								],
+								"segs": [
+									"(name: ",
+									{ "text": "string" },
+									"): ",
+									{ "id": "src/Widget.luau#type.Widget", "text": "Widget" }
+								]
+							},
+							"source": { "endLine": 56, "file": "src/Widget.luau", "line": 54 },
+							"tags": { "custom": [] },
+							"visibility": "public"
+						},
+						{
+							"doc": "Loads a widget asynchronously.",
+							"errors": [],
+							"id": "src/Widget.luau#fn.Widget.load",
+							"kind": "function",
+							"name": "load",
+							"signature": {
+								"callee": "Widget.load",
+								"params": [
+									{
+										"name": "name",
+										"type": [
+											{ "text": "string" }
+										]
+									}
+								],
+								"returns": [
+									{
+										"doc": "resolves with the loaded [Widget]",
+										"type": [
+											{ "text": "Promise" }
+										]
+									}
+								],
+								"segs": [
+									"(name: ",
+									{ "text": "string" },
+									"): ",
+									{ "text": "Promise" }
+								]
+							},
+							"source": { "endLine": 62, "file": "src/Widget.luau", "line": 60 },
+							"tags": { "custom": [] },
+							"visibility": "public"
+						},
+						{
+							"doc": "Renames the widget.",
+							"errors": [],
+							"id": "src/Widget.luau#fn.Widget.rename",
+							"kind": "method",
+							"name": "rename",
+							"signature": {
+								"callee": "Widget:rename",
+								"params": [
+									{
+										"name": "name",
+										"type": [
+											{ "text": "string" }
+										]
+									}
+								],
+								"returns": [],
+								"segs": [
+									"(name: ",
+									{ "text": "string" },
+									")"
+								]
+							},
+							"source": { "endLine": 68, "file": "src/Widget.luau", "line": 66 },
+							"tags": {
+								"custom": [],
+								"realm": [
+									"client"
+								]
+							},
+							"visibility": "public"
+						},
+						{
+							"doc": "Fires the widget's activation: the Client badge is detected, not tagged.",
+							"errors": [],
+							"id": "src/Widget.luau#fn.Widget.activate",
+							"kind": "method",
+							"name": "activate",
+							"signature": {
+								"callee": "Widget:activate",
+								"params": [],
+								"returns": [],
+								"segs": [
+									"()"
+								]
+							},
+							"source": { "endLine": 73, "file": "src/Widget.luau", "line": 71 },
+							"tags": {
+								"custom": [],
+								"realm": [
+									"client"
+								]
+							},
+							"visibility": "public"
+						},
+						{
+							"doc": "Applies a skin: the parameter docs are trailing comments, except where a\ntag outranks one.",
+							"errors": [],
+							"id": "src/Widget.luau#fn.Widget.reskin",
+							"kind": "method",
+							"name": "reskin",
+							"signature": {
+								"callee": "Widget:reskin",
+								"params": [
+									{
+										"doc": "the tag wins over the trailing comment",
+										"name": "skin",
+										"type": [
+											{ "text": "string" }
+										]
+									},
+									{
+										"doc": "multiplier against the base size",
+										"name": "scale",
+										"type": [
+											{ "text": "number" }
+										]
+									}
+								],
+								"returns": [
+									{
+										"type": [
+											{ "text": "boolean" }
+										]
+									}
+								],
+								"segs": [
+									"(skin: ",
+									{ "text": "string" },
+									", scale: ",
+									{ "text": "number" },
+									"): ",
+									{ "text": "boolean" }
+								]
+							},
+							"source": { "endLine": 83, "file": "src/Widget.luau", "line": 78 },
+							"tags": { "custom": [] },
+							"visibility": "public"
+						},
+						{
+							"doc": "Captures internal state.",
+							"errors": [],
+							"id": "src/Widget.luau#fn.Widget.capture",
+							"kind": "method",
+							"name": "capture",
+							"signature": {
+								"callee": "Widget:capture",
+								"params": [],
+								"returns": [
+									{
+										"type": [
+											{ "text": "Internal" }
+										]
+									}
+								],
+								"segs": [
+									"(): ",
+									{ "text": "Internal" }
+								]
+							},
+							"source": { "endLine": 91, "file": "src/Widget.luau", "line": 89 },
+							"tags": { "custom": [] },
+							"visibility": "public"
+						},
+						{
+							"doc": "Writes the widget to storage.",
+							"errors": [],
+							"id": "src/extra.luau#fn.Widget.persist",
+							"kind": "function",
+							"name": "persist",
+							"signature": {
+								"callee": "Widget.persist",
+								"params": [
+									{
+										"name": "widget",
+										"type": [
+											{ "text": "any" }
+										]
+									}
+								],
+								"returns": [
+									{
+										"type": [
+											{ "text": "boolean" }
+										]
+									}
+								],
+								"segs": [
+									"(widget: ",
+									{ "text": "any" },
+									"): ",
+									{ "text": "boolean" }
+								]
+							},
+							"source": { "endLine": 39, "file": "src/extra.luau", "line": 37 },
+							"tags": {
+								"custom": [
+									"storage"
+								]
+							},
+							"visibility": "public"
+						},
+						{
+							"doc": "Active theme name.",
+							"id": "src/extra.luau#prop.Widget.theme",
+							"kind": "prop",
+							"name": "theme",
+							"readonly": false,
+							"source": { "endLine": 12, "file": "src/extra.luau", "line": 10 },
+							"tags": { "custom": [] },
+							"type": [
+								{ "text": "string" }
+							],
+							"visibility": "public"
+						},
+						{
+							"doc": "Owning registry; this file binds no `Tagged`, so the ref stays plain.",
+							"id": "src/extra.luau#prop.Widget.owner",
+							"kind": "prop",
+							"name": "owner",
+							"readonly": false,
+							"source": { "endLine": 16, "file": "src/extra.luau", "line": 14 },
+							"tags": { "custom": [] },
+							"type": [
+								{ "text": "Tagged" }
+							],
+							"visibility": "public"
+						},
+						{
+							"errors": [],
+							"id": "src/extra.luau#fn.Widget.describe",
+							"kind": "function",
+							"name": "describe",
+							"signature": {
+								"callee": "Widget.describe",
+								"params": [
+									{
+										"doc": "the widget to describe",
+										"name": "widget",
+										"type": [
+											{ "id": "src/Widget.luau#class.Widget", "text": "Widget" }
+										]
+									}
+								],
+								"returns": [
+									{
+										"doc": "a human-readable description",
+										"type": [
+											{ "text": "string" }
+										]
+									}
+								],
+								"segs": [
+									"(widget: ",
+									{ "id": "src/Widget.luau#class.Widget", "text": "Widget" },
+									")"
+								]
+							},
+							"source": { "endLine": 25, "file": "src/extra.luau", "line": 22 },
+							"tags": { "custom": [] },
+							"visibility": "public"
+						},
+						{
+							"errors": [],
+							"id": "src/extra.luau#fn.Widget.refresh",
+							"kind": "method",
+							"name": "refresh",
+							"signature": {
+								"callee": "Widget:refresh",
+								"params": [
+									{
+										"doc": "re-render even when clean\nRedraws the widget.",
+										"name": "force",
+										"type": [
+											{ "text": "boolean" }
+										]
+									}
+								],
+								"returns": [],
+								"segs": [
+									"(force: ",
+									{ "text": "boolean" },
+									")"
+								]
+							},
+							"source": { "endLine": 29, "file": "src/extra.luau", "line": 27 },
+							"tags": { "custom": [] },
+							"visibility": "public"
+						}
+					],
+					"name": "Widget",
+					"source": { "file": "src/Widget.luau", "line": 28 },
+					"tags": {
+						"custom": [
+							"ui"
+						]
+					}
+				},
+				{
+					"constructors": [],
+					"doc": "Visual skin applied to a widget (the dotted name stays whole).",
+					"id": "src/Widget.luau#class.Widget.Skin",
+					"members": [
+						{
+							"doc": "Border width in pixels.",
+							"id": "src/Widget.luau#prop.Widget.Skin.border",
+							"kind": "prop",
+							"name": "border",
+							"readonly": false,
+							"source": { "endLine": 42, "file": "src/Widget.luau", "line": 40 },
+							"tags": { "custom": [] },
+							"type": [
+								{ "text": "number" }
+							],
+							"visibility": "public"
+						}
+					],
+					"name": "Widget.Skin",
+					"source": { "endLine": 38, "file": "src/Widget.luau", "line": 37 },
+					"tags": { "custom": [] }
+				}
+			],
+			"doc": "A stateful widget.\n\n:::caution\nThe rendering pipeline is experimental.\n:::\n\n<Tabs>\n<TabItem value=\"named\" label=\"Named\">\n\n```luau\nlocal widget = Widget.new(\"panel\")\n```\n\n</TabItem>\n<TabItem value=\"blank\">\n\n```luau\nlocal widget = Widget.new(\"\")\n```\n\n</TabItem>\n</Tabs>",
+			"id": "src/Widget.luau",
+			"instancePath": [
+				"src",
+				"Widget"
+			],
+			"members": [],
+			"name": "Widget",
+			"reexports": [],
+			"source": { "file": "src/Widget.luau", "line": 1 },
+			"types": [
+				{
+					"definition": [
+						[
+							"typeof(setmetatable({} :: { name: ",
+							{ "text": "string" },
+							" }, Widget))"
+						]
+					],
+					"exported": true,
+					"generics": [],
+					"id": "src/Widget.luau#type.Widget",
+					"kind": "alias",
+					"name": "Widget",
+					"source": { "file": "src/Widget.luau", "line": 31 },
+					"tags": { "custom": [] },
+					"visibility": "public"
+				},
+				{
+					"definition": [
+						[
+							"{ id: ",
+							{ "text": "number" },
+							" }"
+						]
+					],
+					"exported": false,
+					"fields": [
+						{
+							"line": 1,
+							"name": "id",
+							"type": [
+								{ "text": "number" }
+							]
+						}
+					],
+					"generics": [],
+					"id": "src/Widget.luau#type.WidgetBase",
+					"kind": "alias",
+					"name": "WidgetBase",
+					"source": { "file": "src/Widget.luau", "line": 100 },
+					"tags": { "custom": [] },
+					"visibility": "public"
+				},
+				{
+					"definition": [
+						[
+							"{"
+						],
+						[
+							"\t--- Fired when the rename lands."
+						],
+						[
+							"\tchanged: (",
+							{ "id": "src/Widget.luau#type.Widget", "text": "Widget" },
+							") -> (),"
+						],
+						[
+							"\tsilent: ",
+							{ "text": "boolean" },
+							", -- skip events"
+						],
+						[
+							"\tvalidate: ",
+							{ "text": "boolean" },
+							","
+						],
+						[
+							"}"
+						]
+					],
+					"doc": "Options controlling a rename.",
+					"exported": true,
+					"fields": [
+						{
+							"doc": "Fired when the rename lands.",
+							"docInDisplay": true,
+							"line": 3,
+							"name": "changed",
+							"type": [
+								"(",
+								{ "id": "src/Widget.luau#type.Widget", "text": "Widget" },
+								") -> ()"
+							]
+						},
+						{
+							"doc": "skip events",
+							"docInDisplay": true,
+							"line": 4,
+							"name": "silent",
+							"type": [
+								{ "text": "boolean" }
+							]
+						},
+						{
+							"doc": "reject empty names",
+							"line": 5,
+							"name": "validate",
+							"type": [
+								{ "text": "boolean" }
+							]
+						}
+					],
+					"generics": [],
+					"id": "src/Widget.luau#type.RenameOptions",
+					"kind": "alias",
+					"name": "RenameOptions",
+					"source": { "endLine": 109, "file": "src/Widget.luau", "line": 104 },
+					"tags": { "custom": [] },
+					"visibility": "public"
+				},
+				{
+					"definition": [
+						[
+							{ "id": "src/Widget.luau#type.WidgetBase", "text": "WidgetBase" },
+							" & {"
+						],
+						[
+							"\tfrozen: ",
+							{ "text": "boolean" },
+							","
+						],
+						[
+							"\tat: ",
+							{ "text": "number" },
+							","
+						],
+						[
+							"}"
+						]
+					],
+					"doc": "A widget snapshot: base identity plus capture state.",
+					"exported": true,
+					"fields": [
+						{
+							"doc": "no further updates",
+							"line": 2,
+							"name": "frozen",
+							"type": [
+								{ "text": "boolean" }
+							]
+						},
+						{
+							"doc": "capture timestamp",
+							"line": 3,
+							"name": "at",
+							"type": [
+								{ "text": "number" }
+							]
+						}
+					],
+					"generics": [],
+					"id": "src/Widget.luau#type.Snapshot",
+					"kind": "alias",
+					"name": "Snapshot",
+					"source": { "endLine": 117, "file": "src/Widget.luau", "line": 114 },
+					"tags": { "custom": [] },
+					"visibility": "public"
+				},
+				{
+					"exported": true,
+					"fields": [
+						{
+							"doc": "the active widget",
+							"name": "widget",
+							"type": [
+								{ "id": "src/Widget.luau#type.Widget", "text": "Widget" },
+								"?"
+							]
+						},
+						{
+							"name": "locked",
+							"type": [
+								{ "text": "boolean" }
+							]
+						}
+					],
+					"generics": [],
+					"id": "src/Widget.luau#type.Manifest",
+					"kind": "interface",
+					"name": "Manifest",
+					"source": { "file": "src/Widget.luau", "line": 128 },
+					"tags": { "custom": [] },
+					"visibility": "public"
+				},
+				{
+					"doc": "Widens a widget type to its base shape.",
+					"exported": true,
+					"generics": [],
+					"id": "src/Widget.luau#type.Widen",
+					"kind": "typefunction",
+					"name": "Widen",
+					"params": [
+						"(",
+						"ty",
+						": ",
+						{ "text": "type" },
+						")"
+					],
+					"source": { "endLine": 133, "file": "src/Widget.luau", "line": 131 },
+					"tags": { "custom": [] },
+					"visibility": "public"
+				},
+				{
+					"definition": [
+						[
+							"\"idle\""
+						],
+						[
+							"\t| \"active\""
+						],
+						[
+							"\t| \"retired\""
+						]
+					],
+					"doc": "The widget's lifecycle phase.",
+					"exported": true,
+					"generics": [],
+					"id": "src/Widget.luau#type.Phase",
+					"kind": "alias",
+					"name": "Phase",
+					"source": { "endLine": 139, "file": "src/Widget.luau", "line": 136 },
+					"tags": { "custom": [] },
+					"visibility": "public"
+				},
+				{
+					"exported": true,
+					"fields": [
+						{
+							"doc": "display name",
+							"name": "name",
+							"type": [
+								{ "text": "string" }
+							]
+						},
+						{
+							"doc": "render scale",
+							"name": "scale",
+							"type": [
+								{ "text": "number" },
+								"?"
+							]
+						}
+					],
+					"generics": [],
+					"id": "src/Widget.luau#type.WidgetOptions",
+					"kind": "interface",
+					"name": "WidgetOptions",
+					"source": { "endLine": 35, "file": "src/Widget.luau", "line": 33 },
+					"tags": { "custom": [] },
+					"visibility": "public"
+				},
+				{
+					"definition": [
+						[
+							{ "text": "string" }
+						]
+					],
+					"doc": "a theme identifier",
+					"exported": true,
+					"generics": [],
+					"id": "src/extra.luau#type.ThemeName",
+					"kind": "alias",
+					"name": "ThemeName",
+					"source": { "endLine": 32, "file": "src/extra.luau", "line": 31 },
+					"tags": { "custom": [] },
+					"visibility": "public"
+				}
+			]
+		},
+		{
+			"classes": [],
+			"id": "src/extra.luau",
+			"instancePath": [
+				"src",
+				"extra"
+			],
+			"members": [],
+			"name": "extra",
+			"reexports": [],
+			"source": { "file": "src/extra.luau", "line": 1 },
+			"types": []
+		}
+	],
+	"project": {
+		"entryPoints": [
+			"src/init.luau"
+		]
+	},
+	"schemaVersion": 1
+}

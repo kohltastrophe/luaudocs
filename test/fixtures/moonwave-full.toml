@@ -1,0 +1,56 @@
+# An invented project (agnostic, per the fixture policy) carrying exactly one
+# instance of every key the converter maps, one presence for every key it
+# reports as `no equivalent:`, and one for every key it consumes silently
+# because the generated site makes it moot. Nothing here is unread: the
+# converter tests observe each mapped value in the output, each unmapped name
+# in the report, and each silent key's absence from both.
+title = "Brume"
+gitRepoUrl = "https://github.com/brume-labs/brume"
+gitSourceBranch = "trunk"
+
+changelog = false
+apiCategories = ["constructor"]
+autoSectionPath = "docs/sections"
+
+[[classOrder]]
+section = "Core"
+classes = ["Brume", "Mist"]
+
+[docusaurus]
+onBrokenLinks = "warn"
+onBrokenMarkdownLinks = "warn"
+trailingSlash = false
+favicon = "icon.svg"
+organizationName = "brume-labs"
+projectName = "brume"
+deploymentBranch = "gh-pages"
+tagline = "An invented library for exercising the converter."
+url = "https://brume-labs.github.io"
+baseUrl = "/brume/"
+
+[home]
+enabled = true
+includeReadme = true
+bannerImage = "/banner.svg"
+features = []
+
+[navbar]
+title = "BrumeNav"
+hideOnScroll = true
+
+[navbar.logo]
+alt = "Brume"
+src = "logo-light.svg"
+srcDark = "logo-dark.svg"
+
+[[navbar.items]]
+href = "https://discord.gg/brume"
+label = "Discord"
+position = "right"
+
+[footer]
+style = "dark"
+copyright = "© Brume Labs"
+
+[[footer.links]]
+title = "Community"

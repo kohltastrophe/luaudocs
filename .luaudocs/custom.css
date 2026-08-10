@@ -1,0 +1,16 @@
+/* https://github.com/vuejs/vitepress/blob/main/src/client/theme-default/styles/vars.css */
+
+:root {
+	--vp-c-brand-1: #08f;
+	--vp-c-brand-2: #06e;
+	--vp-c-brand-3: #04d;
+	--vp-c-brand-soft: #48f2;
+
+	--vp-home-hero-name-color: transparent;
+	--vp-home-hero-name-background: linear-gradient(45deg, #08f, #0f8);
+}
+
+/* Even out the tagline's line lengths instead of orphaning the last word */
+.VPHero .tagline {
+	text-wrap: balance;
+}

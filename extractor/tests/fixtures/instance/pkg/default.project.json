@@ -1,0 +1,7 @@
+{
+	"name": "PkgSource",
+	"tree": {
+		"$path": "lib",
+		"Extra": { "$path": "extra.luau" }
+	}
+}
