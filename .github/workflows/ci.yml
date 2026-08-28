@@ -37,7 +37,7 @@ jobs:
       # the Lute the extractor runs on is pinned in src/lute.ts and downloaded
       # on first use, so there is no toolchain step here to keep in sync
       - name: Cache the pinned Lute
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           # the per-user cache dir on each runner; the one that does not exist
           # is skipped, and a change to the pin misses the key on purpose
