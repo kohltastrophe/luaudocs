@@ -27,7 +27,7 @@ jobs:
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@v6
       # the exact engines floor, so the matrix proves the minimum we claim
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: "22.12"
       - uses: oven-sh/setup-bun@v2
