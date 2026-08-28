@@ -69,7 +69,7 @@ jobs:
       # one leg suffices for the badge
       - name: Upload coverage to Codecov
         if: runner.os == 'Linux'
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           files: coverage/lcov.info
           use_oidc: true
