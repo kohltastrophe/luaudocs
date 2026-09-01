@@ -41,10 +41,10 @@ jobs:
           path: |
             ~/.npm
             .luaudocs/node_modules
-          key: ${{ runner.os }}-luaudocs-0.1.0
+          key: ${{ runner.os }}-luaudocs-0.2.0
       - id: pages
         uses: actions/configure-pages@v6
-      - run: npx luaudocs@0.1.0 build --url "${{ steps.pages.outputs.base_url }}" # [!code highlight]
+      - run: npx luaudocs@0.2.0 build --url "${{ steps.pages.outputs.base_url }}" # [!code highlight]
       - uses: actions/upload-pages-artifact@v5
         with: { path: ".luaudocs/.vitepress/dist" }
       - id: deployment

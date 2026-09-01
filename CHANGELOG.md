@@ -5,7 +5,7 @@ Notable changes to LuauDocs, newest first. The format follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html): while the major
 version is 0, a minor bump may carry breaking changes.
 
-## Unreleased
+## [0.2.0] - 2026-09-01
 
 ### Added
 
@@ -205,4 +205,5 @@ First public release.
 - **Guide-only mode** (`[source] entries = []`) for projects with no Luau
   surface: the extractor never runs and no Lute is fetched.
 
+[0.2.0]: https://github.com/kohltastrophe/luaudocs/releases/tag/v0.2.0
 [0.1.0]: https://github.com/kohltastrophe/luaudocs/releases/tag/v0.1.0
