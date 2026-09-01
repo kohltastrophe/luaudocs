@@ -53,6 +53,10 @@ export interface GuideItem {
 	link?: string;
 	items?: GuideItem[];
 	order: number;
+	/** a group's configured initial state, and whether it may toggle at all;
+	 * either left unset takes the default for where the group sits */
+	collapsed?: boolean;
+	collapsible?: boolean;
 	page?: DocPage;
 	/** a leaf's source path under the guide dir: the key its trail is baked under */
 	file?: string;
@@ -121,36 +125,129 @@ function pageRoute(rel: string): string {
 	return rel.replace(/(^|\/)index\.md$/, "$1").replace(/\.md$/, "");
 }
 
+/** Declaring no position sorts last, where ties fall back to the label. */
+const UNORDERED = Number.POSITIVE_INFINITY;
+
+/** An index page leads its folder, ahead of any position a sibling declares. */
+const LEADS = Number.NEGATIVE_INFINITY;
+
+/** The sidecar a folder's group settings live in, as docusaurus (and so
+ * moonwave) spelled it. */
+export const CATEGORY_FILES = ["_category_.json", "_category_.yml", "_category_.yaml"];
+
+/** The keys read out of one, for the moonwave converter to report the rest. */
+export const CATEGORY_KEYS = ["label", "position", "collapsed", "collapsible"] as const;
+type CategoryKey = (typeof CATEGORY_KEYS)[number];
+
+/**
+ * A sidecar's top-level keys. The YAML spelling is read as the flat map it is,
+ * each key through the frontmatter reader, so a nested value (a docusaurus
+ * category `link`) is a key with nothing to read. A file that does not parse
+ * is a typo in the user's own configuration, so it fails with its name rather
+ * than ordering the sidebar by accident.
+ */
+export function parseCategory(file: string, text: string): Record<string, unknown> {
+	if (!file.endsWith(".json")) {
+		const record: Record<string, unknown> = {};
+		for (const [, key] of text.matchAll(/^([A-Za-z_][\w-]*):/gm)) {
+			record[key!] = field(text, key!);
+		}
+		return record;
+	}
+	let data: unknown;
+	try {
+		data = JSON.parse(text);
+	} catch (error) {
+		throw new Error(`${file}: ${error instanceof Error ? error.message : String(error)}`);
+	}
+	if (typeof data !== "object" || data === null || Array.isArray(data)) {
+		throw new Error(`${file}: expected an object of sidebar keys`);
+	}
+	return data as Record<string, unknown>;
+}
+
+/**
+ * The position a source declares: any number docusaurus accepts, so a
+ * migrated `2.5` still slots between 2 and 3. Anything else sorts as if
+ * unset: `Number("high")` is NaN, which would misplace the item among the
+ * ones that did declare a position.
+ */
+function declaredOrder(declared: string | undefined): number {
+	return /^-?\d+(\.\d+)?$/.test(declared ?? "") ? Number(declared) : UNORDERED;
+}
+
+/** A YAML boolean as YAML reads it: docusaurus accepted `True` in these files. */
+function flag(value: string | undefined): boolean | undefined {
+	const lower = value?.toLowerCase();
+	return lower === "true" ? true : lower === "false" ? false : undefined;
+}
+
 /** One guide page, with the ordering key frontmatter can override. */
 function guideEntry(abs: string, rel: string): GuideItem {
 	const text = readFileSync(abs, "utf8");
-	// a non-numeric value sorts as if unset: `Number("")` is 0 and
-	// `Number("high")` is NaN, either of which would misplace the page among
-	// the ones that did declare a position
-	const declared = field(frontmatter(text), "sidebar_position|order");
-	const order = /^\d+$/.test(declared ?? "") ? Number(declared) : Number.NaN;
 	const page = docPage(text, abs, "/guide/" + pageRoute(rel));
+	// an index page is the landing page of the folder it sits in, so it leads
+	// that group; its own position places the folder, not the page
+	const order =
+		basename(abs) === "index.md"
+			? LEADS
+			: declaredOrder(field(frontmatter(text), "sidebar_position|order"));
+	return { text: page.title, link: page.link, order, page, file: rel };
+}
+
+/**
+ * A subdirectory's group entry, configured by the `_category_` sidecar beside
+ * its pages or by the index.md that *is* the folder, the sidecar winning key
+ * by key. `label` is the sidecar's alone: an index page's title names that
+ * page, which leads the group, rather than naming the group.
+ */
+function folderEntry(dir: string, name: string, items: GuideItem[]): GuideItem {
+	const file = CATEGORY_FILES.map((base) => join(dir, base)).find((path) => existsSync(path));
+	const sidecar = file === undefined ? {} : parseCategory(file, readFileSync(file, "utf8"));
+	const scalar = (key: CategoryKey): string | undefined => {
+		const value = sidecar[key];
+		// a structured value (a docusaurus category `link`) means nothing
+		// here, and `typeof null` covers the null case with it
+		return value !== undefined && typeof value !== "object" ? String(value) : undefined;
+	};
+	// the index page's frontmatter, from the walk that already read it
+	const index = items.find((item) => item.file?.endsWith("/index.md"));
+	const own = index?.page === undefined ? "" : frontmatter(index.page.text);
+	const read = (key: CategoryKey, ownKey: string = key): string | undefined =>
+		scalar(key) ?? field(own, ownKey);
 	return {
-		text: page.title,
-		link: page.link,
-		order: Number.isFinite(order) ? order : 999,
-		page,
-		file: rel,
+		text: scalar("label") ?? humanize(name),
+		items,
+		order: declaredOrder(read("position", "sidebar_position|order")),
+		collapsed: flag(read("collapsed")),
+		collapsible: flag(read("collapsible")),
 	};
 }
 
-/** Guide pages sorted by frontmatter order then label; subdirectories nest. */
+/**
+ * What the guide walk and the VitePress build both leave out: a folder or page
+ * whose name starts with an underscore, the convention docusaurus (and so
+ * moonwave) reads for partials and drafts. The build must skip them too, or
+ * an unlisted page would still be a route and a search hit.
+ */
+const GUIDE_EXCLUDE = ["guide/**/_*.md", "guide/**/_*/**"];
+
+/**
+ * Guide pages sorted by frontmatter order then label; subdirectories nest.
+ * Each folder sorts its own children, so a position is only ever read against
+ * its siblings and a subdirectory numbers from 1 like the pages beside it.
+ */
 function guideItems(dir: string, prefix: string): GuideItem[] {
 	const items: GuideItem[] = [];
 	for (const entry of readdirSync(dir, { withFileTypes: true })) {
+		if (entry.name.startsWith("_")) {
+			continue;
+		}
 		if (entry.isDirectory()) {
-			const children = guideItems(join(dir, entry.name), `${prefix}${entry.name}/`);
+			const sub = join(dir, entry.name);
+			const children = guideItems(sub, `${prefix}${entry.name}/`);
 			if (children.length > 0) {
-				items.push({
-					text: humanize(entry.name),
-					items: children,
-					order: Math.min(...children.map((child) => child.order)),
-				});
+				items.push(folderEntry(sub, entry.name, children));
 			}
 		} else if (entry.name.endsWith(".md")) {
 			items.push(guideEntry(join(dir, entry.name), prefix + entry.name));
@@ -236,15 +333,38 @@ export function derivedNav(
 	];
 }
 
-/** The guide sidebar: only text/link/items reach the site config. */
+/**
+ * A group's baked `collapsed` key. VitePress reads a group carrying none as
+ * one that never collapses, which is what `collapsible: false` asks for and
+ * what a section heading the sidebar (`top`) gets unless it declares either
+ * key; a nested group nothing configures is collapsible, and open.
+ */
+function collapsedKey(item: GuideItem, top: boolean): { collapsed?: boolean } {
+	const collapsible = item.collapsible ?? (!top || item.collapsed !== undefined);
+	return collapsible ? { collapsed: item.collapsed ?? false } : {};
+}
+
+/**
+ * The guide sidebar: only text/link/items reach the site config. The pages
+ * sit under one "Guide" section, unless `guide/` holds nothing but folders:
+ * then each folder heads a section of its own, since a lone "Guide" heading
+ * over a column of groups would say nothing the navbar entry does not.
+ */
 function guideSidebarItems(guides: GuideItem[]): SidebarItem[] {
-	const strip = (items: GuideItem[]): SidebarItem[] =>
-		items.map(({ text, link, items: children }) => ({
-			text,
-			...(link !== undefined ? { link } : {}),
-			...(children !== undefined ? { collapsed: false, items: strip(children) } : {}),
+	const strip = (items: GuideItem[], top: boolean): SidebarItem[] =>
+		items.map((item) => ({
+			text: item.text,
+			...(item.link !== undefined ? { link: item.link } : {}),
+			...(item.items !== undefined
+				? { ...collapsedKey(item, top), items: strip(item.items, false) }
+				: {}),
 		}));
-	return guides.length > 0 ? [{ text: "Guide", items: strip(guides) }] : [];
+	if (guides.length === 0) {
+		return [];
+	}
+	return guides.every((item) => item.items !== undefined)
+		? strip(guides, true)
+		: [{ text: "Guide", items: strip(guides, false) }];
 }
 
 const HOME: TrailSegment = { text: "Home", link: "/" };
@@ -395,6 +515,7 @@ function renderConfigMts(
 			: []),
 		"\tcleanUrls: true,",
 		"\tlastUpdated: true,",
+		`\tsrcExclude: ${JSON.stringify(GUIDE_EXCLUDE)},`,
 		...(base !== undefined ? [`\tbase: ${JSON.stringify(base)},`] : []),
 		...(docsUrl ? [`\tsitemap: { hostname: ${JSON.stringify(docsUrl)} },`] : []),
 		`\thead: ${inlined(head, 1)},`,

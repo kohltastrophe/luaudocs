@@ -1,7 +1,7 @@
 ---
 title: Tags
 description: The complete tag vocabulary. Every tag is an override; none is required.
-sidebar_position: 9
+sidebar_position: 2
 ---
 
 # Tags

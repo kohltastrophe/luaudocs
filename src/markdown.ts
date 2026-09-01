@@ -219,7 +219,9 @@ export function stripFrontmatter(text: string): string {
  * blank so a top-level read cannot match a nested one.
  */
 export function frontmatterField(block: string, key: string, indent = ""): string | undefined {
-	const raw = block.match(new RegExp(`^${indent}(?:${key}):\\s*(.+)$`, "m"))?.[1]?.trim();
+	// the value stays on the key's line: `\s*` would cross a newline and
+	// hand a blank key the line below it
+	const raw = block.match(new RegExp(`^${indent}(?:${key}):[ \\t]*(.+)$`, "m"))?.[1]?.trim();
 	if (raw === undefined) {
 		return undefined;
 	}

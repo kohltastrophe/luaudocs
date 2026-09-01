@@ -303,6 +303,10 @@ export async function runBuild(
 	context: BuildContext,
 	options?: { llms?: boolean; rendered?: RenderedModel; guides?: GuideItem[] },
 ): Promise<BuildOutcome> {
+	// one guide walk shared by the sidebar and llms.txt, so a page's title and
+	// order cannot disagree between them. It goes first: a sidecar that does
+	// not parse throws, and by then nothing has been spawned or written
+	const guides = options?.guides ?? collectGuides(context.docsDir);
 	const { model, result } = options?.rendered ?? (await renderModel(context));
 	const counts = reportDiagnostics(model, result.warnings);
 
@@ -319,9 +323,6 @@ export async function runBuild(
 	}
 	const summary = syncDir(context.apiDir, apiFiles, !hasErrors);
 
-	// one guide walk shared by the sidebar and llms.txt, so a page's title and
-	// order cannot disagree between them
-	const guides = options?.guides ?? collectGuides(context.docsDir);
 	const warnings = syncSite(context, {
 		guides,
 		apiSidebar: hasErrors ? undefined : result.sidebar,

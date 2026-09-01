@@ -44,6 +44,7 @@ Your hand-written pages come too: `docs/` lands under `guide/` and the markdown 
 - Paths reaching into `.moonwave/static/` become root paths, matching where the static copy lands (`public/`).
 - Fence attributes are respelled: `title="init.lua"` becomes `[init.lua]`, and `showLineNumbers` becomes `:line-numbers`.
 - `sidebar_label`, `sidebar_position`, and `description` frontmatter already means the same thing here (see [the guides sidebar](/guide/configuration#the-guides-sidebar)) and carries over untouched.
+- `_category_.json` and `_category_.yml` copy across and go on configuring their folders: `label`, `position`, `collapsed`, and `collapsible` are read here too. Any other key in one (`link`, `className`) is inert and named in the report, and a category setting no `collapsed` starts open here.
 - Images and other files sitting beside the pages copy verbatim.
 - Pages marked `draft` or `unlisted` stay unpublished, as Moonwave had them, and are named in the report. A `slug` or `id` override is flagged too: URLs here follow the file path.
 
@@ -62,11 +63,10 @@ See [Reference: Markup](/guide/reference/markup) for how the last two render.
 
 Whatever cannot convert is named in the report rather than guessed at. Each of these takes a line or two:
 
-- **`_category_.json` (or `.yml`).** Sidebar groups take their folder's name here, and pages order by their own `sidebar_position`, so fold each file's label and position into the pages themselves.
 - **Leftover components.** A theme component the conversion cannot express (`<TOCInline>`, say) is reported per page and left in place; delete it or rewrite it as markdown.
 - **Leftover styling.** An `--ifm-*` variable outside the rename table survives in `custom.css` as written and is reported; find its [VitePress counterpart](https://vitepress.dev/guide/extending-default-theme) or drop the rule.
 - **The blog and React pages.** `blog/` and the `.js`/`.html` files under `pages/` have no equivalent in the generated site.
 
 ## What has no equivalent
 
-`classOrder`, `apiCategories`, and `autoSectionPath` have nothing to port to. The sidebar here comes from [access paths](/guide/how-it-works#access-paths-not-folders) rather than a pinned section list: to change it, change what your library exposes. The same goes for a pinned `.moonwave/sidebars.js`: the guide sidebar is derived from the pages and their `sidebar_position`.
+`classOrder`, `apiCategories`, and `autoSectionPath` have nothing to port to. The sidebar here comes from [access paths](/guide/how-it-works#access-paths-not-folders) rather than a pinned section list: to change it, change what your library exposes. The same goes for a pinned `.moonwave/sidebars.js`: the guide sidebar is derived from the pages, their `sidebar_position`, and the `_category_` files beside them.

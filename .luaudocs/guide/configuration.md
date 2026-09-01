@@ -125,7 +125,44 @@ description: One-line summary # optional; else the first sentence of the page
 ---
 ```
 
+A position is read against the page's siblings alone, so every folder numbers from 1: the pages in `guide/reference/` order among themselves, not against the pages sitting beside that folder. A page declaring no position sorts after the ones that do, by title. An `index.md` leads the folder it sits in whatever the positions around it say, `guide/index.md` included.
+
 `description` never reaches the sidebar. It is the page's summary in `llms.txt`, taken verbatim.
+
+A folder or page whose name starts with an underscore (`_drafts/`, `_partial.md`) is left out entirely: not in the sidebar, not built as a page, not in search or `llms.txt`. That is where an unfinished page or an `<!--@include: -->` partial lives, as in Docusaurus.
+
+The pages sit under one **Guide** heading. When `guide/` holds nothing but folders, that heading is dropped and each folder heads a section of its own, so a site organized entirely into folders reads as those sections rather than as one group of groups. A folder heading a section has no toggle unless its [group settings](#group-settings) set `collapsed` or `collapsible`.
+
+### Group settings
+
+A folder is configured by a `_category_.json` (or `_category_.yml`) sitting beside its pages, the same sidecar Docusaurus and Moonwave read:
+
+```json
+{
+	"label": "API Reference",
+	"position": 3,
+	"collapsed": true
+}
+```
+
+- **`label`** names the group. Without it the folder name is humanized, so `reference/` reads as "Reference".
+- **`position`** places the group among its siblings, and nothing else: the pages inside it still number from 1. Any number Docusaurus accepts works, `2.5` included.
+- **`collapsed`** starts the group closed. Groups start open.
+- **`collapsible`** set to `false` drops the toggle entirely: the group is always open, and a `collapsed` beside it does nothing.
+
+A folder with an `index.md`, the page that serves at the folder's own address (`/guide/reference/`), can put `sidebar_position`, `collapsed`, and `collapsible` in that page's frontmatter instead, which saves a file when the folder already has a landing page:
+
+```yaml
+---
+title: Overview
+sidebar_position: 3
+collapsed: true
+---
+```
+
+The sidecar outranks it key by key, and each reads its own spelling: `position` in the sidecar, `sidebar_position` on the page. `label` is the sidecar's alone: an index page's `title` names the page, which leads its own group, rather than naming the group.
+
+A folder configured by neither takes the folder name, sorts last, and starts open. A `_category_.json` that does not parse fails the build, named, rather than quietly ordering nothing.
 
 ## Styling
 

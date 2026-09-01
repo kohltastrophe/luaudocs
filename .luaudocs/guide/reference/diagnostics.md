@@ -1,7 +1,7 @@
 ---
 title: Diagnostics
 description: Every diagnostic code LuauDocs can emit, and what each severity does to your build.
-sidebar_position: 11
+sidebar_position: 4
 ---
 
 # Diagnostics

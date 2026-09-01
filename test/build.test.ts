@@ -8,7 +8,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { syncDir } from "../src/build";
+import { createContext, runBuild, syncDir } from "../src/build";
 import { makeTempDirFactory } from "./helpers";
 
 const tempDir = makeTempDirFactory("luaudocs-sync-");
@@ -106,5 +106,21 @@ describe("syncDir", () => {
 		const dir = join(tempDir(), "never");
 		syncDir(dir, new Map());
 		expect(existsSync(dir)).toBe(false);
+	});
+});
+
+describe("runBuild", () => {
+	it("walks the guides before it writes, so a bad sidecar leaves api/ as it was", async () => {
+		const dir = tempDir();
+		// no sources: the extractor never runs, and the api/ sweep would
+		// otherwise delete the stale page below
+		seed(dir, {
+			"luaudocs.toml": "[source]\nentries = []\n",
+			".luaudocs/api/stale.md": "old\n",
+			".luaudocs/guide/reference/_category_.json": '{ "label": "Reference", }\n',
+			".luaudocs/guide/reference/cli.md": "# CLI\n",
+		});
+		await expect(runBuild(createContext(dir))).rejects.toThrow(/_category_\.json/);
+		expect(existsSync(join(dir, ".luaudocs", "api", "stale.md"))).toBe(true);
 	});
 });

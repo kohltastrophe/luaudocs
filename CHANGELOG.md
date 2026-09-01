@@ -5,6 +5,57 @@ Notable changes to LuauDocs, newest first. The format follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html): while the major
 version is 0, a minor bump may carry breaking changes.
 
+## Unreleased
+
+### Added
+
+- **`_category_` sidebar sidecars for guide folders.** A `_category_.json`
+  (or `_category_.yml`) beside a folder's pages names, places, and collapses
+  the group it becomes, reading the `label`, `position`, `collapsed`, and
+  `collapsible` that Docusaurus and Moonwave already wrote there. Setting
+  `collapsible` to `false` drops the toggle for a group that is always open.
+  A folder with an `index.md` can put `sidebar_position`, `collapsed`, and
+  `collapsible` in that page's frontmatter instead, and the sidecar outranks
+  it key by key. A position is any number Docusaurus accepts, so a migrated
+  `2.5` still slots between 2 and 3. A sidecar that does not parse fails the
+  build, named. `init --from-moonwave` now copies these files across instead
+  of reporting them as unportable, naming only the keys the sidebar does not
+  read (`link`, `className`); one that does not parse aborts the conversion
+  before anything is written, as a malformed `moonwave.toml` does.
+- **Underscore-prefixed guide folders and pages are left out**, as Docusaurus
+  leaves them out: not in the sidebar, not built, not in search or `llms.txt`.
+  A `_drafts/` folder or a `_partial.md` for `<!--@include: -->` no longer
+  lists itself.
+
+### Changed
+
+- **`sidebar_position` is read against a page's siblings alone**, so the pages
+  in a subdirectory number from 1 rather than continuing the count outside it.
+  A group used to take the lowest position among its children, which meant
+  placing a folder required numbering its pages in the parent's sequence; a
+  group is now placed by its own `_category_` file or `index.md`, and one that
+  declares no position sorts last. **A site that relied on the old behavior
+  should give each folder a `_category_.json` carrying the position its pages
+  used to imply.**
+- **An `index.md` leads the folder it sits in**, ahead of any position a
+  sibling declares, and at the top of `guide/` too: a `guide/index.md` now
+  opens the Guide sidebar whatever `sidebar_position` it carries, where it
+  used to sort by that position like any other page. An index page's position
+  places its folder among the folder's siblings, so on the top-level one it
+  places nothing.
+- **A guide folder heads its own sidebar section when nothing sits loose.**
+  When `guide/` holds only folders, the single "Guide" heading over them is
+  dropped and each folder becomes a top-level section, so a site organized
+  entirely into folders no longer reads as one group of groups. A section
+  head has no toggle unless its `_category_` file or `index.md` sets
+  `collapsed` or `collapsible`. A `guide/` with any page directly inside it
+  keeps the "Guide" heading it had.
+
+### Fixed
+
+- A frontmatter key left blank (`title:` on a line of its own) no longer
+  reads the line below it as its value.
+
 ## [0.1.0] - 2026-08-28
 
 First public release.

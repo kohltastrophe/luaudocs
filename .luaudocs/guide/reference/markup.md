@@ -1,7 +1,7 @@
 ---
 title: Markup
 description: Admonitions, tabs, badges, and inline highlighting, in doc comments and guide pages alike.
-sidebar_position: 10
+sidebar_position: 3
 ---
 
 # Markup
