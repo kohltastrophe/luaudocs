@@ -73,4 +73,4 @@ Any features that cannot be converted automatically are listed in the migration 
 
 ## What has no equivalent
 
-`classOrder`, `apiCategories`, and `autoSectionPath` have no direct equivalents in LuauDocs. The sidebar here comes from [access paths](/guide/how-it-works#access-paths-not-folders) rather than a pinned section list: to change it, change what your library exposes. The same goes for a pinned `.moonwave/sidebars.js`: the guide sidebar is derived from the pages, their `sidebar_position`.
+`classOrder`, `apiCategories`, and `autoSectionPath` have no direct equivalents in LuauDocs. The sidebar here comes from [access paths](/guide/how-it-works#access-paths-not-folders) rather than a pinned section list: to change it, change what your library exposes. The same goes for a pinned `.moonwave/sidebars.js`: the guide sidebar is derived from the pages, their `sidebar_position`, and the `_category_` files beside them.

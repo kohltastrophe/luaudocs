@@ -1,7 +1,7 @@
 ---
 title: CLI
 description: Every luaudocs command and flag.
-sidebar_position: 8
+sidebar_position: 1
 ---
 
 # CLI

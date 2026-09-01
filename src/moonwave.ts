@@ -28,7 +28,14 @@ import {
 	rewriteTargets,
 	splitFences,
 } from "./markdown";
-import { derivedNav, heroActions, homeLayoutPage } from "./site";
+import {
+	CATEGORY_FILES,
+	CATEGORY_KEYS,
+	derivedNav,
+	heroActions,
+	homeLayoutPage,
+	parseCategory,
+} from "./site";
 
 /*
  * ------------------------------------------------------------------ the config
@@ -344,7 +351,8 @@ const PAGE_EXTENSION = /\.mdx?$/;
  * written (init owns the write protocol). docs/ pages land under guide/,
  * where the sidebar walk reads the sidebar_position frontmatter they already
  * carry; pages/ markdown lands at the docs root, standalone at its old path;
- * anything else under either folder (co-located images) copies verbatim, and
+ * anything else under either folder (co-located images, the `_category_`
+ * sidecars that still configure their folders) copies verbatim, and
  * .moonwave/custom.css arrives with the known Infima renames done. Draft and
  * unlisted pages stay behind (moonwave did not publish them); blog/, React
  * pages, and a pinned sidebars.js have nothing to convert to.
@@ -352,7 +360,6 @@ const PAGE_EXTENSION = /\.mdx?$/;
 export function collectMoonwavePages(projectDir: string): MoonwavePages {
 	const files: MoonwavePage[] = [];
 	const checkByHand: string[] = [];
-	const categories: string[] = [];
 	const reactPages: string[] = [];
 	const apiPages: string[] = [];
 	const drafts: string[] = [];
@@ -386,12 +393,25 @@ export function collectMoonwavePages(projectDir: string): MoonwavePages {
 	};
 
 	for (const { abs, rel } of filesUnder(join(projectDir, "docs"))) {
-		if (/^_category_\.(?:json|ya?ml)$/.test(basename(rel))) {
-			categories.push(`docs/${rel}`);
-		} else if (PAGE_EXTENSION.test(rel)) {
+		if (PAGE_EXTENSION.test(rel)) {
 			convert(abs, `docs/${rel}`, `guide/${rel}`);
-		} else {
-			files.push({ destRel: `guide/${rel}`, content: readFileSync(abs) });
+			continue;
+		}
+		const content = readFileSync(abs);
+		files.push({ destRel: `guide/${rel}`, content });
+		// the sidecar keeps configuring its folder here, so it copies like any
+		// other file; only the keys the sidebar does not read (`link`,
+		// `className`, the rest of docusaurus's category options) need a look.
+		// One that does not parse throws here, before anything is written.
+		if (CATEGORY_FILES.includes(basename(rel))) {
+			const extra = Object.keys(
+				parseCategory(`docs/${rel}`, content.toString("utf8")),
+			).filter((key) => !(CATEGORY_KEYS as readonly string[]).includes(key));
+			if (extra.length > 0) {
+				checkByHand.push(
+					`  check by hand: guide/${rel} sets ${extra.join(", ")}, which the sidebar does not read`,
+				);
+			}
 		}
 	}
 
@@ -421,11 +441,6 @@ export function collectMoonwavePages(projectDir: string): MoonwavePages {
 	}
 
 	const report: string[] = [];
-	if (categories.length > 0) {
-		report.push(
-			`  no equivalent: ${categories.join(", ")} (groups take the folder name; pages order by sidebar_position)`,
-		);
-	}
 	if (reactPages.length > 0) {
 		report.push(`  no equivalent: ${reactPages.join(", ")} (only markdown pages convert)`);
 	}

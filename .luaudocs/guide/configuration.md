@@ -126,6 +126,45 @@ description: One-line summary # optional; else the first sentence of the page
 ---
 ```
 
+A position is read against the page's siblings alone, so every folder numbers from 1: the pages in `guide/reference/` order among themselves, not against the pages sitting beside that folder. A page declaring no position sorts after the ones that do, by title. An `index.md` leads the folder it sits in whatever the positions around it say, `guide/index.md` included.
+
+`description` never reaches the sidebar. It is the page's summary in `llms.txt`, taken verbatim.
+
+A folder or page whose name starts with an underscore (`_drafts/`, `_partial.md`) is left out entirely: not in the sidebar, not built as a page, not in search or `llms.txt`. That is where an unfinished page or an `<!--@include: -->` partial lives, as in Docusaurus.
+
+The pages sit under one **Guide** heading. When `guide/` contains only subfolders, the top-level Guide heading is omitted and each folder becomes its own distinct section. A section header has no toggle unless its [group settings](#group-settings) specify `collapsed` or `collapsible`.
+
+### Group settings
+
+A folder is configured by a `_category_.json` (or `.yml`, or `.yaml`) sitting beside its pages, the same sidecar Docusaurus and Moonwave read:
+
+```json
+{
+	"label": "API Reference",
+	"position": 3,
+	"collapsed": true
+}
+```
+
+- **`label`** names the group. Without it, the folder name is converted to title case (e.g., `reference/` becomes "Reference").
+- **`position`** places the group among its siblings. Any number Docusaurus accepts works, `2.5` included.
+- **`collapsed`** starts the group closed. Groups start open.
+- **`collapsible`** set to `false` drops the toggle entirely: the group is always open, and a `collapsed` beside it does nothing.
+
+A folder with an `index.md`, the page that serves at the folder's own address (`/guide/reference/`), can put `sidebar_position`, `collapsed`, and `collapsible` in that page's frontmatter instead, eliminating the need for a separate `_category_.json` when the folder already has a landing page:
+
+```yaml
+---
+title: Overview
+sidebar_position: 3
+collapsed: true
+---
+```
+
+When both set a key, the sidecar wins. There is no frontmatter `label`: an index page's `title` names the page, not the group.
+
+A `_category_.json` that does not parse fails the build.
+
 ## Styling
 
 `init` scaffolds `.luaudocs/custom.css`, and every page loads it. Override brand colors, the hero gradient, or any [default-theme variable](https://vitepress.dev/guide/extending-default-theme) there. Delete the file and the next build stops loading it.

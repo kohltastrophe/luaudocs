@@ -569,7 +569,7 @@ describe("init --from-moonwave", () => {
 		);
 		writeFileSync(
 			join(dir, "docs", "tutorial", "_category_.json"),
-			'{ "label": "Tutorial", "position": 2 }\n',
+			'{ "label": "Tutorial", "position": 2, "className": "tutorial" }\n',
 		);
 		writeFileSync(
 			join(dir, "docs", "tutorial", "setup.mdx"),
@@ -618,11 +618,14 @@ describe("init --from-moonwave", () => {
 
 		const setup = readFileSync(join(docsDir, "guide", "tutorial", "setup.md"), "utf8");
 		expect(setup).toContain("[intro](../intro.md)");
-		// co-located assets copy byte-for-byte; _category_.json does not copy
+		// co-located assets copy byte-for-byte, and so does the sidecar, which
+		// goes on configuring its folder here
 		expect(readFileSync(join(docsDir, "guide", "tutorial", "wiring.png"))).toEqual(
 			Buffer.from([137, 80, 78, 71, 0]),
 		);
-		expect(existsSync(join(docsDir, "guide", "tutorial", "_category_.json"))).toBe(false);
+		expect(readFileSync(join(docsDir, "guide", "tutorial", "_category_.json"), "utf8")).toBe(
+			'{ "label": "Tutorial", "position": 2, "className": "tutorial" }\n',
+		);
 
 		// pages/ markdown lands at the docs root; React pages do not convert
 		expect(readFileSync(join(docsDir, "about.md"), "utf8")).toBe("# About\n");
@@ -654,7 +657,8 @@ describe("init --from-moonwave", () => {
 
 		// what did not convert is reported, one class per line
 		const report = lines.join("\n");
-		expect(report).toContain("docs/tutorial/_category_.json");
+		// the sidecar converted; only the key the sidebar cannot read is named
+		expect(report).toContain("guide/tutorial/_category_.json sets className");
 		expect(report).toContain("pages/index.js");
 		expect(report).toContain("blog/");
 		expect(report).toContain(".moonwave/sidebars.js");
@@ -662,6 +666,24 @@ describe("init --from-moonwave", () => {
 		expect(report).toContain("custom.css still uses --ifm-color-primary-lightest");
 		expect(report).toContain("guide/tutorial/setup.md sets slug/id");
 		expect(report).toContain("guide/tutorial/setup.md still uses <TOCInline>");
+	});
+
+	it("aborts on a sidecar that does not parse, before anything is written", async () => {
+		const dir = tempDir();
+		writeFileSync(join(dir, "moonwave.toml"), 'title = "X"\n');
+		mkdirSync(join(dir, "docs", "tutorial"), { recursive: true });
+		writeFileSync(join(dir, "docs", "tutorial", "intro.md"), "# Intro\n");
+		writeFileSync(
+			join(dir, "docs", "tutorial", "_category_.json"),
+			'{ "label": "Tutorial", "position": 2, }\n',
+		);
+		// the same policy as a malformed moonwave.toml: a clean tree, named
+		// file, rather than converted pages with no config beside them
+		await expect(initProject({ targetDir: dir, fromMoonwave: true })).rejects.toThrow(
+			/docs\/tutorial\/_category_\.json/,
+		);
+		expect(existsSync(join(dir, ".luaudocs"))).toBe(false);
+		expect(existsSync(join(dir, "luaudocs.toml"))).toBe(false);
 	});
 
 	// moonwave's homepage was generated from config; its branding comes back

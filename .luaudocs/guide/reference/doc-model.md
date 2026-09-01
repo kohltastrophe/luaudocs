@@ -1,7 +1,7 @@
 ---
 title: Doc Model
 description: The JSON LuauDocs extracts from your source, and how to consume it from your own tooling.
-sidebar_position: 12
+sidebar_position: 5
 ---
 
 # Doc Model

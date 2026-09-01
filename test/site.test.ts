@@ -392,18 +392,257 @@ describe("build --url", () => {
 	});
 });
 
-describe("page trails", () => {
-	/** The guide tree as it reaches the trail builder, from files on disk. */
-	function guidesOf(files: Record<string, string>): GuideItem[] {
-		const dir = tempDir();
-		for (const [rel, text] of Object.entries(files)) {
-			const abs = join(dir, ".luaudocs", "guide", rel);
-			mkdirSync(dirname(abs), { recursive: true });
-			writeFileSync(abs, text);
-		}
-		return collectGuides(join(dir, ".luaudocs"));
+/** A guide tree on disk, keyed by path under `<docs>/guide/`. */
+function writeGuides(docsDir: string, files: Record<string, string>): void {
+	for (const [rel, text] of Object.entries(files)) {
+		const abs = join(docsDir, "guide", rel);
+		mkdirSync(dirname(abs), { recursive: true });
+		writeFileSync(abs, text);
+	}
+}
+
+/** That tree as the sidebar walk and the trail builder read it. */
+function guidesOf(files: Record<string, string>): GuideItem[] {
+	const docsDir = join(tempDir(), ".luaudocs");
+	writeGuides(docsDir, files);
+	return collectGuides(docsDir);
+}
+
+describe("the guides sidebar", () => {
+	/** A page carrying only the frontmatter the sidebar reads. */
+	function page(title: string, ...keys: string[]): string {
+		return ["---", `title: ${title}`, ...keys, "---", "", `The ${title} page.`, ""].join("\n");
 	}
 
+	/** Titles in sidebar order, a group written `Folder [child, child]`. */
+	function outline(items: GuideItem[]): string[] {
+		return items.map((item) =>
+			item.items ? `${item.text} [${outline(item.items).join(", ")}]` : item.text,
+		);
+	}
+
+	/** The baked guide sidebar of a project holding these guide files. */
+	function bakedSidebar(files: Record<string, string>): string {
+		const { dir, docsDir } = project();
+		writeGuides(docsDir, files);
+		sync(dir, API_SIDEBAR);
+		return readFileSync(join(docsDir, ".vitepress", "generated", "sidebar.ts"), "utf8");
+	}
+
+	it("reads a position against the siblings, never the whole tree", () => {
+		const guides = guidesOf({
+			"intro.md": page("Intro", "sidebar_position: 1"),
+			"deploying.md": page("Deploying", "sidebar_position: 3"),
+			"reference/index.md": page("Overview", "sidebar_position: 2"),
+			"reference/cli.md": page("CLI", "sidebar_position: 1"),
+			"reference/tags.md": page("Tags", "sidebar_position: 2"),
+		});
+		// the group sits at 2 because its own index.md says so: the pages inside
+		// it number from 1 like the pages beside it, and that 1 never pulls the
+		// group to the front
+		expect(outline(guides)).toEqual(["Intro", "Reference [Overview, CLI, Tags]", "Deploying"]);
+	});
+
+	it("leads a group with its index page, whatever positions it and its siblings declare", () => {
+		const guides = guidesOf({
+			"reference/index.md": page("Overview", "sidebar_position: 9"),
+			"reference/aardvark.md": page("Aardvark", "sidebar_position: 0"),
+			"reference/cli.md": page("CLI", "sidebar_position: 1"),
+		});
+		expect(outline(guides)).toEqual(["Reference [Overview, Aardvark, CLI]"]);
+	});
+
+	it("leads the top level with guide/index.md the same way", () => {
+		const guides = guidesOf({
+			"index.md": page("Overview", "sidebar_position: 9"),
+			"getting-started.md": page("Getting Started", "sidebar_position: 1"),
+		});
+		// the position on a top-level index page places nothing: there is no
+		// folder for it to place, and the page itself leads regardless
+		expect(outline(guides)).toEqual(["Overview", "Getting Started"]);
+		expect(guides[0]!.link).toBe("/guide/");
+	});
+
+	it("accepts any number docusaurus does as a position", () => {
+		const guides = guidesOf({
+			"two.md": page("Two", "sidebar_position: 2"),
+			"three.md": page("Three", "sidebar_position: 3"),
+			"between/_category_.json": '{ "position": 2.5 }\n',
+			"between/one.md": page("One"),
+			"first/_category_.json": '{ "position": -1 }\n',
+			"first/one.md": page("One"),
+			"nowhere/_category_.json": '{ "position": "high" }\n',
+			"nowhere/one.md": page("One"),
+		});
+		// a fractional position slots between its neighbors, a negative one
+		// leads, and a word sorts as if no position were declared
+		expect(outline(guides)).toEqual([
+			"First [One]",
+			"Two",
+			"Between [One]",
+			"Three",
+			"Nowhere [One]",
+		]);
+	});
+
+	it("reads each source's own keys: position is the sidecar's, sidebar_position the page's", () => {
+		const guides = guidesOf({
+			"sidecar/_category_.json": '{ "sidebar_position": 1 }\n',
+			"sidecar/one.md": page("One"),
+			"own/index.md": page("Overview", "position: 1"),
+			"own/one.md": page("One"),
+			"placed/_category_.json": '{ "position": 2 }\n',
+			"placed/one.md": page("One"),
+		});
+		// neither stray key places its folder, so both sort last by label
+		expect(outline(guides)).toEqual(["Placed [One]", "Own [Overview, One]", "Sidecar [One]"]);
+	});
+
+	it("sorts a folder declaring no position last, as it does a page", () => {
+		const guides = guidesOf({
+			"intro.md": page("Intro", "sidebar_position: 1"),
+			"extras/one.md": page("One", "sidebar_position: 1"),
+			"zzz.md": page("Later"),
+		});
+		// both are unpositioned, so the label breaks the tie between them
+		expect(outline(guides)).toEqual(["Intro", "Extras [One]", "Later"]);
+	});
+
+	it("takes a group's label and position from the sidecar beside its pages", () => {
+		const guides = guidesOf({
+			"intro.md": page("Intro", "sidebar_position: 1"),
+			"reference/_category_.json": '{ "label": "API Reference", "position": 2 }\n',
+			"reference/cli.md": page("CLI"),
+			"zzz/_category_.json": '{ "position": 3 }\n',
+			"zzz/one.md": page("One"),
+		});
+		// the label replaces the folder name; a sidecar setting none keeps it
+		expect(outline(guides)).toEqual(["Intro", "API Reference [CLI]", "Zzz [One]"]);
+	});
+
+	it("lets the sidecar outrank the folder's index page, key by key", () => {
+		const guides = guidesOf({
+			"reference/_category_.json": '{ "position": 1 }\n',
+			"reference/index.md": page("Overview", "sidebar_position: 9", "collapsed: true"),
+			"reference/cli.md": page("CLI"),
+			"other/one.md": page("One", "sidebar_position: 1"),
+		});
+		// the position is the sidecar's; the collapsed state it leaves unset is
+		// still the index page's to give
+		expect(outline(guides)).toEqual(["Reference [Overview, CLI]", "Other [One]"]);
+		expect(guides[0]!.collapsed).toBe(true);
+	});
+
+	it("reads the yaml spelling of the sidecar the same way", () => {
+		const guides = guidesOf({
+			"reference/_category_.yml": "label: Reference Guide\nposition: 1\ncollapsed: true\n",
+			"reference/cli.md": page("CLI"),
+		});
+		expect(outline(guides)).toEqual(["Reference Guide [CLI]"]);
+		expect(guides[0]!.collapsed).toBe(true);
+	});
+
+	it("keeps a yaml value on its key's line, so a blank key reads as unset", () => {
+		const guides = guidesOf({
+			"reference/_category_.yml": "label:\nposition: 2\n",
+			"reference/cli.md": page("CLI"),
+			"intro.md": page("Intro", "sidebar_position: 1"),
+		});
+		// the blank label falls back to the folder name rather than swallowing
+		// the position line as its value, which is still read as the position
+		expect(outline(guides)).toEqual(["Intro", "Reference [CLI]"]);
+	});
+
+	it("reads the booleans in the cases YAML spells them", () => {
+		const guides = guidesOf({
+			"closed/_category_.yml": "collapsed: True\n",
+			"closed/one.md": page("One"),
+			"fixed/_category_.yml": "collapsible: False\n",
+			"fixed/one.md": page("One"),
+		});
+		expect(guides.map((item) => [item.text, item.collapsed, item.collapsible])).toEqual([
+			["Closed", true, undefined],
+			["Fixed", undefined, false],
+		]);
+	});
+
+	it("fails on a sidecar that does not parse, rather than ordering by accident", () => {
+		expect(() =>
+			guidesOf({
+				"reference/_category_.json": '{ "label": "Reference", }\n',
+				"reference/cli.md": page("CLI"),
+			}),
+		).toThrow(/_category_\.json/);
+	});
+
+	it("leaves out an underscore-prefixed folder or page, in the sidebar and the build", () => {
+		const { dir, docsDir } = project();
+		writeGuides(docsDir, {
+			"intro.md": page("Intro"),
+			"_partial.md": page("Partial"),
+			"_drafts/one.md": page("One"),
+			"reference/cli.md": page("CLI"),
+			"reference/_wip/two.md": page("Two"),
+		});
+		expect(outline(collectGuides(docsDir))).toEqual(["Intro", "Reference [CLI]"]);
+		sync(dir, API_SIDEBAR);
+		const config = readFileSync(join(docsDir, ".vitepress", "config.mts"), "utf8");
+		expect(config).toContain('srcExclude: ["guide/**/_*.md","guide/**/_*/**"]');
+	});
+
+	it("heads the pages with one Guide section, or with each folder when nothing sits loose", () => {
+		const wrapped = bakedSidebar({
+			"intro.md": page("Intro"),
+			"reference/cli.md": page("CLI"),
+		});
+		expect(wrapped).toMatch(/guideSidebar[^]*"text": "Guide",\n\t+"items"/);
+		const sections = bakedSidebar({
+			"basics/index.md": page("Basics"),
+			"basics/setup.md": page("Setup"),
+			"reference/cli.md": page("CLI"),
+		});
+		expect(sections).not.toContain('"text": "Guide"');
+		// the folders themselves are the top-level sections, in their order
+		expect(sections).toMatch(/guideSidebar[^]*= \[\n\t\{\n\t\t"text": "Basics"/);
+		expect(sections).toMatch(/\n\t\{\n\t\t"text": "Reference"/);
+	});
+
+	it("gives a folder heading its own section no toggle unless it asks for one", () => {
+		const baked = bakedSidebar({
+			"bare/one.md": page("One"),
+			"closed/_category_.json": '{ "collapsed": true }\n',
+			"closed/one.md": page("One"),
+			"open/_category_.json": '{ "collapsible": true }\n',
+			"open/one.md": page("One"),
+		});
+		expect(baked).toMatch(/"text": "Bare",\n\t+"items"/);
+		expect(baked).toMatch(/"text": "Closed",\n\t+"collapsed": true/);
+		expect(baked).toMatch(/"text": "Open",\n\t+"collapsed": false/);
+	});
+
+	it("bakes the collapsed state, and no key at all where a group never collapses", () => {
+		const baked = bakedSidebar({
+			// a loose page keeps the groups nested under the Guide heading
+			"intro.md": page("Intro"),
+			"closed/_category_.json": '{ "collapsed": true }\n',
+			"closed/one.md": page("One"),
+			"asked/index.md": page("Overview", "collapsed: true"),
+			"asked/one.md": page("One"),
+			"fixed/_category_.json": '{ "collapsible": false }\n',
+			"fixed/one.md": page("One"),
+			"bare/one.md": page("One"),
+		});
+		expect(baked).toMatch(/"text": "Closed",\n\t+"collapsed": true/);
+		expect(baked).toMatch(/"text": "Asked",\n\t+"collapsed": true/);
+		// VitePress reads a group carrying no collapsed key as one with no
+		// toggle at all, which is what collapsible: false asks for
+		expect(baked).toMatch(/"text": "Fixed",\n\t+"items"/);
+		// a group nothing configures is collapsible, and open
+		expect(baked).toMatch(/"text": "Bare",\n\t+"collapsed": false/);
+	});
+});
+
+describe("page trails", () => {
 	const HOME = { text: "Home", link: "/" };
 
 	it("hangs a guide page off Home, its folders between", () => {

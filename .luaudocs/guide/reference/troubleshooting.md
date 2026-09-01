@@ -1,7 +1,7 @@
 ---
 title: Troubleshooting
 description: The failures that arrive without a diagnostic code, and what to do about each.
-sidebar_position: 13
+sidebar_position: 6
 ---
 
 # Troubleshooting
