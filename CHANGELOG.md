@@ -58,6 +58,11 @@ version is 0, a minor bump may carry breaking changes.
   head has no toggle unless its `_category_` file or `index.md` sets
   `collapsed` or `collapsible`. A `guide/` with any page directly inside it
   keeps the "Guide" heading it had.
+- **The nested sidebar groups above the current page take the brand color**,
+  the same as the entry for the page itself. VitePress only lifted them from
+  the muted text color to the plain one, which left the open group looking
+  like every other. Section heads keep the plain color, and light only when
+  they link to the current page.
 
 ### Fixed
 

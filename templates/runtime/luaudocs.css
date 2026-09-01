@@ -254,6 +254,15 @@ html {
 	--luaudocs-realm: var(--luaudocs-plugin);
 }
 
+/* A nested group with the current page under it takes the brand color, as
+ * the page's own entry does; VitePress only lifts it to the plain text color,
+ * which every open group already has. Section heads (level 0) keep the plain
+ * color unless they are the page. The id outranks the theme's scoped rules. */
+#VPSidebarNav .VPSidebarItem.has-active:not(.level-0) > .item > .text,
+#VPSidebarNav .VPSidebarItem.has-active:not(.level-0) > .item > .link > .text {
+	color: var(--vp-c-brand-1);
+}
+
 .VPLocalSearchBox .backdrop {
 	background-color: #0008;
 	backdrop-filter: blur(4px);
