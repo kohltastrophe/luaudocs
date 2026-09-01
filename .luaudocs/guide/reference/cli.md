@@ -29,7 +29,9 @@ sidebar_position: 1
 
 `dev` rebuilds on changes to your sources, to the root files it reads (`CHANGELOG.md`, `README.md`, the Rojo project file, `.luaurc`), and to the docs directory.
 
-`luaudocs.toml` is the exception. Editing it makes `dev` exit and ask you to restart it.
+`luaudocs.toml` too: editing it reloads the config in place, re-reads whatever `[source] entries` now names, and rebuilds. A config that does not parse leaves the session running on the last one that did, so a half-typed edit costs you an error line rather than the server.
+
+Moving `[docs] dir` is the one edit that still ends the session, because the server underneath is bound to the directory it started on.
 
 ## Environment
 

@@ -29,6 +29,14 @@ version is 0, a minor bump may carry breaking changes.
 
 ### Changed
 
+- **`dev` reloads `luaudocs.toml` in place** instead of exiting and asking to
+  be restarted. The config is re-read, the watchers rebind to whatever
+  `[source] entries` now names, and the rebuilt site config is what the
+  VitePress server restarts itself on. A config that does not parse keeps the
+  session running on the last one that did, so a half-typed edit costs an
+  error line rather than the server, and so does a `luaudocs.toml` that a
+  stash or a branch switch takes away. Moving `[docs] dir` still ends the
+  session, since the server is bound to the directory it started on.
 - **`sidebar_position` is read against a page's siblings alone**, so the pages
   in a subdirectory number from 1 rather than continuing the count outside it.
   A group used to take the lowest position among its children, which meant
