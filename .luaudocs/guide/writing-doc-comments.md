@@ -6,34 +6,34 @@ sidebar_position: 3
 
 # Writing Doc Comments
 
-LuauDocs has already found your exports, their signatures, and their types. Doc comments add the prose on top: you are not declaring what exists or restating a type the annotation already carries, you are explaining what something is for.
+LuauDocs has already found your exports, their signatures, and their types. Doc comments add the prose on top: you are not declaring what exists or restating an annotated type; you are explaining what something is for.
 
 ## The three styles
 
-Write a comment block above a definition. All three spellings mean the same thing, and you can mix them freely in one file:
+Write a comment block above a definition. All three formats are functionally identical and can be mixed freely in the same file:
 
 ::: code-group
 
 ```luau [Block]
 --[[
-Creates a new Flux state with an initial value.
+Creates a state holding `initial`.
 See [State:Connect] for reacting to changes.
 ]]
-function Flux.state<T>(initialValue: T?): State.State<T>
+function Flux.state<T>(initial: T?): State.State<T>
 ```
 
 ```luau [Triple dash]
---- Creates a new Flux state with an initial value.
+--- Creates a state holding `initial`.
 --- See [State:Connect] for reacting to changes.
-function Flux.state<T>(initialValue: T?): State.State<T>
+function Flux.state<T>(initial: T?): State.State<T>
 ```
 
 ```luau [Long bracket]
 --[=[
-Creates a new Flux state with an initial value.
+Creates a state holding `initial`.
 Prose here can contain [[ and ]] freely.
 ]=]
-function Flux.state<T>(initialValue: T?): State.State<T>
+function Flux.state<T>(initial: T?): State.State<T>
 ```
 
 :::
@@ -69,7 +69,7 @@ export type Options = {
 }
 ```
 
-This applies to table-literal members and type declarations alike.
+On a table-literal member the prose renders as markdown, [references](#references-that-link-themselves) included. A type declaration's fields render inside the type's code fence instead, so their prose becomes a `-- comment` line there: plain text, with links, bold, and code spans stripped. Keep those to a short phrase.
 
 ## Documenting the module itself
 
@@ -97,18 +97,12 @@ A name in square brackets becomes a link:
 
 A bare name is looked up in your project first, then in any [`@external`](/guide/reference/tags#data) names you declared, then among Roblox names. The dotted and colon forms only ever resolve inside your project.
 
-The example library writes `see [State:Connect] for reacting to changes` in a plain doc comment, and the generated entry carries the link:
+The example library writes `see [State:Connect] for reacting to changes` in a plain doc comment, and [the generated entry](/api/Flux#state-1) carries the link.
 
-<Frame label="Generated reference" link="/api/Flux#state-1">
-
-<!--@include: @/api/Flux.md#state-1-->
-
-</Frame>
-
-A reference that resolves to nothing is left exactly as you typed it, unlinked, so a stale `[OldName]` shows up as plain text rather than a broken link. A module outranks a type sharing its name, so `[Signal]` means the Signal module even where a `type Signal` also exists. If one spelling could mean two things of equal standing (two modules both named `Defaults`), LuauDocs refuses to guess and links neither, and [tells you so](/guide/reference/diagnostics#renderer-warnings). Qualify it (`[Module.State]`) to fix that.
+A reference that resolves to nothing is left exactly as you typed it, unlinked, so a stale `[OldName]` shows up as plain text rather than a broken link. A module outranks a type sharing its name, so `[Signal]` means the Signal module even where a `type Signal` also exists. If a reference is ambiguous (such as two modules named `Defaults`), LuauDocs refuses to guess, links neither, and [emits a diagnostic warning](/guide/reference/diagnostics#renderer-warnings). Qualify it (`[Module.State]`) to fix that.
 
 ## More than prose
 
 Doc comments render the same markdown as a hand-written guide page, which includes [admonitions](/guide/reference/markup#admonitions), [tab strips](/guide/reference/markup#tabs), [frames](/guide/reference/markup#frames), [badges](/guide/reference/markup#badges), and [inline `{luau}` highlighting](/guide/reference/markup#code-highlighting).
 
-When the extractor got something wrong, or you want a member somewhere other than where the code puts it, that is what [tags](/guide/overriding-with-tags) are for.
+When inference gets something wrong, or if you want a member placed somewhere other than where the code puts it, that is what [tags](/guide/overriding-with-tags) are for.

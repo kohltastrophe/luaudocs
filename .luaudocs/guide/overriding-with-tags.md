@@ -26,7 +26,7 @@ Sends a request and waits for the response.
 function Http.get(url: string, retries: number?): Body
 ```
 
-You can write a type after the name (`@param url string -- ...`), and it replaces the annotation in the rendered signature when you do, but usually the annotation already says it. `@return` tags apply in order. If you misspell a parameter name or write more `@return` tags than the function returns values, LuauDocs [says so](/guide/reference/diagnostics#warnings) rather than rendering a lie.
+You can write a type after the name (`@param url string -- ...`), and it replaces the annotation in the rendered signature when you do, but usually the annotation already says it. `@return` tags apply in order. If you misspell a parameter name or write more `@return` tags than the function returns values, LuauDocs [emits a warning](/guide/reference/diagnostics#warnings) rather than rendering inaccurate documentation.
 
 In a multi-line signature, no tag is needed at all: a trailing comment on a parameter's line documents that parameter, the same way it documents a property or a type field.
 
@@ -37,7 +37,7 @@ function Http.get(
 ): Body
 ```
 
-An `@param` naming the same parameter outranks its trailing comment.
+An `@param` naming the same parameter overrides its trailing comment field by field: a type-only `@param retries number` replaces the type and keeps the trailing description.
 
 ## Moving a member somewhere else
 
@@ -52,7 +52,7 @@ Formats a duration for display.
 local function formatDuration(seconds: number): string
 ```
 
-`@class Name` documents a block as a class, which you need when the class is assembled in a way inference cannot follow. The other placement tags do the same for a single member or type; [Reference: Tags](/guide/reference/tags#placement) tables them.
+`@class Name` documents a block as a class, which you need when the class is assembled in a way inference cannot follow. The other placement tags do the same for a single member or type; [Reference: Tags](/guide/reference/tags#placement) lists them in full.
 
 Only one of these placement tags belongs in a block. A second one is a conflict: the first wins and the later one is dropped and reported. `@within` is a data tag rather than a placement tag, so it combines freely with any of them.
 
@@ -66,7 +66,7 @@ function M.experimentalThing() end
 - **`@ignore`** drops the item from the docs entirely, always.
 - **`@private`** marks it private, which hides it by default but renders it (badged) when you set `[api] includePrivate = true`.
 
-An explicit tag beats the [leading-underscore convention](/guide/how-it-works#private-members), so `@private` hides a member whose name has no underscore, and the convention decides only for members you never tagged.
+An explicit tag takes precedence over the [leading-underscore convention](/guide/how-it-works#private-members), so `@private` hides a member whose name has no underscore, and the convention decides only for members you never tagged.
 
 ## Adding badges
 
@@ -99,7 +99,7 @@ end
 
 </Frame>
 
-The same names remain as tags for what code cannot show: `@yields` when the waiting hides behind a function passed as a value, and `@server`, `@client`, or `@plugin` when the boundary is a convention rather than a call. A realm tag replaces the detected realm entirely, so the tag wins when they disagree. `@unreleased` and `@since` place a member in time, and `@tag name` badges anything else you want to call out. Badges render in a fixed order no matter which order you wrote them in.
+These tags remain available when runtime behavior cannot be detected statically: `@yields` when yielding occurs within a callback passed as a value, and `@server`, `@client`, or `@plugin` when realm boundaries are conventions rather than calls. A realm tag replaces the detected realm entirely, so the tag wins when they disagree. `@unreleased` and `@since` track versioning, and `@tag name` badges anything else you want to call out. Badges render in a fixed order no matter which order you wrote them in.
 
 `@deprecated` is the one that does more than badge. Writing `@deprecated 2.0 -- states are collected once nothing references them` on the example's `State:Destroy` badged the heading and added a callout under it:
 
@@ -111,6 +111,4 @@ The same names remain as tags for what code cannot show: `@yields` when the wait
 
 ## The rest
 
-The full vocabulary is in [Reference: Tags](/guide/reference/tags), including `@external` for pointing an unresolvable type name at another project's docs, and `@field` for the members of an `@interface`.
-
-Two things are true of every tag: `--` separates its description from its arguments (a single `-` works too), and an unknown `@word` is left in your prose untouched, so credits and email addresses survive.
+The full vocabulary, `@external` and `@field` included, is cataloged in [Reference: Tags](/guide/reference/tags), along with how a `-- desc` continues over several lines.

@@ -37,7 +37,7 @@ features:
     linkText: From Moonwave
   - icon: 🔌
     title: Built to be built on
-    details: Export the whole API as JSON for your own tooling, and every build ships llms.txt for your readers' AI.
+    details: Export the full API as JSON for custom tooling, with llms.txt generated automatically for AI assistants.
     link: /guide/reference/doc-model
     linkText: The doc model
 ---
@@ -61,6 +61,6 @@ end
 
 </Frame>
 
-Nothing in that frame is hand-written. The signature came from the Luau annotations, `State.State` links to [the type's own page](/api/State#state-1), and the `[State:Connect]` reference resolved itself into [a link](/api/State#connect). It is the real generated markdown, embedded straight into this page from [`examples/Flux`](https://github.com/kohltastrophe/luaudocs/tree/main/examples/Flux).
+Nothing in that frame is hand-written. The signature comes from the Luau annotations, `State.State` links to [the type's own page](/api/State#state-1), and the `[State:Connect]` reference resolves into [a link](/api/State#connect). This is real generated markdown, embedded directly into this page from [`examples/Flux`](https://github.com/kohltastrophe/luaudocs/tree/main/examples/Flux).
 
 [Browse the whole example reference →](/api/) · [Get started →](/guide/getting-started)

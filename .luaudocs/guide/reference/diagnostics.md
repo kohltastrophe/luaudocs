@@ -14,7 +14,7 @@ src/Widget.luau:42: warning[orphaned-within]: @within Panel: no class or module 
 
 Location, severity, code, message. `luaudocs build --emit-only` prints the whole list without running VitePress, and `--strict` makes it a CI gate.
 
-The codes below come from the extractor and describe your _source_, so each carries a file and a code. Two smaller families come from the renderer and the site sync instead: they are about the site as a whole rather than any one file, so they carry neither file nor code. All three count toward `--strict`.
+The codes below come from the extractor and describe your _source_, so each carries a file and a code. Two additional diagnostic categories originate from the renderer and site synchronization: because they apply to the site as a whole rather than any one file, they carry neither file nor code. All three count toward `--strict`.
 
 ## How severity is treated
 
@@ -35,7 +35,7 @@ Printed dimmed, and never affects the exit code, `--strict` included.
 | Code             | What it means                                                                                                                              |
 | :--------------- | :----------------------------------------------------------------------------------------------------------------------------------------- |
 | `parse-error`    | A file in the module graph could not be read or parsed. Usually a syntax error, or a file removed while the watcher was running.             |
-| `extract-failed` | The symbolic evaluator raised while walking a module. Please [report it](https://github.com/kohltastrophe/luaudocs/issues) with the module.  |
+| `extract-failed` | The symbolic evaluator encountered an internal error while analyzing a module. Please [report it](https://github.com/kohltastrophe/luaudocs/issues) with the module.  |
 
 ## Warnings
 
@@ -71,11 +71,11 @@ A `renderer:` prefix means extraction was fine: two things wanted one name, and 
 | Message                                        | What it means                                                                                             |
 | :--------------------------------------------- | :--------------------------------------------------------------------------------------------------------- |
 | `page name collision`                          | Two modules want one URL. The later gets a numbered slug, and its sidebar, search, and tab title carry the parent (`Defaults (Flux)`); rename one to reclaim the bare spelling. |
-| `ambiguous reference name dropped from link table` | One spelling resolves to two equal-standing targets (two modules both named `Defaults`, or `Config.get` on two pages); a module outranks a same-named type, so those pairs resolve instead of warning. Linking either would be a coin flip, so neither is linked; the warning names both targets. Qualify the reference (`[Module.State]`) or rename. |
+| `ambiguous reference name dropped from link table` | One spelling resolves to two equal-standing targets (two modules both named `Defaults`, or `Config.get` on two pages); a module outranks a same-named type, so those pairs resolve instead of warning. Because linking to either would be ambiguous, neither target is linked; the warning names both targets. Qualify the reference (`[Module.State]`) or rename. |
 
 ## Site-sync warnings
 
-Four more come from the site sync rather than the API model. They carry no prefix, because each already names the file or the `[docs]` key it is about. All four count toward `--strict`.
+Four more come from the site sync rather than the API model. Each prints as `warning: ` and its message, which names the file or the `[docs]` key it is about. All four count toward `--strict`.
 
 | Message                                                                                          | What it means                                                                                                        |
 | :----------------------------------------------------------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------- |

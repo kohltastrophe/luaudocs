@@ -24,7 +24,7 @@ renders as:
 The title is optional; without one the container is labeled with its kind.
 :::
 
-The kinds are `info`, `tip`, `warning`, `danger`, and `details`, which renders as a collapsed block that opens on click. Docusaurus spellings are rewritten: `:::note` becomes an info container, `:::caution` a warning one, and a bracket title (`:::tip[Title]`) becomes a plain one. An unrecognized kind is left exactly as you typed it.
+The kinds are `info`, `tip`, `warning`, `danger`, and `details`, which renders as a collapsed block that opens on click. Docusaurus spellings are rewritten: `:::note` becomes an info container, `:::caution` a warning one, and a bracket title (`:::tip[Title]`) becomes a plain one, on every kind but `details`. An unrecognized kind is left exactly as you typed it.
 
 ## Tabs
 

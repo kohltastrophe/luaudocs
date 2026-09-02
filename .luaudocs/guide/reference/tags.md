@@ -6,9 +6,9 @@ sidebar_position: 2
 
 # Tags
 
-Every tag corrects or extends what the extractor already inferred, and none of them is ever required. [Overriding with Tags](/guide/overriding-with-tags) covers the ones that come up in practice; the three tables below are the complete vocabulary, grouped by shape: flags take no argument, placement tags declare what a block documents, and data tags carry values and descriptions.
+Every tag corrects or extends what the extractor already inferred, and none of them is ever required. [Overriding with Tags](/guide/overriding-with-tags) covers the ones that come up in practice; the 23 tags listed below, plus [`@__index`](#tags-that-do-nothing), form the complete vocabulary. The tables group them by shape: flags take no argument, placement tags declare what a block documents, and data tags carry values and descriptions.
 
-Prose can sit before or after the tags, and a single `-` works in place of `--`. A tag that takes its own `-- desc` (`@param`, `@return`, `@error`, `@field`, `@prop`, `@type`, `@deprecated`) keeps collecting its description from the lines below it; after any other tag, trailing prose rejoins the main description.
+Prose can sit before or after the tags. A `-- desc` (a single `-` works too) continues onto the lines directly below it until a blank line; after that, and after any tag that takes no description, prose rejoins the item's own description.
 
 ## Flags
 
@@ -60,15 +60,13 @@ A second placement tag in one block is a conflict: the first wins, the later one
 | `@tag name`                | <Badge type="info" text="name" /> a badge carrying the tag's name.           |
 | `@external Name URL`       | Points an unresolvable type name at its own docs site.                       |
 
-A `-- desc` continues onto the lines directly below it, and a blank line ends it: the next paragraph belongs to the item's own description. A single `-` works in place of `--`.
-
-`@param` is also unnecessary in a [multi-line signature](/guide/overriding-with-tags#describing-parameters-and-returns), where a trailing `-- comment` on a parameter's line documents it; the tag outranks the trailer when both exist.
+`@param` is also unnecessary in a [multi-line signature](/guide/overriding-with-tags#describing-parameters-and-returns), where a trailing `-- comment` on a parameter's line documents it; when both exist the tag wins field by field, so a type-only `@param` keeps the trailing description.
 
 `@external` is the one tag that affects the whole site rather than the item it sits on: declared once, in any module, that name links wherever it appears in a signature or a `[bracket]` reference.
 
 ## Type names written in tags
 
-A type you name in a tag (`@prop x Widget`, `@return Widget`, a `.field Widget` line) links to what it names in the module where you wrote the tag: a type that module declares, or a class or module it requires. Requiring is all it takes, and a require is a require however you wrote it, so a module reached only by a table field links the same as one bound to a local:
+A type you name in a tag (`@prop x Widget`, `@return Widget`, a `.field Widget` line) links to what it names in the module where you wrote the tag: a type that module declares, or a class or module it requires. Any standard require syntax is supported: a module accessed through a table field links just as reliably as one bound to a local variable:
 
 ```luau
 local _K = {

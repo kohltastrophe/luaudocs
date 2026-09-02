@@ -6,7 +6,7 @@ sidebar_position: 1
 
 # Getting Started
 
-LuauDocs reads a Luau library and builds a documentation site from it: the exports are discovered for you, the signatures come from the annotations already in your code, and the result is a [VitePress](https://vitepress.dev) site with search, dark mode, and cross-linked types. There is nothing to tag and no config to write first.
+LuauDocs reads a Luau library and builds a documentation site from it: the exports are discovered for you, the signatures come from the annotations already in your code, and the result is a [VitePress](https://vitepress.dev) site with search, dark mode, and cross-linked types. There is nothing to tag and no configuration required upfront.
 
 ## Requirements
 
@@ -37,7 +37,7 @@ cd my-luau-library && luaudocs dev
 
 That is the whole setup. `dev` prints a localhost URL, and your API reference is already on it.
 
-You have no `luaudocs.toml`, so LuauDocs uses defaults: the site title comes from the folder name, and it reads your modules from `src/` (or `lib/`, if that is what your project has; sources elsewhere take one [`[source] entries`](/guide/configuration) line). You have no `.luaudocs/` directory either, so the build creates one and generates the entire site inside. It is safe to commit as-is: a `.gitignore` written alongside covers everything tool-generated, and [the rest is yours](/guide/configuration#which-files-are-yours).
+You have no `luaudocs.toml`, so LuauDocs uses defaults: the site title comes from the folder name, and it reads modules from `src/` and `lib/` (if your sources live elsewhere, specify them with [`[source] entries`](/guide/configuration)). Without an existing `.luaudocs/` directory, the build creates one and generates the entire site inside it. It is safe to commit as-is: an auto-generated `.gitignore` covers all build artifacts, leaving [the rest for you to author](/guide/configuration#which-files-are-yours).
 
 Leave `dev` running while you work. Edit a doc comment and the page updates in place.
 
@@ -80,14 +80,14 @@ That module's page is below, embedded from the markdown LuauDocs emitted for it:
 
 </Frame>
 
-Read what it did with the file:
+Here is how LuauDocs processed the file:
 
-- **The two required modules became pages**, badged <Badge type="info" text="Module" /> and linked. They sit beside **Flux** at the top of the sidebar, because `Flux.State` and `Flux.Util` are how a caller reaches them.
-- **`isState` is documented under the name callers use**, badged <Badge type="info" text="from State" /> so a reader can find where it actually lives.
+- **The two required modules became pages**, badged <Badge type="info" text="Module" /> and linked. They sit under **Flux** in the sidebar, matching the access paths callers use (`Flux.State` and `Flux.Util`).
+- **`isState` is documented under the name callers use**, badged <Badge type="info" text="from State" /> so readers know where it is defined.
 - **The signatures are your annotations**, with `State.State` linking to the page documenting that type.
-- **`[State:Connect]` resolved itself** into a link, because a module in the project declares it.
+- **`[State:Connect]` resolves into a link**, because a module in the project declares it.
 
-You wrote no tags and no config. LuauDocs worked all of it out from what `return Flux` evaluates to, and [How It Works](/guide/how-it-works) explains how; read it once and nothing about your sidebar will look mysterious.
+You wrote no tags and no config. LuauDocs inferred everything from what `return Flux` evaluates to, and [How It Works](/guide/how-it-works) explains how; read it once and nothing about your sidebar will look mysterious.
 
 ::: tip
 The whole example is browsable under [Example API](/api/), nested exactly as it is reached: `Flux` → `Util` → [`Queue`](/api/Queue). Every framed block in these guides is embedded from it, and its label links to the entry it came from.

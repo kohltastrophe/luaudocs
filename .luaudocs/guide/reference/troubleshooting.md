@@ -10,9 +10,9 @@ Anything that comes with a file and a code is in [Diagnostics](/guide/reference/
 
 ## `could not download Lute`
 
-Reading Luau sources needs [Lute](https://github.com/luau-lang/lute), which the first extraction downloads from its GitHub releases and caches in `~/.cache/luaudocs` (`~/Library/Caches/luaudocs` on macOS, `%LOCALAPPDATA%\luaudocs` on Windows).
+Reading Luau sources needs [Lute](https://github.com/luau-lang/lute), which the first extraction downloads from its GitHub releases and caches in `~/.cache/luaudocs` (`$XDG_CACHE_HOME/luaudocs` when that is set, `~/Library/Caches/luaudocs` on macOS, `%LOCALAPPDATA%\luaudocs` on Windows).
 
-A proxy, an offline machine, or a runner with no egress fails here. Install Lute yourself, point `LUAUDOCS_LUTE` at the binary, and nothing downloads. `checksum mismatch` takes the same fix.
+A proxy, an offline machine, or a runner with no egress fails here. Install Lute yourself, point `LUAUDOCS_LUTE` at the binary, and nothing downloads. A `checksum mismatch` error is resolved the same way.
 
 ## `there is no prebuilt binary for <platform>`
 
@@ -24,13 +24,13 @@ Extraction is tied to the Lute version, so a build other than the pinned one can
 
 If `.luaudocs/api/` is empty, look for [`surface-opaque`](/guide/reference/diagnostics#info) first: the module's return value could not be traced to a table, usually a call into another module or a value assembled behind an unresolvable conditional. Return the table you built, or name the pieces with [`@class` and `@within`](/guide/overriding-with-tags#moving-a-member-somewhere-else).
 
-Also check that `[source] entries` points at your module root and is not `[]`, which is [guide-only mode](/guide/configuration#guide-only-sites).
+Also check that `[source] entries` points at your module root and is not `[]`, which declares a [guide-only site](/guide/configuration#guide-only-sites).
 
 ## A file I put in `api/` or `.vitepress/` disappeared
 
 Both directories are [tool-owned](/guide/configuration#which-files-are-yours): every build makes them contain exactly what it generates.
 
-This most often bites a `.vitepress/config.mts` kept from a VitePress site that predates LuauDocs. Move the options into `luaudocs.toml` and the styling into [`custom.css`](/guide/configuration#styling); pages you authored belong at the docs root.
+This typically occurs when migrating from an existing VitePress setup where a custom `.vitepress/config.mts` was retained. Move the options into `luaudocs.toml` and the styling into [`custom.css`](/guide/configuration#styling); pages you authored belong at the docs root.
 
 ## `vitepress is not installed in .luaudocs`
 
