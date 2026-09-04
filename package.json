@@ -64,18 +64,18 @@
 	"devDependencies": {
 		"@johnnymorganz/stylua-bin": "^2.5.2",
 		"@types/markdown-it": "^14.1.2",
-		"@types/node": "^22.10.0",
+		"@types/node": "^26.4.1",
 		"@types/picomatch": "^4.0.0",
-		"@vitest/coverage-v8": "^3.0.0",
-		"markdown-it": "^14.3.0",
+		"@vitest/coverage-v8": "^4.1.11",
+		"markdown-it": "^15.0.1",
 		"prettier": "^3.9.6",
 		"shiki": "^4.4.3",
 		"tsup": "^8.3.5",
 		"tsx": "^4.23.12",
-		"typescript": "^5.7.2",
+		"typescript": "^7.0.2",
 		"vitepress": "2.0.0-alpha.19",
 		"vitepress-plugin-group-icons": "^1.7.6",
-		"vitest": "^3.0.0",
+		"vitest": "^4.1.11",
 		"vue": "^3.5.13"
 	}
 }
