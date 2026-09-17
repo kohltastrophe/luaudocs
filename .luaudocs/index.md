@@ -63,4 +63,4 @@ end
 
 Nothing in that frame is hand-written. The signature comes from the Luau annotations, `State.State` links to [the type's own page](/api/State#state-1), and the `[State:Connect]` reference resolves into [a link](/api/State#connect). This is real generated markdown, embedded directly into this page from [`examples/Flux`](https://github.com/kohltastrophe/luaudocs/tree/main/examples/Flux).
 
-[Browse the whole example reference →](/api/) · [Get started →](/guide/getting-started)
+[Browse the whole example reference](/api/) · [Get started](/guide/getting-started)

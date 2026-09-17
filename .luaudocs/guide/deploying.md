@@ -1,12 +1,12 @@
 ---
 title: Deploying
-description: Publish the built site. A GitHub Pages workflow, base paths, and custom domains.
+description: Publish the built site. GitHub Pages or Cloudflare Pages, base paths, and custom domains.
 sidebar_position: 6
 ---
 
 # Deploying
 
-`luaudocs build` emits a static site at `.luaudocs/.vitepress/dist`, so any static host serves it as-is.
+`luaudocs build` emits a static site at `.luaudocs/.vitepress/dist`, so any static host serves it as-is. `init` sets a project up for [GitHub Pages](#github-pages), and [Cloudflare Pages](#cloudflare-pages) takes a few dashboard settings instead.
 
 ## GitHub Pages
 
@@ -66,9 +66,38 @@ Two details worth knowing:
 - **`--url`** takes the URL `configure-pages` reports, so project-pages base paths and custom domains resolve straight from the Pages settings. It overrides `[docs] url`.
 - **The version is pinned.** `init` writes the version it scaffolded with, in both the cache key and the `npx` call, preventing upstream releases from altering your deployment behavior. You own this workflow file: update the pinned version as you would any other CI dependency.
 
+## Cloudflare Pages
+
+Cloudflare Pages can build the site straight from your repository, with no workflow file. In the Cloudflare dashboard, go to **Workers & Pages**, create a Pages project connected to your Git repository, and enter these build settings:
+
+| Setting                | Value                       |
+| :--------------------- | :-------------------------- |
+| Framework preset       | None                        |
+| Build command          | `npx luaudocs@0.2.0 build`  |
+| Build output directory | `.luaudocs/.vitepress/dist` |
+| Environment variable   | `NODE_VERSION` = `22`       |
+
+From then on, every push to the production branch deploys to `<project>.pages.dev`, and every other branch gets a preview URL of its own. As with the workflow, deploying needs no `luaudocs.toml` and no committed `.luaudocs/`, and the output directory follows your `[docs] dir`.
+
+- **The version is pinned** in the build command, for the same reason the workflow pins it.
+- **`NODE_VERSION`** makes the build image install Node 22: LuauDocs needs 22.12 or newer, and older build images default to less.
+- **Tell the build its address.** Cloudflare does not hand it over the way `configure-pages` does, so set `[docs] url` ([examples below](#base-path-vs-custom-domain)) or append `--url https://<project>.pages.dev` to the build command. Without one the site still deploys, just with no `sitemap.xml`. To serve it from your own domain, add the domain under the project's **Custom domains** tab and use that address instead.
+- **Delete `.github/workflows/docs.yml`** if `init` wrote it. That workflow deploys to GitHub Pages, so left in place it either publishes a second copy or fails on every push.
+
+By default, Pages tells browsers to check every file again on every visit. Everything VitePress writes under `/assets/` has a content hash in its name, so browsers can safely keep those files for good, which a `_headers` file in the docs directory's `public/` sets up:
+
+::: code-group
+
+```txt [.luaudocs/public/_headers]
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable
+```
+
+:::
+
 ## Other CI
 
-Nothing about `build` is Pages-specific: run it, then publish `.luaudocs/.vitepress/dist` however your host wants it. Three things matter in a pipeline:
+Nothing about `build` is specific to either host: run it, then publish `.luaudocs/.vitepress/dist` however your host wants it. Three things matter in a pipeline:
 
 - **`--strict`** promotes warnings to failures, so a stale `@within` or a mistyped `@param` fails the job instead of shipping ([what each one means](/guide/reference/diagnostics)). `luaudocs build --emit-only --strict` is the same validation without the VitePress render, which makes it a good pull request gate.
 - **Pre-install to use another package manager.** The automatic docs-directory install is npm's. For another package manager or your own cache keys, run `luaudocs build --emit-only` first: it writes the generated `package.json` without needing VitePress. Install against that, then run the full `build`, which finds the packages already resolvable and installs nothing.
@@ -76,7 +105,7 @@ Nothing about `build` is Pages-specific: run it, then publish `.luaudocs/.vitepr
 
 ## Base path vs. custom domain
 
-The workflow above settles both through `--url`. Setting it by hand instead:
+The GitHub Pages workflow settles both through `--url`. Anywhere else, set `[docs] url` by hand:
 
 ::: code-group
 
@@ -94,8 +123,16 @@ url = "https://user.github.io/repo/"
 url = "https://docs.example.com"
 ```
 
+```toml [Cloudflare Pages]
+# Pages serves a site from the root of its domain,
+# so this is the pages.dev address or your own
+# domain, with no path
+[docs]
+url = "https://my-project.pages.dev"
+```
+
 :::
 
 ::: tip
-Deploying from Actions needs no `CNAME` file. The domain lives in the Pages settings and nothing force-pushes a branch over it, so a `public/CNAME` is optional rather than load-bearing: this site keeps one, and a project without one deploys just the same.
+Deploying to GitHub Pages from Actions needs no `CNAME` file. The domain lives in the repository's Pages settings and nothing force-pushes a branch over it, so a `public/CNAME` is optional rather than load-bearing: a project without one deploys just the same.
 :::

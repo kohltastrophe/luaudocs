@@ -28,7 +28,7 @@ _Already on [Moonwave](https://github.com/evaera/moonwave)?_ Run `luaudocs init 
 
 ## Documentation
 
-**[Read the docs →](https://luaudocs.kohl.gg)** · **[Browse a generated reference →](https://luaudocs.kohl.gg/api/)**
+**[Read the docs](https://luaudocs.kohl.gg)** · **[Browse a generated reference](https://luaudocs.kohl.gg/api/)**
 
 That reference is built from [`examples/Flux`](https://github.com/kohltastrophe/luaudocs/tree/main/examples/Flux) using the commands above, and the guides embed real generated pages rather than static mockups.
 

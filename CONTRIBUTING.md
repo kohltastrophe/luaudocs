@@ -58,6 +58,16 @@ bun run lute -- run extractor/main.luau -- --root <dir> --entry src --pretty
 
 `bun run lute` is a passthrough to the pinned binary (`scripts/lute.ts`), ensuring ad-hoc runs and test suites always use the identical Lute binary.
 
+## The site
+
+`.luaudocs/` is this repo's own site, published by Cloudflare Pages at [luaudocs.pages.dev](https://luaudocs.pages.dev), the address everything links to. No workflow deploys it: Cloudflare's Git integration builds every push, publishing `main` to production and every other branch to a preview URL (pull requests from forks get none). `luaudocs.kohl.gg` stays attached to the project as a custom domain, but only ever redirects to the primary address. All of this lives in the Cloudflare dashboard rather than in this repo, so the list below is its reviewed copy, and changing one means changing the other to match:
+
+- **Build command**: `bun install --frozen-lockfile && node dist/cli.js build`. The repo dogfoods itself: the install's `prepare` hook builds the CLI, which then builds this site.
+- **Build output directory**: `.luaudocs/.vitepress/dist`.
+- **Environment variables**: `BUN_VERSION=1.3.14` and `NODE_VERSION=22`, matching the workflows (Cloudflare's build image defaults to an older Bun), and `SKIP_DEPENDENCY_INSTALL=1`, so the frozen install above is the only one.
+
+Bumping the Bun that `ci.yml` and `release.yml` pin therefore means bumping `BUN_VERSION` in the dashboard too. Response headers are the one Pages setting kept in the repo: `.luaudocs/public/_headers` is copied into the build output, where Pages reads it.
+
 ## Architecture: two runtimes, one JSON contract
 
 ```
