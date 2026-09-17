@@ -5,6 +5,22 @@ Notable changes to LuauDocs, newest first. The format follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html): while the major
 version is 0, a minor bump may carry breaking changes.
 
+## Unreleased
+
+### Added
+
+- **A Cloudflare Pages guide.**
+  [Deploying](https://luaudocs.pages.dev/guide/deploying#cloudflare-pages) now
+  covers having Cloudflare Pages build the site, with no workflow file, as an
+  alternative to the GitHub Pages workflow `init` writes.
+
+### Changed
+
+- **The documentation moved to
+  [luaudocs.pages.dev](https://luaudocs.pages.dev).** `luaudocs.kohl.gg`
+  redirects there, and the package's homepage and the starter guide `init`
+  scaffolds now link to the new address.
+
 ## [0.2.0] - 2026-09-01
 
 ### Added
@@ -195,13 +211,13 @@ First public release.
   Paired with a VitePress file inclusion, it embeds an entry from your own
   `api/` pages by stable region name, and a name that stops existing fails the
   build instead of quietly emptying the frame. See
-  [Reference: Markup](https://luaudocs.kohl.gg/guide/reference/markup#frames).
+  [Reference: Markup](https://luaudocs.pages.dev/guide/reference/markup#frames).
 - **The doc model as an output.** `luaudocs build --model <file>` writes the
   JSON the renderer consumed: every module, member, type, and signature, with
   type references resolved to the ids of the declarations they name, and
   diagnostics alongside. `schemaVersion` is `1`, and the shape changes in place
   while the major version is `0`. See the
-  [doc model reference](https://luaudocs.kohl.gg/guide/reference/doc-model).
+  [doc model reference](https://luaudocs.pages.dev/guide/reference/doc-model).
 - **Guide-only mode** (`[source] entries = []`) for projects with no Luau
   surface: the extractor never runs and no Lute is fetched.
 

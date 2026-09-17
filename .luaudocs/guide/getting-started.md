@@ -108,7 +108,7 @@ Three commands, and every one of them takes an optional project directory (defau
 - **[How It Works](/guide/how-it-works)** - why your site contains what it contains.
 - **[Writing Doc Comments](/guide/writing-doc-comments)** - the prose layer on top.
 - **[Configuration](/guide/configuration)** - `luaudocs.toml`, the files `init` writes, and styling.
-- **[Deploying](/guide/deploying)** - GitHub Pages from one workflow file.
+- **[Deploying](/guide/deploying)** - GitHub Pages from one workflow file, or Cloudflare Pages with none.
 
 ::: tip Already using Moonwave?
 `luaudocs init --from-moonwave` converts your config and hand-written pages and copies your assets, and all 24 Moonwave tags keep working as-is. See [Migrating from Moonwave](/guide/migrating-from-moonwave).

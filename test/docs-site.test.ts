@@ -13,6 +13,7 @@ import pkg from "../package.json";
 import { packageRoot } from "../src/extract";
 
 const root = packageRoot();
+const deployingPage = join(root, ".luaudocs", "guide", "deploying.md");
 
 /** What `init` substitutes into `templates/project/**` for a project shaped
  * like this one: this repository's docs dir and branch, and the two pins the
@@ -51,10 +52,23 @@ describe("the site quotes its sources verbatim", () => {
 			template = template.replaceAll(token, value);
 		}
 
-		const page = readFileSync(join(root, ".luaudocs", "guide", "deploying.md"), "utf8");
+		const page = readFileSync(deployingPage, "utf8");
 		const fence = /```yaml \[\.github\/workflows\/docs\.yml\]\n([\s\S]*?)```/.exec(page);
 		expect(fence, "deploying.md no longer carries a docs.yml fence to check").not.toBeNull();
 
 		expect(comparable(fence![1]!)).toBe(comparable(template));
+	});
+
+	// the Cloudflare build command pins the version too, but in a table rather
+	// than a copy of any file, so the check above never sees it go stale
+	it("pins the current version everywhere it pins one", () => {
+		const page = readFileSync(deployingPage, "utf8");
+		const pins = [...page.matchAll(/npx luaudocs@([^\s`]+)/g)].map((match) => match[1]);
+		expect(
+			pins.length,
+			"deploying.md should pin in the workflow and on Cloudflare",
+		).toBeGreaterThan(1);
+
+		expect(pins).toEqual(pins.map(() => pkg.version));
 	});
 });

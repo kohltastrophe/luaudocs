@@ -17,7 +17,7 @@
 		"type": "git",
 		"url": "git+https://github.com/kohltastrophe/luaudocs.git"
 	},
-	"homepage": "https://luaudocs.kohl.gg",
+	"homepage": "https://luaudocs.pages.dev",
 	"bugs": "https://github.com/kohltastrophe/luaudocs/issues",
 	"type": "module",
 	"engines": {
