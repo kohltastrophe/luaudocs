@@ -6,13 +6,13 @@ sidebar_position: 4
 
 # Overriding with Tags
 
-Every tag in LuauDocs is a correction, never a requirement: you reach for one when the code says something other than what you mean, or when inference genuinely cannot see what you want documented. A library with no tags at all still gets a complete site. The handful below cover nearly every real case; [Reference: Tags](/guide/reference/tags) has the complete vocabulary: 24 tags, exactly Moonwave's set.
+Tags in LuauDocs are overrides, never requirements: reach for one only when your code cannot express what you want documented. The common tags are covered below; [Reference: Tags](/guide/reference/tags) lists all 24 Moonwave-compatible tags.
 
-Tags go inside a doc comment, and prose can sit before or after them.
+Tags sit inside a doc comment, with prose allowed before or after them.
 
 ## Describing parameters and returns
 
-The signature already carries the types, so these tags exist to describe the values, not to declare them:
+Since function signatures already carry parameter and return types, `@param`, `@return`, and `@error` exist to describe values:
 
 ```luau
 --[[
@@ -26,9 +26,9 @@ Sends a request and waits for the response.
 function Http.get(url: string, retries: number?): Body
 ```
 
-You can write a type after the name (`@param url string -- ...`), and it replaces the annotation in the rendered signature when you do, but usually the annotation already says it. `@return` tags apply in order. If you misspell a parameter name or write more `@return` tags than the function returns values, LuauDocs [emits a warning](/guide/reference/diagnostics#warnings) rather than rendering inaccurate documentation.
+Supplying a type in `@param url string -- ...` or `@return Body -- ...` overrides the annotated type in the rendered signature. `@return` tags match return values in order, and mismatched `@param` names or excess `@return` tags [emit a warning](/guide/reference/diagnostics#warnings).
 
-In a multi-line signature, no tag is needed at all: a trailing comment on a parameter's line documents that parameter, the same way it documents a property or a type field.
+In multi-line signatures, trailing `--` comments document parameters directly without `@param`:
 
 ```luau
 function Http.get(
@@ -37,11 +37,11 @@ function Http.get(
 ): Body
 ```
 
-An `@param` naming the same parameter overrides its trailing comment field by field: a type-only `@param retries number` replaces the type and keeps the trailing description.
+An `@param` for the same parameter overrides its trailing comment field by field (so a type-only `@param retries number` replaces the type while keeping the trailing description).
 
 ## Moving a member somewhere else
 
-Sometimes a member is defined in one place and belongs, from a reader's point of view, in another. `@within` files it under a different class wherever it is defined:
+Use `@within` to file a member or type under a different class or module:
 
 ```luau
 --[[
@@ -52,9 +52,7 @@ Formats a duration for display.
 local function formatDuration(seconds: number): string
 ```
 
-`@class Name` documents a block as a class, which you need when the class is assembled in a way inference cannot follow. The other placement tags do the same for a single member or type; [Reference: Tags](/guide/reference/tags#placement) lists them in full.
-
-Only one of these placement tags belongs in a block. A second one is a conflict: the first wins and the later one is dropped and reported. `@within` is a data tag rather than a placement tag, so it combines freely with any of them.
+Use `@class Name` to declare a class that static analysis cannot discover, and `@prop`, `@function`, `@method`, `@type`, or `@interface` to declare individual items; see [Reference: Tags](/guide/reference/tags#placement). A doc block may carry at most one placement tag (duplicates warn and are ignored), while `@within` combines freely with any placement tag.
 
 ## Hiding things
 
@@ -63,16 +61,18 @@ Only one of these placement tags belongs in a block. A second one is a conflict:
 function M.experimentalThing() end
 ```
 
-- **`@ignore`** drops the item from the docs entirely, always.
-- **`@private`** marks it private, which hides it by default but renders it (badged) when you set `[api] includePrivate = true`.
-
-An explicit tag takes precedence over the [leading-underscore convention](/guide/how-it-works#private-members), so `@private` hides a member whose name has no underscore, and the convention decides only for members you never tagged.
+- **`@ignore`** omits the item from the docs unconditionally.
+- **`@private`** marks the item private (hidden by default, or rendered with a badge when `[api] includePrivate = true`), overriding the [leading-underscore convention](/guide/how-it-works#private-members).
 
 ## Adding badges
 
-Badges annotate a member without changing what it is, and the common ones need no tag, because LuauDocs reads the body. A function that waits (`task.wait`, `signal:Wait()`, a yielding engine method, or a call to something that does, in this module or one it requires) is badged <Badge type="warning" text="Yields" />. Code only one realm can run (firing a remote, a realm-only service, the `plugin` global, a Studio-only member) is badged <Badge type="info" text="Server" class="luaudocs-server" />, <Badge type="info" text="Client" class="luaudocs-client" />, or <Badge type="info" text="Plugin" class="luaudocs-plugin" />. A property renders <Badge type="info" text="Read Only" /> when its table is `table.freeze`d or its field is marked `read` in the table's own type; a `read` field in a type imported from another module is not detected, so `@readonly` still applies there.
+LuauDocs infers common behavioral badges directly from code:
 
-The example library's `Queue` shows both halves: `push` is tagged `@since`, while `pop` carries no tag at all, its badge detected from the `task.wait()` in its body:
+- <Badge type="warning" text="Yields" /> when a function calls `task.wait`, `signal:Wait()`, a yielding engine method, or another yielding function across modules.
+- <Badge type="info" text="Server" class="luaudocs-server" />, <Badge type="info" text="Client" class="luaudocs-client" />, or <Badge type="info" text="Plugin" class="luaudocs-plugin" /> when code uses realm-specific remotes, services, Studio APIs, the `plugin` global, or a realm guard (`RunService:IsServer() and ...`).
+- <Badge type="info" text="Read Only" /> when a property's table is passed to `table.freeze` or its field is marked `read` in the table's own type (use `@readonly` when `read` lives on an imported type).
+
+In `examples/Flux/Util/Queue.luau`, `push` uses `@since` while `pop` gets its Yields badge automatically from `task.wait()`:
 
 ```luau [examples/Flux/Util/Queue.luau]
 --[[
@@ -99,9 +99,9 @@ end
 
 </Frame>
 
-These tags remain available when runtime behavior cannot be detected statically: `@yields` when yielding occurs within a callback passed as a value, and `@server`, `@client`, or `@plugin` when realm boundaries are conventions rather than calls. A realm tag replaces the detected realm entirely, so the tag wins when they disagree. `@unreleased` and `@since` track versioning, and `@tag name` badges anything else you want to call out. Badges render in a fixed order no matter which order you wrote them in.
+Use `@yields`, `@server`, `@client`, or `@plugin` when behavior cannot be detected statically (explicit realm tags replace detected realms). `@unreleased` and `@since` track versions, and `@tag name` adds a custom badge. Badges always render in a fixed order.
 
-`@deprecated` is the one that does more than badge. Writing `@deprecated 2.0 -- states are collected once nothing references them` on the example's `State:Destroy` badged the heading and added a callout under it:
+`@deprecated` adds both a heading badge and a warning callout, as on `State:Destroy` (`@deprecated 2.0 -- states are collected once nothing references them`):
 
 <Frame label="Generated reference" link="/api/State#destroy">
 
@@ -111,4 +111,4 @@ These tags remain available when runtime behavior cannot be detected statically:
 
 ## The rest
 
-The full vocabulary, `@external` and `@field` included, is cataloged in [Reference: Tags](/guide/reference/tags), along with how a `-- desc` continues over several lines.
+See [Reference: Tags](/guide/reference/tags) for the complete tag table (including `@external` and `@field`) and multi-line tag description rules.

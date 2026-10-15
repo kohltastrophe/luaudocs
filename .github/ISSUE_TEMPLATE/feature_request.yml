@@ -8,8 +8,9 @@ body:
       label: What are you trying to document
       description: |
         Describe the situation rather than the feature, if you can. LuauDocs
-        prefers inferring things over adding a knob, so the underlying case
-        often has a shorter answer than the proposal.
+        prefers inferring structure from code over adding a configuration knob,
+        so the underlying use case often has a shorter answer than a new setting
+        or tag.
     validations:
       required: true
 

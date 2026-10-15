@@ -28,3 +28,6 @@ favicon = "/logo.svg"
 
 [docs]
 url = "https://luaudocs.pages.dev"
+# published so a site documenting a library built on Flux could link into
+# these pages; it is also the worked example the Configuration guide points at
+model = true

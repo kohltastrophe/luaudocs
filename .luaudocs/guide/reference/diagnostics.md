@@ -6,80 +6,84 @@ sidebar_position: 4
 
 # Diagnostics
 
-Extraction never fails silently. Anything LuauDocs could not do becomes a diagnostic, printed by whichever command produced it:
+Extraction never fails silently. Unresolved or malformed constructs emit structured diagnostics:
 
 ```
 src/Widget.luau:42: warning[orphaned-within]: @within Panel: no class or module with that name
 ```
 
-Location, severity, code, message. `luaudocs build --emit-only` prints the whole list without running VitePress, and `--strict` makes it a CI gate.
+`luaudocs build --emit-only` prints all diagnostics without running VitePress, and `--strict` fails the build on any warning.
 
-The codes below come from the extractor and describe your _source_, so each carries a file and a code. Two additional diagnostic categories originate from the renderer and site synchronization: because they apply to the site as a whole rather than any one file, they carry neither file nor code. All three count toward `--strict`.
+Extractor diagnostics carry a file location and code. Renderer and site-sync warnings apply to the site as a whole (without a source file or code) and also count toward `--strict`.
 
 ## How severity is treated
 
 ::: danger error
-Stops the site. Pages are still emitted and previously generated ones kept, but VitePress is skipped and the exit code is nonzero. Stale-page cleanup is skipped too, so a typo cannot be mistaken for a deletion.
+Fails the build. Valid module pages are still emitted and existing pages and navigation remain on disk, but stale-page cleanup and VitePress are skipped and the CLI exits nonzero.
 :::
 
 ::: warning warning
-Printed and otherwise ignored, unless `--strict` promotes it to an error.
+Printed to stderr; exits nonzero only under `--strict`.
 :::
 
 ::: info info
-Printed dimmed, and never affects the exit code, `--strict` included.
+Printed dimmed; never affects the exit code, even under `--strict`.
 :::
 
 ## Errors
 
 | Code             | What it means                                                                                                                              |
 | :--------------- | :----------------------------------------------------------------------------------------------------------------------------------------- |
-| `parse-error`    | A file in the module graph could not be read or parsed. Usually a syntax error, or a file removed while the watcher was running.             |
-| `extract-failed` | The symbolic evaluator encountered an internal error while analyzing a module. Please [report it](https://github.com/kohltastrophe/luaudocs/issues) with the module.  |
+| `parse-error`    | A file in the module graph could not be read or parsed (syntax error or deleted file).                                                     |
+| `extract-failed` | The symbolic evaluator hit an internal error analyzing a module. Please [report it](https://github.com/kohltastrophe/luaudocs/issues).     |
 
 ## Warnings
 
 | Code                     | What it means                                                                                                          |
 | :----------------------- | :--------------------------------------------------------------------------------------------------------------------- |
-| `require-unresolved`     | A require target could not be resolved to a module in the project: a missing file, an unknown `.luaurc` alias, a path outside the project, or a dynamic argument. Check the alias, or the Rojo project file `[source] projectFile` points at. |
-| `orphaned-within`        | `@within Name` names no class or module. Usually a rename that missed the tag.                                          |
-| `duplicate-within`       | Two members would land on the same name after `@within` moves. The second is dropped.                                   |
-| `duplicate-class`        | Two blocks in one module declare `@class` with the same name. The duplicate declaration is dropped. An info variant exists; see [Info](#info). |
-| `duplicate-external`     | A name is mapped by two `@external` declarations. The first wins.                                                       |
-| `duplicate-type`         | A type name is declared more than once. The exported (or first) declaration is documented; the other is diagnosed at its own line. |
-| `param-mismatch`         | `@param name` names no parameter of the annotated signature. Almost always a typo or a stale tag.                       |
-| `return-count-mismatch`  | More `@return` tags than the signature returns values.                                                                  |
-| `malformed-tag`          | A tag that needs a name or URL did not get one, such as a bare `@param`.                                                |
-| `unknown-tag-arg`        | A flag tag such as `@yields` was given an argument, which it does not take.                                             |
-| `duplicate-placing-tag`  | Two placement tags in one block (`@class` and `@prop`, say). The first wins.                                            |
+| `require-unresolved`     | A require target could not be resolved (missing file, unknown `.luaurc` alias, path outside the project, or dynamic argument). Runtime aliases (`@lute`, `@lune`, or [`[source.aliases]`](/guide/configuration)) are treated as external instead. |
+| `orphaned-within`        | `@within Name` names no known class or module.                                                                         |
+| `duplicate-within`       | Two members collide under the same name after `@within` relocation; the second is dropped.                             |
+| `duplicate-class`        | Two blocks in one module declare `@class` with the same name; the duplicate is dropped (see also [Info](#info)).       |
+| `duplicate-external`     | Two `@external` tags map the same name; the first wins.                                                                |
+| `duplicate-type`         | A type name is declared more than once in a module; the exported (or first) declaration is kept.                       |
+| `param-mismatch`         | `@param name` does not match any parameter in the function signature.                                                  |
+| `return-count-mismatch`  | More `@return` tags than return values in the signature.                                                               |
+| `duplicate-member`       | Two definitions resolve to the same member ID in one container; the later definition is dropped.                       |
+| `malformed-tag`          | A tag requiring a name or URL was written without one (such as a bare `@param`).                                       |
+| `unknown-tag-arg`        | A flag tag (such as `@yields`) was given an unexpected argument.                                                       |
+| `duplicate-placing-tag`  | Multiple placement tags in one doc block (`@class` and `@prop`); the first wins.                                       |
+| `undocumented`           | A public member, class, or exported type has no doc comment (emitted when [`[api] reportUndocumented`](/guide/configuration) is enabled). |
 
 ## Info
 
 | Code                     | What it means                                                                                                          |
 | :----------------------- | :--------------------------------------------------------------------------------------------------------------------- |
-| `surface-opaque`         | A module's return value could not be evaluated statically, so nothing on it was discovered. See [Nothing was generated](/guide/reference/troubleshooting#nothing-was-generated). |
-| `orphaned-doc-block`     | A doc comment carrying `@param` or `@within` sits above no statement, so there is nothing for it to describe. A block of plain prose is left alone, since an unattached comment is usually just a comment. |
-| `unresolved-reexport`    | A re-export points at something its target module does not document, so the entry renders bare, with nothing to link.   |
-| `require-nonmodule`      | An instance path points at something that is not a module script, so there is nothing to follow.                        |
-| `duplicate-class`        | A floating `@class` names a class that already exists, possibly in another module. The declaration is ignored, and members aimed at the name file under the existing class. The warning variant is under [Warnings](#warnings). |
-| `ignored-tag`            | `@__index`, which is accepted for Moonwave compatibility and then dropped.                                              |
+| `surface-opaque`         | A module's return value could not be evaluated statically; see [Nothing was generated](/guide/reference/troubleshooting#nothing-was-generated). |
+| `orphaned-doc-block`     | A doc comment with tags (`@param`, `@within`) sits above no statement. Plain prose comments are ignored.               |
+| `unresolved-reexport`    | A re-export targets a symbol its source module does not document.                                                      |
+| `require-nonmodule`      | Emitted when a surfaced require resolves to a Folder or non-module path (`script.Parent.Assets`), leaving no module script to follow. |
+| `duplicate-class`        | A floating `@class` names a class that already exists; members aimed at that name merge into the existing class.       |
+| `ignored-tag`            | `@__index`, accepted for Moonwave compatibility and ignored.                                                           |
+| `unreached-types`        | An unexposed module (such as an internal `types.luau`) exports types never referenced by a documented signature. Add the module to `[source] entries`, move types with `@within`, or re-export them (`export type Hook = types.Hook`). |
 
 ## Renderer warnings
 
-A `renderer:` prefix means extraction was fine: two things wanted one name, and the renderer says which won.
+Prefixed with `renderer:`:
 
-| Message                                        | What it means                                                                                             |
-| :--------------------------------------------- | :--------------------------------------------------------------------------------------------------------- |
-| `page name collision`                          | Two modules want one URL. The later gets a numbered slug, and its sidebar, search, and tab title carry the parent (`Defaults (Flux)`); rename one to reclaim the bare spelling. |
-| `ambiguous reference name dropped from link table` | One spelling resolves to two equal-standing targets (two modules both named `Defaults`, or `Config.get` on two pages); a module outranks a same-named type, so those pairs resolve instead of warning. Because linking to either would be ambiguous, neither target is linked; the warning names both targets. Qualify the reference (`[Module.State]`) or rename. |
+| Message                                            | What it means                                                                                             |
+| :------------------------------------------------- | :--------------------------------------------------------------------------------------------------------- |
+| `page name collision`                              | Two modules share a page slug; the second gets a numbered slug and a parent-qualified title (`Defaults (Flux)`). |
+| `ambiguous reference name dropped from link table` | A `[Ref]` name matches two equal-standing targets (modules outrank same-named types without warning). Qualify the reference (`[Module.State]`) or rename. |
+| `aliases.<name>: could not load its doc model`     | A [`[source.aliases]`](/guide/configuration) `model` URL or path could not be loaded; links fall back to module pages. Counts toward `--strict`. |
 
 ## Site-sync warnings
 
-Four more come from the site sync rather than the API model. Each prints as `warning: ` and its message, which names the file or the `[docs]` key it is about. All four count toward `--strict`.
+Emitted during site file synchronization (all count toward `--strict`):
 
 | Message                                                                                          | What it means                                                                                                        |
-| :----------------------------------------------------------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------- |
-| `[docs] changelog is enabled but CHANGELOG.md was not found`                                     | The key asks for a `/changelog` page and there is no file to build it from, so no page is generated.                  |
-| `[docs] includeReadme is enabled but README.md was not found`                                    | The same, for the README copy your landing page includes.                                                             |
-| `index.md includes .vitepress/generated/readme.md, which only [docs] includeReadme = true keeps` | `includeReadme` is off while your own `index.md` still includes the copy it generates. Re-enable the key or drop the include, or VitePress fails on a missing include. |
-| `README.md links …, which the generated site does not serve`                                     | A README link points at a repository file that is not a page here, and `[repo]` is either unset or cannot reach it. Set `[repo]`, or point the link at a page. |
+| :----------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------- |
+| `[docs] changelog is enabled but CHANGELOG.md was not found`                                     | `[docs] changelog = true` is set, but `CHANGELOG.md` is missing.                                                     |
+| `[docs] includeReadme is enabled but README.md was not found`                                    | `[docs] includeReadme = true` is set, but `README.md` is missing.                                                    |
+| `index.md includes .vitepress/generated/readme.md, which only [docs] includeReadme = true keeps` | Custom `index.md` includes `.vitepress/generated/readme.md` while `includeReadme` is disabled.                       |
+| `README.md links …, which the generated site does not serve`                                     | A relative link in `README.md` points outside the docs directory and `[repo] url` is unset or cannot reach it.       |

@@ -22,12 +22,12 @@ hero:
 features:
   - icon: 🪄
     title: No tags required
-    details: LuauDocs works out what your module returns; an untagged library gets a full API reference.
+    details: LuauDocs traces what your modules return to build a full API reference with zero doc tags.
     link: /guide/how-it-works
     linkText: How it works
   - icon: 🔗
     title: Signatures from your code
-    details: Every signature comes from the Luau annotations in your code, with each type linked to its page.
+    details: Reads signatures straight from your Luau annotations and links every type to its definition.
     link: /guide/how-it-works#types-get-their-own-entries
     linkText: Type pages
   - icon: 🌙
@@ -37,7 +37,7 @@ features:
     linkText: From Moonwave
   - icon: 🔌
     title: Built to be built on
-    details: Export the full API as JSON for custom tooling, with llms.txt generated automatically for AI assistants.
+    details: Exports the full API as JSON for custom tooling, and generates llms.txt for AI coding agents.
     link: /guide/reference/doc-model
     linkText: The doc model
 ---

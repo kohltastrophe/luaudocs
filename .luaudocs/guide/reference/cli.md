@@ -11,28 +11,27 @@ sidebar_position: 1
 | `luaudocs init [dir] [--force] [--from-moonwave] [--title <t>] [--description <d>]` | scaffold config + docs site                         |
 | `luaudocs build [dir] [--emit-only] [--strict] [--url <url>] [--model <file>]` | full static build; extraction errors skip VitePress |
 | `luaudocs dev [dir] [-- <vitepress args>]`                                     | watch + live preview (HMR)                          |
+| `luaudocs llms [dir] [--out <file>] [--check]`                                 | `llms.txt` for coding agents in a checkout          |
 
-`dir` defaults to `.`; `--help` prints the same list, and `--version` the installed version.
+`dir` defaults to `.`. `--help` prints this summary, and `--version` prints the installed version.
 
 ## Flags
 
-- **`--emit-only`** (`build`) writes all generated site files (the pages, `.vitepress/` config, and `llms.txt`) and then stops, skipping the dependency install and the VitePress render.
-- **`--strict`** (`build`) turns warnings into failures. `luaudocs build --emit-only --strict` is the CI gate; see [Deploying](/guide/deploying#other-ci).
-- **`--url`** (`build`) overrides `[docs] url` for one build. The [Pages workflow](/guide/deploying#github-pages) uses it for base paths and custom domains.
-- **`--model <file>`** (`build`) also writes the [doc model](/guide/reference/doc-model) as JSON, for tooling of your own. It is an extra output on an ordinary build; add `--emit-only` when you want the model without the site.
-- **`--from-moonwave`** (`init`) converts an existing Moonwave setup; see [Migrating from Moonwave](/guide/migrating-from-moonwave).
-- **`--force`** (`init`) rewrites the user-owned files `init` normally skips when they already exist, including `luaudocs.toml`. Use this flag to overwrite existing files when re-running init or migrating from Moonwave.
-- **`--title`**, **`--description`** (`init`) set those `luaudocs.toml` keys instead of taking the folder name and a placeholder description.
-- **`--`** (`dev`) forwards everything after it to `vitepress dev`: `luaudocs dev -- --port 4000 --open`.
+- **`--emit-only`** (`build`): writes generated site files (`api/`, `.vitepress/`, `public/llms*.txt`, `public/docmodel.json`) and stops before installing dependencies or running VitePress.
+- **`--strict`** (`build`): promotes warnings to build failures; combine with `--emit-only` for a fast CI gate ([Deploying](/guide/deploying#other-ci)).
+- **`--url`** (`build`): overrides `[docs] url` for one build ([GitHub Pages workflow](/guide/deploying#github-pages)).
+- **`--model <file>`** (`build`): writes the [doc model](/guide/reference/doc-model) JSON to `<file>` (combine with `--emit-only` to skip the site build).
+- **`--out <file>`** (`llms`): writes the agent index to `<file>` instead of `./llms.txt`, adjusting relative links accordingly ([Coding Agents](/guide/coding-agents#where-it-lives)).
+- **`--check`** (`llms`): exits `1` without writing if the committed file is missing, stale, or encounters extraction errors.
+- **`--from-moonwave`** (`init`): migrates an existing Moonwave project ([Migrating from Moonwave](/guide/migrating-from-moonwave)).
+- **`--force`** (`init`): overwrites existing user-owned files (`luaudocs.toml`, `index.md`, `custom.css`).
+- **`--title`**, **`--description`** (`init`): populate those `luaudocs.toml` keys instead of defaults.
+- **`--`** (`dev`): forwards remaining arguments to `vitepress dev` (`luaudocs dev -- --port 4000 --open`).
 
 ## What `dev` watches
 
-`dev` rebuilds on changes to your sources, to the root files it reads (`CHANGELOG.md`, `README.md`, the Rojo project file, `.luaurc`), and to the docs directory.
-
-`luaudocs.toml` too: editing it reloads the config in place, re-reads whatever `[source] entries` now names, and rebuilds. A config that does not parse leaves the session running on the last one that did, so syntax errors log a diagnostic without terminating the dev server.
-
-Moving `[docs] dir` is the one edit that still ends the session, because the server underneath is bound to the directory it started on.
+`dev` rebuilds on edits to source files, root project files (`CHANGELOG.md`, `README.md`, the Rojo project file, `.luaurc`), the docs directory, and `luaudocs.toml`. Invalid edits to `luaudocs.toml` log an error and keep the server running on the last valid config; only changing `[docs] dir` stops the session.
 
 ## Environment
 
-- **`LUAUDOCS_LUTE`** points at a [Lute](https://github.com/luau-lang/lute) binary you provide, instead of the pinned one LuauDocs downloads and caches. See [Troubleshooting](/guide/reference/troubleshooting#could-not-download-lute).
+- **`LUAUDOCS_LUTE`**: path to a custom [Lute](https://github.com/luau-lang/lute) binary, bypassing the pinned download ([Troubleshooting](/guide/reference/troubleshooting#could-not-download-lute)).

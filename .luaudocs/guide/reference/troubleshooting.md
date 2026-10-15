@@ -6,42 +6,32 @@ sidebar_position: 6
 
 # Troubleshooting
 
-Anything that comes with a file and a code is in [Diagnostics](/guide/reference/diagnostics). This page covers the failures that do not.
+Source-level issues with a file location and code are covered in [Diagnostics](/guide/reference/diagnostics). This page covers environment and build failures.
 
 ## `could not download Lute`
 
-Reading Luau sources needs [Lute](https://github.com/luau-lang/lute), which the first extraction downloads from its GitHub releases and caches in `~/.cache/luaudocs` (`$XDG_CACHE_HOME/luaudocs` when that is set, `~/Library/Caches/luaudocs` on macOS, `%LOCALAPPDATA%\luaudocs` on Windows).
+On first run, LuauDocs downloads a pinned [Lute](https://github.com/luau-lang/lute) binary from GitHub releases and caches it in `~/.cache/luaudocs` (`$XDG_CACHE_HOME/luaudocs`, `~/Library/Caches/luaudocs` on macOS, or `%LOCALAPPDATA%\luaudocs` on Windows).
 
-A proxy, an offline machine, or a runner with no egress fails here. Install Lute yourself, point `LUAUDOCS_LUTE` at the binary, and nothing downloads. A `checksum mismatch` error is resolved the same way.
+If a proxy or offline environment blocks the download (or triggers a `checksum mismatch`), install Lute manually and set `LUAUDOCS_LUTE` to the binary path.
 
 ## `there is no prebuilt binary for <platform>`
 
-The releases cover Linux (x86_64, aarch64), macOS on Apple silicon, and Windows x86_64. Anywhere else (an Intel Mac, musl, BSD), [build Lute from source](https://github.com/luau-lang/lute) and either put it on your PATH or point `LUAUDOCS_LUTE` at it.
-
-Extraction is tied to the Lute version, so a build other than the pinned one can document your library differently. That is fine on your own machine; keep CI on the pinned download.
+Prebuilt Lute binaries cover Linux (`x86_64`, `aarch64`), macOS (`aarch64`), and Windows (`x86_64`). On other platforms (Intel macOS, musl Linux, BSD), [build Lute from source](https://github.com/luau-lang/lute) and place it on `PATH` or point `LUAUDOCS_LUTE` at it.
 
 ## Nothing was generated
 
-If `.luaudocs/api/` is empty, look for [`surface-opaque`](/guide/reference/diagnostics#info) first: the module's return value could not be traced to a table, usually a call into another module or a value assembled behind an unresolvable conditional. Return the table you built, or name the pieces with [`@class` and `@within`](/guide/overriding-with-tags#moving-a-member-somewhere-else).
-
-Also check that `[source] entries` points at your module root and is not `[]`, which declares a [guide-only site](/guide/configuration#guide-only-sites).
+If `.luaudocs/api/` is empty, check for [`surface-opaque`](/guide/reference/diagnostics#info): the module's `return` value could not be traced to a table. Return the table directly, or declare containers with [`@class` and `@within`](/guide/overriding-with-tags#moving-a-member-somewhere-else). Also verify that `[source] entries` points at your module roots and is not `[]` ([guide-only mode](/guide/configuration#guide-only-sites)).
 
 ## A file I put in `api/` or `.vitepress/` disappeared
 
-Both directories are [tool-owned](/guide/configuration#which-files-are-yours): every build makes them contain exactly what it generates.
-
-This typically occurs when migrating from an existing VitePress setup where a custom `.vitepress/config.mts` was retained. Move the options into `luaudocs.toml` and the styling into [`custom.css`](/guide/configuration#styling); pages you authored belong at the docs root.
+Both directories are [tool-owned](/guide/configuration#which-files-are-yours) and synchronized on every build. Put site options in `luaudocs.toml`, custom styles in [`custom.css`](/guide/configuration#styling), and hand-written pages under `guide/` or the docs root.
 
 ## `vitepress is not installed in .luaudocs`
 
-`build` and `dev` install the docs directory with npm when the VitePress they pin does not resolve, and a failing install stops with npm's own error instead of this one. Reaching this message means the install claimed success but the pinned VitePress still does not resolve from the docs directory (a sandboxed CI step, a read-only mount, a package manager that redirected the install).
-
-The message names the docs directory in full. Run `npm install` in it (`npm install --prefix .luaudocs` from the project root) to see what npm has to say.
+`build` and `dev` run `npm install` in the docs directory automatically when VitePress is missing. This error means `npm install` exited with status `0` but VitePress still cannot be resolved from `.luaudocs/` (for example, due to a read-only mount or custom npm prefix). Run `npm install --prefix .luaudocs` directly to inspect npm's output.
 
 ## Still stuck
 
 ::: tip Look at the markdown itself
-`luaudocs build --emit-only` shows everything there is to see: the full diagnostic list, and the emitted markdown under `.luaudocs/api/`. A member missing there means the extractor never discovered it, and the diagnostics usually say why.
-
-That, plus the smallest source file that reproduces it, is everything an [issue](https://github.com/kohltastrophe/luaudocs/issues) needs.
+Run `luaudocs build --emit-only` to inspect the full diagnostic list and the generated Markdown in `.luaudocs/api/`. Include that output and a minimal reproducing `.luau` file when opening an [issue](https://github.com/kohltastrophe/luaudocs/issues).
 :::

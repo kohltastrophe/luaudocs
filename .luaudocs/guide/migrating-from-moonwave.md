@@ -1,16 +1,16 @@
 ---
 title: Migrating from Moonwave
-description: Convert a Moonwave project, hand-written pages included, in one command, and port the little it cannot guess.
-sidebar_position: 7
+description: Convert a Moonwave project, hand-written pages included, in one command.
+sidebar_position: 8
 ---
 
 # Migrating from Moonwave
 
-All 24 Moonwave tags keep working here as [overrides](/guide/overriding-with-tags), so tagged sources migrate as-is. Since your public surface is [discovered rather than declared](/guide/how-it-works), a migrated project usually ends up with more pages than it had.
+All 24 Moonwave tags continue working as [overrides](/guide/overriding-with-tags), so existing doc comments migrate without edits. Because LuauDocs [discovers your public surface](/guide/how-it-works) rather than requiring `@class` on every module, migrated projects often gain pages that Moonwave skipped.
 
-Many of the tags Moonwave required become redundant once the code is read: `@yields` and the realm tags are [detected from what a body does](/guide/overriding-with-tags#adding-badges), `@readonly` follows from `table.freeze` or a `read` field modifier in the table's own type (a type imported from another module does not carry the signal, so keep the tag there), and a trailing comment in a multi-line signature does what `@param` did. Deleting them is optional; a kept tag simply keeps overriding.
+Many tags that Moonwave required are now inferred automatically: `@yields` and realm tags are [detected from function bodies](/guide/overriding-with-tags#adding-badges), `@readonly` is inferred from `table.freeze` or `read` table-type fields (keep `@readonly` when `read` is on an imported type), and trailing comments in multi-line signatures replace `@param`. Removing redundant tags is optional.
 
-One command does the mechanical work:
+Run one command to migrate your configuration and pages:
 
 ```bash
 luaudocs init --from-moonwave
@@ -18,7 +18,7 @@ luaudocs init --from-moonwave
 
 ## What converts automatically
 
-Both `moonwave.toml` and `moonwave.json` are understood (TOML wins when both exist), and the keys map across to [`luaudocs.toml`](/guide/configuration):
+`moonwave.toml` and `moonwave.json` (TOML takes precedence) map to [`luaudocs.toml`](/guide/configuration):
 
 | Moonwave                        | LuauDocs               |
 | :------------------------------ | :--------------------- |
@@ -33,44 +33,31 @@ Both `moonwave.toml` and `moonwave.json` are understood (TOML wins when both exi
 | `changelog = false`             | `[docs] changelog`     |
 | `home.includeReadme`            | `[docs] includeReadme` |
 
-When `gitRepoUrl` or `docusaurus.url` is absent, `docusaurus.organizationName` and `projectName` are read the way Moonwave's own deploy reads them: they name the GitHub repository and the `*.github.io` site.
+When `gitRepoUrl` or `docusaurus.url` is omitted, `docusaurus.organizationName` and `projectName` populate the GitHub repo and `*.github.io` URL. Because Moonwave appends `navbar.items` to its defaults while `[[site.nav]]` replaces defaults wholesale, the converter prepends explicit Guide, API, and Changelog links ahead of your custom items. Docusaurus-only build keys (`deploymentBranch`, `onBrokenLinks`, `onBrokenMarkdownLinks`, `trailingSlash`) are ignored.
 
-Since Moonwave appends `navbar.items` to a derived row while `[[site.nav]]` replaces it, the converted entries arrive with Guide, API, and Changelog baked in ahead of yours.
+Conventional source directories (`src/`, `lib/`) become `[source] entries`, and `.moonwave/static/*` copies into `public/` (including `CNAME`).
 
-The Docusaurus mechanics (`deploymentBranch`, `onBrokenLinks`, `onBrokenMarkdownLinks`, `trailingSlash`) are consumed silently: the scaffolded Pages workflow, the always-on link checking, and clean URLs make them moot.
+Hand-written pages under `docs/` move to `guide/`, and Markdown files under `pages/` move to the docs root:
 
-Module roots become `[source] entries`, since Moonwave takes those on the command line rather than in config: `lib/` and `src/` are each taken when they hold an `init.luau`. `.moonwave/static/*` is copied into the site's `public/`, CNAME included.
+- `.mdx` files rename to `.md`, stripping `import`/`export` statements and converting `{/* */}` comments to HTML comments.
+- `/docs/...` and `.mdx` links rewrite to `/guide/...` and `.md` across Markdown links and HTML `href`/`src` attributes, and `.moonwave/static/` paths rewrite to root `/` paths.
+- Code fence attributes convert from `title="init.lua"` and `showLineNumbers` to `[init.lua]` and `:line-numbers`.
+- `sidebar_label`, `sidebar_position`, and `description` frontmatter carry over unchanged, as do `_category_.json` / `.yml` files (`label`, `position`, `collapsed`, `collapsible`; unsupported keys such as `link` or `className` are reported).
+- Co-located images and assets copy verbatim.
+- `draft` and `unlisted` pages stay unpublished and are listed in the migration report alongside any `slug` or `id` frontmatter overrides.
 
-Your hand-written pages come too: `docs/` lands under `guide/` and the markdown under `pages/` lands at the site root, each file converted once and yours afterwards.
+`home.bannerImage` and `home.features` convert into `index.md` using [VitePress's home layout](https://vitepress.dev/reference/default-theme-home-page) (including your README when `home.includeReadme` is enabled). `.moonwave/custom.css` migrates to `custom.css` with standard Infima variables (`--ifm-color-primary*`, `--ifm-background-color`, `[data-theme="dark"]`) mapped to VitePress variables (`--vp-c-brand-*`, `--vp-c-bg`, `.dark`).
 
-- `.mdx` files are renamed to `.md`, with `import`/`export` lines removed and `{/* */}` comments rewritten as HTML comments.
-- Absolute `/docs/...` links move to `/guide/...` and relative links follow the `.mdx` rename, in raw HTML `href`/`src` attributes as well as markdown links.
-- Paths reaching into `.moonwave/static/` become root paths, matching where the static copy lands (`public/`).
-- Fence attributes are respelled: `title="init.lua"` becomes `[init.lua]`, and `showLineNumbers` becomes `:line-numbers`.
-- `sidebar_label`, `sidebar_position`, and `description` frontmatter already means the same thing here (see [the guides sidebar](/guide/configuration#the-guides-sidebar)) and carries over untouched.
-- `_category_.json` (or `.yml` / `.yaml`) files are copied over and continue configuring their folders: `label`, `position`, `collapsed`, and `collapsible` are all supported. Any other key in one (`link`, `className`) is inert and named in the report, and categories that do not specify `collapsed` default to being expanded.
-- Images and other files sitting beside the pages copy verbatim.
-- Pages marked `draft` or `unlisted` stay unpublished, as Moonwave had them, and are named in the report. A `slug` or `id` override is flagged too: URLs here follow the file path.
-
-The homepage and stylesheet convert automatically. `home.bannerImage` and `home.features` generate a ready-made `index.md` in [VitePress's home layout](https://vitepress.dev/reference/default-theme-home-page), with your README included below if `home.includeReadme` is set. Similarly, `.moonwave/custom.css` is migrated to `custom.css`, automatically renaming standard Infima variables to VitePress theme variables (such as `--ifm-color-primary`, `-dark`, and `-darker` to `--vp-c-brand-1`, `-2`, and `-3`, `--ifm-background-color` to `--vp-c-bg`, and `[data-theme="dark"]` selectors to `.dark`).
-
-Your doc comments need no conversion at all. These carry across unchanged:
-
-- `--[=[ ]=]` doc comments, alongside the `--[[ ]]` and `---` styles.
-- `:::note` and `:::caution` admonitions, rewritten to VitePress containers, bracket titles (`:::tip[Title]`) unwrapped.
-- `<Tabs>` and `<TabItem>`, converted to VitePress's own tab strip, holding prose as happily as code.
-- `@__index`, which auto-detection makes redundant, is accepted and ignored.
-
-See [Reference: Markup](/guide/reference/markup) for how the last two render.
+Doc comments require no edits: `--[=[ ]=]` blocks, `:::note` / `:::caution` admonitions (including `:::tip[Title]`), `<Tabs>` / `<TabItem>` blocks, and `@__index` (accepted as a no-op) all work out of the box; see [Reference: Markup](/guide/reference/markup).
 
 ## What you port by hand
 
-Any features that cannot be converted automatically are listed in the migration report rather than guessed. Resolving them typically takes only a line or two:
+Unconvertible items are listed in the migration report:
 
-- **Leftover components.** A theme component the conversion cannot express (`<TOCInline>`, say) is reported per page and left in place; delete it or rewrite it as markdown.
-- **Leftover styling.** An `--ifm-*` variable outside the rename table survives in `custom.css` as written and is reported; find its [VitePress counterpart](https://vitepress.dev/guide/extending-default-theme) or drop the rule.
-- **The blog and React pages.** `blog/` and the `.js`/`.html` files under `pages/` have no equivalent in the generated site.
+- **Leftover components:** Custom MDX/Docusaurus components (`<TOCInline>`) are reported per page; replace them with Markdown.
+- **Leftover styling:** Unmapped `--ifm-*` variables in `custom.css` are reported for replacement with [VitePress theme variables](https://vitepress.dev/guide/extending-default-theme).
+- **Blog and React pages:** `blog/` and `.js`/`.html` files under `pages/` have no VitePress equivalent.
 
 ## What has no equivalent
 
-`classOrder`, `apiCategories`, and `autoSectionPath` have no direct equivalents in LuauDocs. The sidebar here comes from [access paths](/guide/how-it-works#access-paths-not-folders) rather than a pinned section list: to change it, change what your library exposes. The same goes for a pinned `.moonwave/sidebars.js`: the guide sidebar is derived from the pages, their `sidebar_position`, and the `_category_` files beside them.
+`classOrder`, `apiCategories`, and `autoSectionPath` have no equivalents because the API sidebar is derived automatically from [access paths](/guide/how-it-works#access-paths-not-folders). Similarly, `.moonwave/sidebars.js` is replaced by `sidebar_position` frontmatter and `_category_` files.

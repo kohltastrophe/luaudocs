@@ -6,11 +6,11 @@ sidebar_position: 3
 
 # Writing Doc Comments
 
-LuauDocs has already found your exports, their signatures, and their types. Doc comments add the prose on top: you are not declaring what exists or restating an annotated type; you are explaining what something is for.
+Because LuauDocs discovers your exports, signatures, and types from source code, doc comments only need to explain what an item is for.
 
 ## The three styles
 
-Write a comment block above a definition. All three formats are functionally identical and can be mixed freely in the same file:
+Place a comment block above a definition. All three comment styles are interchangeable:
 
 ::: code-group
 
@@ -38,9 +38,7 @@ function Flux.state<T>(initial: T?): State.State<T>
 
 :::
 
-The description is markdown, so lists, links, fenced code, and emphasis all work. Everything beyond that is optional, including [tags](/guide/overriding-with-tags).
-
-Paragraphs survive the trip:
+Descriptions use Markdown (lists, links, fenced code, and emphasis), and [tags](/guide/overriding-with-tags) are optional. Multiple paragraphs render as separate paragraphs:
 
 ```luau [examples/Flux/State.luau]
 --[[
@@ -59,7 +57,7 @@ function State:Connect(callback: (any) -> ()): () -> ()
 
 ## Documenting fields
 
-Fields take prose the same way, either above the field or trailing it, whichever reads better in the source:
+Document table or type fields with either a preceding doc comment or a trailing comment on the same line:
 
 ```luau
 export type Options = {
@@ -69,11 +67,11 @@ export type Options = {
 }
 ```
 
-On a table-literal member the prose renders as markdown, [references](#references-that-link-themselves) included. A type declaration's fields render inside the type's code fence instead, so their prose becomes a `-- comment` line there: plain text, with links, bold, and code spans stripped. Keep those to a short phrase.
+On a table-literal member, field prose renders as full Markdown, including [references](#references-that-link-themselves). On a type declaration, field descriptions render inside the type's Luau code fence as trailing `-- comment` lines with inline formatting stripped, so keep type-field descriptions concise.
 
 ## Documenting the module itself
 
-The module's own page takes a description the same way: a doc comment above the definition of the table you return, or at the very top of the file, before the first statement.
+Place a doc comment above the returned table's definition (or at the top of the file before the first statement) to set the module page's opening prose:
 
 ```luau
 --[[
@@ -82,27 +80,23 @@ A tiny reactive state library.
 local Flux = {}
 ```
 
-That comment opens [the example's Flux page](/api/Flux). A [`@class`](/guide/overriding-with-tags#moving-a-member-somewhere-else) block's prose does the same job for a class assembled by hand.
+That comment becomes the introduction on [the Flux page](/api/Flux). A [`@class`](/guide/overriding-with-tags#moving-a-member-somewhere-else) block's description serves the same role for tag-declared classes.
 
 ## References that link themselves
 
-A name in square brackets becomes a link:
+Wrap a symbol name in square brackets to link it:
 
 | You write         | It resolves to                          |
 | :---------------- | :-------------------------------------- |
 | `[Class]`         | that class or module's page             |
 | `[Class.member]`  | the member's anchor on that page        |
 | `[Class:method]`  | the method's anchor on that page        |
-| `[CFrame]`        | the Roblox creator docs                 |
+| `[CFrame]`        | the Roblox Creator Documentation        |
 
-A bare name is looked up in your project first, then in any [`@external`](/guide/reference/tags#data) names you declared, then among Roblox names. The dotted and colon forms only ever resolve inside your project.
+Bare names resolve against your project first (with modules outranking same-named types), then [`@external`](/guide/reference/tags#data) declarations, and finally Roblox engine types. Dotted and colon forms resolve only within your project.
 
-The example library writes `see [State:Connect] for reacting to changes` in a plain doc comment, and [the generated entry](/api/Flux#state-1) carries the link.
-
-A reference that resolves to nothing is left exactly as you typed it, unlinked, so a stale `[OldName]` shows up as plain text rather than a broken link. A module outranks a type sharing its name, so `[Signal]` means the Signal module even where a `type Signal` also exists. If a reference is ambiguous (such as two modules named `Defaults`), LuauDocs refuses to guess, links neither, and [emits a diagnostic warning](/guide/reference/diagnostics#renderer-warnings). Qualify it (`[Module.State]`) to fix that.
+Unresolved brackets stay as plain `[OldName]` text rather than emitting broken links. If a reference is ambiguous (such as two modules named `Defaults`), LuauDocs leaves it unlinked and emits an [`ambiguous-ref` warning](/guide/reference/diagnostics#renderer-warnings); qualify the reference (`[Module.State]`) to disambiguate it.
 
 ## More than prose
 
-Doc comments render the same markdown as a hand-written guide page, which includes [admonitions](/guide/reference/markup#admonitions), [tab strips](/guide/reference/markup#tabs), [frames](/guide/reference/markup#frames), [badges](/guide/reference/markup#badges), and [inline `{luau}` highlighting](/guide/reference/markup#code-highlighting).
-
-When inference gets something wrong, or if you want a member placed somewhere other than where the code puts it, that is what [tags](/guide/overriding-with-tags) are for.
+Doc comments support the same rich markup as guide pages, including [admonitions](/guide/reference/markup#admonitions), [tab strips](/guide/reference/markup#tabs), [frames](/guide/reference/markup#frames), [badges](/guide/reference/markup#badges), and [inline `{luau}` highlighting](/guide/reference/markup#code-highlighting). See [Overriding with Tags](/guide/overriding-with-tags) when you need to override inferred signatures or placement.
