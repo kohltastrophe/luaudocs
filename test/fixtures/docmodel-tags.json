@@ -39,7 +39,7 @@
 									"(name: ",
 									{ "text": "string" },
 									"): ",
-									{ "id": "src/Widget.luau#type.Widget", "text": "Widget.Widget" }
+									{ "id": "src/Widget.luau#type.Widget", "text": "Widget" }
 								]
 							},
 							"source": { "endLine": 20, "file": "src/init.luau", "line": 18 },
@@ -263,11 +263,7 @@
 								]
 							},
 							"source": { "endLine": 84, "file": "src/init.luau", "line": 82 },
-							"tags": {
-								"custom": [],
-								"deprecated": {},
-								"unreleased": true
-							},
+							"tags": { "custom": [], "deprecated": {}, "unreleased": true },
 							"visibility": "public"
 						}
 					],
@@ -682,7 +678,8 @@
 								"segs": [
 									"(widget: ",
 									{ "id": "src/Widget.luau#class.Widget", "text": "Widget" },
-									")"
+									"): ",
+									{ "text": "string" }
 								]
 							},
 							"source": { "endLine": 25, "file": "src/extra.luau", "line": 22 },

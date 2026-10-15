@@ -1,15 +1,20 @@
 /**
- * syncDir, the write contract: <docs>/api/ and <docs>/.vitepress/ are made to
- * contain exactly the emitted set. Everything here fails silently in the field
- * (a deleted user file, a kept stale page), so each branch gets its own case:
- * the sweep, the error-build skip, the keepForeign exemptions, and the
- * case-flip convergence.
+ * Tests for `syncDir`, `filterModel`, and `runBuild` (`src/build.ts`).
  */
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
-import { createContext, runBuild, syncDir } from "../src/build";
-import { makeTempDirFactory } from "./helpers";
+import { describe, expect, it, vi } from "vitest";
+import {
+	createContext,
+	filterModel,
+	runBuild,
+	syncDir,
+	type BuildContext,
+	type RenderedModel,
+} from "../src/build";
+import { parseDocModel, type DocModel } from "../src/docmodel";
+import { emitDocs } from "../src/render";
+import { makeTempDirFactory, modelJson, readFixture } from "./helpers";
 
 const tempDir = makeTempDirFactory("luaudocs-sync-");
 
@@ -22,54 +27,50 @@ function seed(dir: string, files: Record<string, string>): void {
 }
 
 describe("syncDir", () => {
-	it("makes the directory contain exactly the emitted set", () => {
+	it("writes new/changed files, sweeps stale files/dirs, and skips unchanged files", () => {
 		const dir = tempDir();
 		seed(dir, { "stale.md": "old\n", "keep.md": "old\n", "sub/gone.md": "old\n" });
 
-		const summary = syncDir(
-			dir,
-			new Map([
-				["keep.md", "new\n"],
-				["added.md", "fresh\n"],
-			]),
-		);
-
+		expect(
+			syncDir(
+				dir,
+				new Map([
+					["keep.md", "new\n"],
+					["added.md", "fresh\n"],
+				]),
+			),
+		).toEqual({ written: 2, deleted: 2, unchanged: 0 });
 		expect(readFileSync(join(dir, "keep.md"), "utf8")).toBe("new\n");
 		expect(readFileSync(join(dir, "added.md"), "utf8")).toBe("fresh\n");
 		expect(existsSync(join(dir, "stale.md"))).toBe(false);
-		// the sweep also removes the directory it emptied
 		expect(existsSync(join(dir, "sub"))).toBe(false);
-		expect(summary).toEqual({ written: 2, deleted: 2, unchanged: 0 });
+
+		expect(
+			syncDir(
+				dir,
+				new Map([
+					["keep.md", "new\n"],
+					["added.md", "fresh\n"],
+				]),
+			),
+		).toEqual({ written: 0, deleted: 0, unchanged: 2 });
 	});
 
-	it("reports an identical file as unchanged, so watchers see no event", () => {
-		const dir = tempDir();
-		seed(dir, { "same.md": "content\n" });
-		const summary = syncDir(dir, new Map([["same.md", "content\n"]]));
-		expect(summary).toEqual({ written: 0, deleted: 0, unchanged: 1 });
-	});
+	it("respects deleteStale = false, keepForeign exemptions, case-flips, and empty missing dirs", () => {
+		const noSweep = tempDir();
+		seed(noSweep, { "stale.md": "old\n" });
+		expect(syncDir(noSweep, new Map([["page.md", "new\n"]]), false).deleted).toBe(0);
+		expect(existsSync(join(noSweep, "stale.md"))).toBe(true);
 
-	it("skips the sweep when deleteStale is off (error builds)", () => {
-		const dir = tempDir();
-		seed(dir, { "stale.md": "old\n" });
-		const summary = syncDir(dir, new Map([["page.md", "new\n"]]), false);
-		expect(existsSync(join(dir, "stale.md"))).toBe(true);
-		expect(summary.deleted).toBe(0);
-	});
-
-	it("leaves keepForeign paths alone inside a tool-owned tree", () => {
-		const dir = tempDir();
-		// what .vitepress/ holds after a build: VitePress's own output and
-		// cache beside the generated files (see isVitepressOwn in src/site.ts)
-		seed(dir, {
+		const foreign = tempDir();
+		seed(foreign, {
 			"dist/index.html": "built\n",
 			"cache/deps/x.json": "cached\n",
 			"config.mts.timestamp-123.mjs": "transient\n",
 			"generated/stale.ts": "old\n",
 		});
-
 		syncDir(
-			dir,
+			foreign,
 			new Map([["config.mts", "baked\n"]]),
 			true,
 			(rel) =>
@@ -79,48 +80,145 @@ describe("syncDir", () => {
 				rel.startsWith("cache/") ||
 				rel.includes(".timestamp-"),
 		);
+		expect(readFileSync(join(foreign, "dist/index.html"), "utf8")).toBe("built\n");
+		expect(readFileSync(join(foreign, "cache/deps/x.json"), "utf8")).toBe("cached\n");
+		expect(existsSync(join(foreign, "config.mts.timestamp-123.mjs"))).toBe(true);
+		expect(existsSync(join(foreign, "generated/stale.ts"))).toBe(false);
 
-		expect(readFileSync(join(dir, "dist/index.html"), "utf8")).toBe("built\n");
-		expect(readFileSync(join(dir, "cache/deps/x.json"), "utf8")).toBe("cached\n");
-		expect(existsSync(join(dir, "config.mts.timestamp-123.mjs"))).toBe(true);
-		// the exemption is not a blanket skip: generated leftovers still sweep
-		expect(existsSync(join(dir, "generated/stale.ts"))).toBe(false);
+		const recased = tempDir();
+		seed(recased, { "widget.md": "old\n" });
+		syncDir(recased, new Map([["Widget.md", "new\n"]]));
+		expect(readFileSync(join(recased, "Widget.md"), "utf8")).toBe("new\n");
+		expect(readdirSync(recased)).toEqual(["Widget.md"]);
+
+		const never = join(tempDir(), "never");
+		syncDir(never, new Map());
+		expect(existsSync(never)).toBe(false);
 	});
+});
 
-	it("converges a re-cased slug to the emitted casing", () => {
-		// on a case-sensitive filesystem the old casing is swept as stale; on a
-		// case-preserving one (the Windows CI leg) the write lands in the
-		// old-cased file and the sweep renames it. Same postcondition, so this
-		// one test covers whichever branch the host takes.
-		const dir = tempDir();
-		seed(dir, { "widget.md": "old\n" });
-		syncDir(dir, new Map([["Widget.md", "new\n"]]));
+describe("filterModel ([source] include/exclude)", () => {
+	function filterable(ids: string[], files: Array<string | undefined>): DocModel {
+		const model = parseDocModel(modelJson(ids.map((id) => ({ id }))));
+		model.diagnostics = files.map((file) => ({
+			severity: "error",
+			code: "parse-error",
+			message: "x",
+			...(file === undefined ? {} : { file }),
+		}));
+		return model;
+	}
+	const ids = (model: DocModel): string[] => model.modules.map((m) => m.id);
 
-		expect(readFileSync(join(dir, "Widget.md"), "utf8")).toBe("new\n");
-		// readdir names are the ground truth: existsSync answers yes for
-		// either casing on a case-preserving filesystem
-		expect(readdirSync(dir)).toEqual(["Widget.md"]);
-	});
+	it("filters modules and file-scoped diagnostics across globs, dot-dirs, and Windows paths", () => {
+		const passthrough = filterable(["src/a.luau"], ["src/a.luau"]);
+		expect(filterModel(passthrough, undefined, undefined)).toBe(passthrough);
+		expect(filterModel(passthrough, undefined, [])).toBe(passthrough);
 
-	it("creates nothing for an empty set over a missing directory", () => {
-		const dir = join(tempDir(), "never");
-		syncDir(dir, new Map());
-		expect(existsSync(dir)).toBe(false);
+		expect(ids(filterModel(filterable(["src/a.luau"], []), [], undefined))).toEqual([]);
+		expect(
+			ids(
+				filterModel(
+					filterable(["src/.hidden/a.luau", "src/b.luau"], []),
+					["src/.hidden/**"],
+					undefined,
+				),
+			),
+		).toEqual(["src/.hidden/a.luau"]);
+
+		const win = filterModel(
+			filterable(["src\\gen\\a.luau", "src\\b.luau"], ["src\\gen\\a.luau"]),
+			undefined,
+			["src/gen/**"],
+		);
+		expect(ids(win)).toEqual(["src\\b.luau"]);
+		expect(win.diagnostics).toEqual([]);
+
+		const diag = filterModel(
+			filterable(
+				["src/a.luau", "src/gen/b.luau"],
+				["src/gen/b.luau", "src/a.luau", undefined],
+			),
+			undefined,
+			["src/gen/**"],
+		);
+		expect(ids(diag)).toEqual(["src/a.luau"]);
+		expect(diag.diagnostics.map((d) => d.file)).toEqual(["src/a.luau", undefined]);
 	});
 });
 
 describe("runBuild", () => {
-	it("walks the guides before it writes, so a bad sidecar leaves api/ as it was", async () => {
-		const dir = tempDir();
-		// no sources: the extractor never runs, and the api/ sweep would
-		// otherwise delete the stale page below
-		seed(dir, {
+	const rendered = (context: BuildContext, model: DocModel): RenderedModel => ({
+		model,
+		result: emitDocs(model, context.config),
+	});
+
+	it("validates guides before writing and toggles public/docmodel.json with [docs] model", async () => {
+		const badDir = tempDir();
+		seed(badDir, {
 			"luaudocs.toml": "[source]\nentries = []\n",
 			".luaudocs/api/stale.md": "old\n",
 			".luaudocs/guide/reference/_category_.json": '{ "label": "Reference", }\n',
 			".luaudocs/guide/reference/cli.md": "# CLI\n",
 		});
-		await expect(runBuild(createContext(dir))).rejects.toThrow(/_category_\.json/);
-		expect(existsSync(join(dir, ".luaudocs", "api", "stale.md"))).toBe(true);
+		await expect(runBuild(createContext(badDir))).rejects.toThrow(/_category_\.json/);
+		expect(existsSync(join(badDir, ".luaudocs", "api", "stale.md"))).toBe(true);
+
+		const dir = tempDir();
+		seed(dir, { "luaudocs.toml": "[source]\nentries = []\n[docs]\nmodel = true\n" });
+		await runBuild(createContext(dir));
+		const published = join(dir, ".luaudocs", "public", "docmodel.json");
+		expect(JSON.parse(readFileSync(published, "utf8")).schemaVersion).toBe(1);
+
+		seed(dir, { "luaudocs.toml": "[source]\nentries = []\n" });
+		await runBuild(createContext(dir));
+		expect(existsSync(published)).toBe(false);
+	});
+
+	it("preserves previously generated pages and navigation on an error build", async () => {
+		const dir = tempDir();
+		seed(dir, {
+			"luaudocs.toml": '[docs]\nmodel = true\nurl = "https://docs.example.com"\n',
+			"CHANGELOG.md": "# Changelog\n\n- first\n",
+		});
+		const docs = join(dir, ".luaudocs");
+		const good = parseDocModel(readFixture("docmodel-sample.json"));
+		vi.spyOn(console, "warn").mockImplementation(() => {});
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			await runBuild(createContext(dir), { rendered: rendered(createContext(dir), good) });
+			const watched = [
+				"public/docmodel.json",
+				"public/llms.txt",
+				"public/llms-full.txt",
+				"changelog.md",
+				"api/index.md",
+				".vitepress/generated/api-nav.ts",
+			];
+			const before = new Map(
+				watched.map((rel) => [rel, readFileSync(join(docs, rel), "utf8")]),
+			);
+			const pagesBefore = readdirSync(join(docs, "api")).sort();
+			expect(pagesBefore.length).toBeGreaterThan(2);
+
+			const broken = parseDocModel(readFixture("docmodel-sample.json"));
+			broken.modules = broken.modules.slice(0, 1);
+			broken.diagnostics = [
+				{ severity: "error", code: "parse-error", message: "boom", file: "src/State.luau" },
+			];
+			seed(dir, { "CHANGELOG.md": "# Changelog\n\n- second\n" });
+			const outcome = await runBuild(createContext(dir), {
+				rendered: rendered(createContext(dir), broken),
+			});
+
+			expect(outcome.counts.errors).toBe(1);
+			expect(outcome.summary.deleted).toBe(0);
+			expect(readdirSync(join(docs, "api")).sort()).toEqual(pagesBefore);
+			for (const [rel, text] of before) {
+				expect(readFileSync(join(docs, rel), "utf8"), rel).toBe(text);
+			}
+		} finally {
+			vi.restoreAllMocks();
+		}
 	});
 });

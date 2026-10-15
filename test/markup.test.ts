@@ -188,14 +188,17 @@ describe("admonitions", () => {
 });
 
 describe("frames", () => {
+	// a markdown link, not a raw `<a href>`: VitePress bases and dead-link
+	// checks only the former, so a raw href 404s on a project-pages deploy
 	it("labels the frame and links the label when both attributes are given", () => {
 		const page =
 			'<Frame label="Generated reference" link="/api/Flux#state-1">\n\nBody.\n\n</Frame>';
 		expect(rewriteMarkup(page)).toBe(
 			'<div class="luaudocs-frame">\n' +
-				'<div class="luaudocs-frame-label">' +
-				'<a href="/api/Flux#state-1">Generated reference' +
-				'<span class="luaudocs-frame-arrow">&#8594;</span></a></div>\n' +
+				'<div class="luaudocs-frame-label">\n\n' +
+				"[Generated reference" +
+				'<span class="luaudocs-frame-arrow">&#8594;</span>](/api/Flux#state-1)' +
+				"\n\n</div>\n" +
 				"\nBody.\n\n</div>",
 		);
 	});
@@ -209,10 +212,16 @@ describe("frames", () => {
 	});
 
 	it("escapes both attributes", () => {
-		const page = '<Frame label="A & B" link="/api/X?a=1&b=2">\n\nBody.\n\n</Frame>';
+		const page = '<Frame label="A & [B]" link="/api/X (old)?a=1&b=2">\n\nBody.\n\n</Frame>';
 		const out = rewriteMarkup(page);
-		expect(out).toContain('href="/api/X?a=1&amp;b=2"');
-		expect(out).toContain(">A &amp; B<");
+		// the label is link text, the link a destination that may not hold a
+		// raw space and needs brackets around its parentheses
+		expect(out).toContain("[A \\& \\[B\\]<span");
+		expect(out).toContain("](</api/X%20(old)?a=1&b=2>)");
+		// unlinked, the label is element text
+		expect(rewriteMarkup('<Frame label="A & B">\n\nBody.\n\n</Frame>')).toContain(
+			">A &amp; B<",
+		);
 	});
 
 	// blank lines around the body are what keep it markdown rather than raw HTML
@@ -245,7 +254,26 @@ describe("frames", () => {
 		const out = rewriteMarkup(
 			'<Frame label="Out">\n\n### `state` <Badge text="new" />\n\n</Frame>',
 		);
-		expect(out).toContain('<h3><code>state</code> <Badge text="new" /></h3>');
+		expect(out).toContain('<h3><code v-pre>state</code> <Badge text="new" /></h3>');
+	});
+
+	// a page title or section heading is written escaped rather than as a code
+	// span, and the element has to show what the escape stood for
+	it("writes a framed heading's escaped characters as themselves", () => {
+		const out = rewriteMarkup('<Frame label="Out">\n\n## \\_Inner\\_ \\<T\\>\n\n</Frame>');
+		expect(out).toContain("<h2>_Inner_ &lt;T&gt;</h2>");
+	});
+
+	// a re-export badge is a markdown link on the page, so a framed copy of its
+	// heading has to carry the anchor that link renders as
+	it("writes a framed heading's badge link as the anchor it would have rendered", () => {
+		const out = rewriteMarkup(
+			'<Frame label="Out">\n\n### `Queue` [<Badge text="Module" />](/api/Queue){.badge-link .ignore-header}\n\n</Frame>',
+		);
+		expect(out).toContain(
+			'<h3><code v-pre>Queue</code> <a href="/api/Queue" class="badge-link ignore-header">' +
+				'<Badge text="Module" /></a></h3>',
+		);
 	});
 
 	it("drops the trailing hashes of a closed ATX heading", () => {

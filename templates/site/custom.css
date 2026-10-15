@@ -3,7 +3,7 @@
  * gradient, or any default-theme variable here:
  * https://vitepress.dev/guide/extending-default-theme#customizing-css
  *
- * Delete the file and the next build stops loading it.
+ * Delete this file and the next build stops loading it.
  */
 :root {
 	/* --vp-c-brand-1: #646cff; */

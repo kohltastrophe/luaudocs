@@ -1,8 +1,9 @@
 /**
- * Regenerates the checked-in doc-model fixtures: real extractor output over
- * test/fixtures/*-project/, captured so `bun run test` can drive the renderer
- * without a lute install. Edit anything under those projects and re-run this,
- * or CI's --check will fail on the stale capture.
+ * Regenerates the checked-in doc-model fixtures (`test/fixtures/docmodel-*.json`)
+ * by running the extractor over `test/fixtures/*-project/`. These captured JSON
+ * fixtures allow `bun run test` to exercise the TypeScript renderer without
+ * requiring a Lute binary. Re-run this script after editing those fixture
+ * projects or changing extractor output, or CI's `--check` step will fail:
  *
  *   bun run regen:docmodels           # rewrite the fixtures
  *   bun run regen:docmodels --check   # verify they are up to date (CI)
@@ -12,7 +13,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { extractorJson } from "../src/extract";
 
-/** Each captured project, and the fixture its extractor output is pinned in. */
+/** Fixture projects and their corresponding checked-in doc-model JSON files. */
 const captures = [
 	{ project: "sample-project", capture: "docmodel-sample.json" },
 	{ project: "tags-project", capture: "docmodel-tags.json" },
@@ -22,19 +23,17 @@ const fixtures = fileURLToPath(new URL("../test/fixtures/", import.meta.url));
 const check = process.argv.includes("--check");
 let stale = 0;
 
-// the captures are independent Lute subprocesses, so they run together and both
-// this script and CI's --check wait on the slower one rather than their sum
+// Run the independent Lute subprocesses in parallel.
 const outputs = await Promise.all(
 	captures.map(async ({ project }) => {
-		// pretty: emit.luau sorts keys either way, so output stays byte-stable
-		// and a model change reads as a diff, not one rewritten 30 KB line
+		// `pretty: true` (with `emit.luau`'s sorted keys) produces deterministic,
+		// line-diffable JSON fixtures.
 		try {
 			return await extractorJson({
 				root: join(fixtures, project),
 				entries: ["src/init.luau"],
 				pretty: true,
-				// no one is waiting on a capture: a slow fixture should finish,
-				// not trip the interactive timeout the build path wants
+				// Disable the interactive build timeout when capturing fixtures.
 				timeoutMs: 0,
 			});
 		} catch (error) {

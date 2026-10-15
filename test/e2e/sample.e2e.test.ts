@@ -56,6 +56,18 @@ function cli(args: string[], cwd: string): Promise<CliResult> {
 	});
 }
 
+/**
+ * A built page's own content, between the doc container and the prev/next
+ * footer: the sidebar and the pager link every page from every page, so a
+ * page-wide search for a link or a name proves nothing about the page.
+ */
+function docContent(html: string): string {
+	const start = html.indexOf('class="vp-doc');
+	expect(start, "no vp-doc container in the page").toBeGreaterThan(-1);
+	const end = html.indexOf('class="VPDocFooter', start);
+	return html.slice(start, end === -1 ? undefined : end);
+}
+
 /** Every built page, for the sweeps that must hold anywhere in the site. */
 function distHtml(dist: string): Array<[string, string]> {
 	return filesUnder(dist)
@@ -136,10 +148,10 @@ describe("luaudocs e2e on the sample project", () => {
 		const sampleHtml = readFileSync(join(dist, "api", "Sample.html"), "utf8");
 		expect(sampleHtml).toContain('id="state"');
 		expect(sampleHtml).toContain('id="state-1"');
-		expect(sampleHtml).toContain("/api/State");
+		expect(docContent(sampleHtml)).toContain('href="/api/State');
 
 		const stateHtml = readFileSync(join(dist, "api", "State.html"), "utf8");
-		expect(stateHtml).toContain("Connect");
+		expect(docContent(stateHtml)).toContain("Connect");
 		// scoped to the fence block on purpose: the same url is linked from the
 		// return-type list below it, so a page-wide search would pass even with
 		// every signature link dropped
@@ -194,6 +206,20 @@ describe("luaudocs e2e on the sample project", () => {
 		expect(indexHtml).toContain("VPNavBarMenuLink");
 		expect(indexHtml).toContain(">Guide<");
 		expect(indexHtml).toContain(">API<");
+	}, 300_000);
+
+	// the pages emitted fine and VitePress then failed the site: a build
+	// failure (1), not the usage or environment error (2) it used to exit with
+	it("exits 1 when VitePress fails the site", async () => {
+		const guide = join(projectDir, ".luaudocs", "guide", "broken.md");
+		writeFileSync(guide, "# Broken\n\n[nowhere](./does-not-exist)\n");
+		try {
+			const result = await cli(["build", "."], projectDir);
+			expect(result.exitCode, result.stderr).toBe(1);
+			expect(result.stderr).toContain("vitepress build failed");
+		} finally {
+			rmSync(guide);
+		}
 	}, 300_000);
 });
 
@@ -276,10 +302,15 @@ describe("emit owns the generated api directory", () => {
 	it("keeps previously generated pages when extraction reports errors", async () => {
 		expect(existsSync(join(projectDir, ".luaudocs", "api", "State.md"))).toBe(true);
 		const llmsPath = join(projectDir, ".luaudocs", "public", "llms.txt");
-		const sidebarPath = join(projectDir, ".luaudocs", ".vitepress", "generated", "sidebar.ts");
+		const generated = join(projectDir, ".luaudocs", ".vitepress", "generated");
+		const apiNavPath = join(generated, "api-nav.ts");
 		const llmsBefore = readFileSync(llmsPath, "utf8");
-		const sidebarBefore = readFileSync(sidebarPath, "utf8");
+		const apiNavBefore = readFileSync(apiNavPath, "utf8");
+		expect(apiNavBefore).toContain('"/api/State"');
 		appendFileSync(join(projectDir, "src", "State.luau"), "\nlocal = (\n");
+		// a guide written while the error persists is not the model's to
+		// withhold: it reaches the navigation anyway
+		writeFileSync(join(projectDir, ".luaudocs", "guide", "later.md"), "# Later\n");
 
 		const result = await cli(["build", ".", "--emit-only"], projectDir);
 		expect(result.exitCode).toBe(1);
@@ -289,9 +320,71 @@ describe("emit owns the generated api directory", () => {
 		// typo cannot unpublish it
 		expect(existsSync(join(projectDir, ".luaudocs", "api", "State.md"))).toBe(true);
 		// the other half of the invariant: the kept pages stay LISTED, so the
-		// sidebar and llms index are not rewritten to the broken model
+		// API navigation and llms index are not rewritten to the broken model
 		expect(readFileSync(llmsPath, "utf8")).toBe(llmsBefore);
-		expect(readFileSync(sidebarPath, "utf8")).toBe(sidebarBefore);
+		expect(readFileSync(apiNavPath, "utf8")).toBe(apiNavBefore);
+		expect(readFileSync(join(generated, "sidebar.ts"), "utf8")).toContain('"/guide/later"');
+		expect(readFileSync(join(generated, "trails.ts"), "utf8")).toContain('"guide/later.md"');
+	}, 120_000);
+});
+
+// its own copy, config-less: `llms` writes into the project root and edits a
+// source, and it has to work where nothing was ever initialized or built
+describe("llms", () => {
+	it("writes the checkout index, holds it to the sources, and never takes a user's file", async () => {
+		const projectDir = freshProject();
+		const target = join(projectDir, "llms.txt");
+
+		const missing = await cli(["llms", "--check"], projectDir);
+		expect(missing.exitCode).toBe(1);
+		expect(missing.stderr).toContain("llms.txt is missing");
+		expect(existsSync(target)).toBe(false);
+
+		const written = await cli(["llms"], projectDir);
+		expect(written.exitCode, written.stderr).toBe(0);
+		expect(written.stdout).toContain("wrote llms.txt");
+		const index = readFileSync(target, "utf8");
+		expect(index.startsWith("<!-- Generated by luaudocs")).toBe(true);
+		expect(index).toContain(`\n# ${basename(projectDir)}\n`);
+		expect(index).toContain("\n## Sample.State\n");
+		expect(index).toMatch(
+			/- \[`State:Connect\(callback: Type\.Function\): Type\.Function`\]\(src\/State\.luau#L\d+-L\d+\): Adds a hook/,
+		);
+		// the extraction was all it needed: no docs dir came into being
+		expect(existsSync(join(projectDir, ".luaudocs"))).toBe(false);
+
+		const current = await cli(["llms", ".", "--check"], projectDir);
+		expect(current.exitCode, current.stderr).toBe(0);
+		expect(current.stdout).toContain("up to date llms.txt");
+
+		// a doc comment edit is a change the index has to follow
+		const statePath = join(projectDir, "src", "State.luau");
+		const source = readFileSync(statePath, "utf8");
+		const edited = source.replace(
+			"--- Adds a hook to run whenever the value changes",
+			"--- Registers a hook to run whenever the value changes",
+		);
+		expect(edited).not.toBe(source);
+		writeFileSync(statePath, edited);
+		const stale = await cli(["llms", "--check"], projectDir);
+		expect(stale.exitCode).toBe(1);
+		expect(stale.stderr).toContain("llms.txt is out of date");
+		expect(readFileSync(target, "utf8")).toBe(index);
+		const refreshed = await cli(["llms"], projectDir);
+		expect(refreshed.exitCode, refreshed.stderr).toBe(0);
+		expect(readFileSync(target, "utf8")).toContain("): Registers a hook");
+
+		// a file the user wrote is theirs: refused, untouched, and --out is the way around
+		writeFileSync(target, "# Mine\n");
+		const refused = await cli(["llms"], projectDir);
+		expect(refused.exitCode).toBe(2);
+		expect(refused.stderr).toContain("was not written by luaudocs");
+		expect(readFileSync(target, "utf8")).toBe("# Mine\n");
+		const elsewhere = await cli(["llms", "--out", "agents/api.txt"], projectDir);
+		expect(elsewhere.exitCode, elsewhere.stderr).toBe(0);
+		expect(readFileSync(join(projectDir, "agents", "api.txt"), "utf8")).toContain(
+			"](../src/State.luau#L",
+		);
 	}, 120_000);
 });
 

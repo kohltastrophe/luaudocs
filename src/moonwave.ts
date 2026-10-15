@@ -1,13 +1,13 @@
 /**
- * Everything `init --from-moonwave` understands about a moonwave project: the
- * one-time moonwave.toml/moonwave.json -> luaudocs.toml conversion, and the
- * one-time port of the hand-written pages (docs/ -> guide/, pages/ -> the
- * docs root) out of Docusaurus's MDX dialect.
+ * Implements `luaudocs init --from-moonwave`: converts `moonwave.toml` /
+ * `moonwave.json` to `luaudocs.toml` and ports hand-written pages (`docs/` ->
+ * `guide/`, `pages/` -> the docs root) out of Docusaurus MDX.
  *
- * The scope rule for both halves: what has a real equivalent is mapped, what
- * the generated site makes moot is consumed silently, and everything else is
- * named in the report rather than guessed at. Converted pages carry no
- * generated marker: they are the user's content from the moment they land.
+ * Conversion rules: settings and syntax with a direct VitePress equivalent are
+ * mapped, settings made moot by the generated site are dropped silently, and
+ * everything else is listed in the console report rather than guessed at.
+ * Converted pages carry no generated marker because they belong to the user
+ * immediately after creation.
  */
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
@@ -41,39 +41,45 @@ import {
  * ------------------------------------------------------------------ the config
  */
 
-/** A moonwave config parsed but not yet converted, so init can read the facts
- * the scaffold needs (and fail on junk) before it writes anything. */
+/**
+ * Parsed Moonwave config, read before `init` writes anything so invalid TOML/JSON
+ * aborts cleanly on an untouched tree.
+ */
 export interface MoonwaveSource {
 	raw: Record<string, unknown>;
 	projectDir: string;
 	title: string | undefined;
 	description: string | undefined;
-	/** Whether the conversion will produce a homepage index.md. */
+	/** True when `convertMoonwave` will emit a home-layout `index.md`. */
 	hasHomeBranding: boolean;
 }
 
 export interface MoonwaveConversion {
 	configToml: string;
-	/** A home-layout index.md carrying the moonwave homepage's branding, when
-	 * it had any; user-owned from the start, like the converted pages. */
+	/**
+	 * Home-layout `index.md` carrying Moonwave's homepage banner and feature cards
+	 * when present (written without a generated marker so it belongs to the user).
+	 */
 	homeIndexMd?: string;
 	report: string[];
 }
 
-/** A parsed TOML/JSON table, or an empty one for junk: every read stays safe. */
+/** Returns `value` as a record when it is a non-array object, or `{}` otherwise. */
 function tableOf(value: unknown): Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value)
 		? (value as Record<string, unknown>)
 		: {};
 }
 
-/** The same for a scalar, so a field with a fallback reads as one `??`. */
+/** Returns `value` when it is a string, or `undefined` otherwise. */
 function stringOf(value: unknown): string | undefined {
 	return typeof value === "string" ? value : undefined;
 }
 
-/** The keys of `raw` that neither mapped nor may drop silently, as dotted
- * paths for the report. */
+/**
+ * Returns dotted key paths for keys in `raw` that are neither in `handled` nor
+ * in `silent`, for the unmapped-keys report.
+ */
 function unmapped(
 	raw: Record<string, unknown>,
 	path: string,
@@ -85,14 +91,15 @@ function unmapped(
 		.map((key) => (path === "" ? key : `${path}.${key}`));
 }
 
-/** A static-dir path rooted for public/ (where the static copy lands); a full
- * URL passes through. Docusaurus spells these bare ("img/favicon.ico"). */
+/**
+ * Normalizes a Docusaurus `.moonwave/static/` asset path (`"img/favicon.ico"`)
+ * to a root-relative `/...` path served from `public/`, leaving full URLs untouched.
+ */
 function rooted(path: string): string {
 	return /^[a-z][a-z0-9+.-]*:/i.test(path) ? path : `/${path.replace(/^\/+/, "")}`;
 }
 
-/** `host` + `baseUrl` joined into one published URL, or undefined when the
- * parts cannot form one. */
+/** Joins `host` and `baseUrl` into a single published URL, or returns `undefined` if invalid. */
 function joinedUrl(host: string, baseUrl: unknown, defaultBase: string): string | undefined {
 	try {
 		return new URL(stringOf(baseUrl) ?? defaultBase, host).href;
@@ -101,7 +108,7 @@ function joinedUrl(host: string, baseUrl: unknown, defaultBase: string): string 
 	}
 }
 
-/** The parsed moonwave.toml/moonwave.json; throws on junk it cannot parse. */
+/** Parses `moonwave.toml` or `moonwave.json`, throwing on malformed syntax. */
 export function readMoonwave(moonwavePath: string): MoonwaveSource {
 	const text = readFileSync(moonwavePath, "utf8");
 	const raw = (moonwavePath.endsWith(".json") ? JSON.parse(text) : parseToml(text)) as Record<
@@ -113,10 +120,10 @@ export function readMoonwave(moonwavePath: string): MoonwaveSource {
 	return {
 		raw,
 		projectDir: dirname(moonwavePath),
-		// title is required by the luaudocs config; moonwave allows omitting it
+		// `title` is required in `luaudocs.toml`, whereas Moonwave allows omitting it.
 		title: stringOf(raw.title),
 		description: stringOf(docusaurus.tagline),
-		// the same presence test the conversion applies to banner and features
+		// Matches the condition `convertMoonwave` uses to emit `homeIndexMd`.
 		hasHomeBranding:
 			typeof home.bannerImage === "string" ||
 			(Array.isArray(home.features) && home.features.length > 0),
@@ -124,24 +131,24 @@ export function readMoonwave(moonwavePath: string): MoonwaveSource {
 }
 
 /**
- * One-time moonwave config -> luaudocs.toml conversion. Why each silent key
- * is moot: the scaffolded Pages workflow deploys from an action, so there is
- * no deployment branch to pick; dead links always fail a build here and the
- * error names each one, so there is no severity to set; URLs have one shape
- * under cleanUrls; the VitePress footer has one style; the generated landing
- * page replaces moonwave's homepage toggle.
+ * Converts a parsed Moonwave config into `luaudocs.toml`.
+ *
+ * Keys dropped silently because the generated VitePress site makes them moot:
+ * - `docusaurus.deploymentBranch`: the scaffolded workflow deploys via `actions/deploy-pages`
+ * - `docusaurus.onBrokenLinks` / `onBrokenMarkdownLinks`: VitePress always checks links on build
+ * - `docusaurus.trailingSlash`: VitePress runs with `cleanUrls: true`
+ * - `footer.style`: VitePress has a single footer style
+ * - `home.enabled`: replaced by the generated or converted `index.md` landing page
  */
 export function convertMoonwave(
 	source: MoonwaveSource,
 	options: {
 		fallbackTitle?: string;
-		/** An existing non-default `[docs] dir`; moonwave has no equivalent key. */
+		/** Preserves an existing custom `[docs] dir`, which Moonwave has no key for. */
 		docsDir?: string;
-		/** The guide tree's first page (converted or scaffolded), for the
-		 * rebuilt navbar and the homepage hero. */
+		/** Link to the first guide page on disk, used in the navbar and homepage hero. */
 		guideLink?: string;
-		/** Overrides whether the homepage pulls the README in: set when the
-		 * converted config is not the one that will govern the build. */
+		/** Overrides `home.includeReadme` when an existing `luaudocs.toml` is kept without `--force`. */
 		homeReadme?: boolean;
 	} = {},
 ): MoonwaveConversion {
@@ -160,15 +167,13 @@ export function convertMoonwave(
 		config.description = description;
 	}
 
-	// moonwave's source roots are the --code CLI flag (default ["lib", "src"]),
-	// never a config key, so probe for the module roots that exist, in
-	// moonwave's order
+	// Moonwave takes source roots via `--code` (defaulting to `["lib", "src"]`)
+	// rather than a config key. Probe in Moonwave's order and fall back to
+	// `DEFAULT_ENTRIES` so the converted site always has an API section.
 	const probed = probeEntries(projectDir, ["lib", "src"], true);
-	const entries = probed.length > 0 ? probed : DEFAULT_ENTRIES;
-	config.source = { entries };
+	config.source = { entries: probed.length > 0 ? probed : DEFAULT_ENTRIES };
 
-	// gitRepoUrl, else the docusaurus deploy coordinates: they name the same
-	// GitHub repo, which is what moonwave's own deploy pushes to
+	// Prefer `gitRepoUrl`, falling back to `docusaurus.organizationName` + `projectName`.
 	const org = stringOf(docusaurus.organizationName);
 	const project = stringOf(docusaurus.projectName);
 	const repoUrl =
@@ -182,7 +187,7 @@ export function convertMoonwave(
 	}
 
 	const site: Record<string, unknown> = {};
-	// the navbar's brand text, which VitePress calls siteTitle
+	// `navbar.title` in Docusaurus corresponds to `siteTitle` in VitePress.
 	if (typeof navbar.title === "string") {
 		site.siteTitle = navbar.title;
 	}
@@ -191,8 +196,7 @@ export function convertMoonwave(
 	}
 	const logo = tableOf(navbar.logo);
 	if (typeof logo.src === "string") {
-		// `alt` drops silently with the rest of navbar.logo: the site config
-		// carries no slot for it
+		// Drop `navbar.logo.alt` silently because `[site] logo` takes a path or `{ light, dark }`.
 		site.logo =
 			typeof logo.srcDark === "string"
 				? { light: rooted(logo.src), dark: rooted(logo.srcDark) }
@@ -209,10 +213,9 @@ export function convertMoonwave(
 		const entry = tableOf(item);
 		const link = stringOf(entry.href) ?? entry.to;
 		if (typeof entry.label === "string" && typeof link === "string") {
-			// `position` drops silently: the VitePress nav is one left-to-right
-			// row, and the GitHub icon already sits right of it. An internal
-			// `to` resolved against moonwave's baseUrl, so it is site-absolute
-			// here, and it moves with the page it names.
+			// Drop `position` silently (VitePress renders a single navbar row
+			// with the GitHub icon to its right), and rewrite internal `to`
+			// paths (`docs/...` -> `/guide/...`).
 			nav.push({ text: entry.label, link: convertTarget(rooted(link)) });
 		} else {
 			itemsReport.push(`navbar.items[${index}]`);
@@ -222,7 +225,7 @@ export function convertMoonwave(
 		site.nav = [
 			...derivedNav(
 				guideLink,
-				entries.length > 0,
+				true,
 				raw.changelog !== false && existsSync(join(projectDir, "CHANGELOG.md")),
 			),
 			...nav,
@@ -234,12 +237,11 @@ export function convertMoonwave(
 
 	const docs: Record<string, unknown> = {};
 	if (docsDir !== undefined) {
-		// scaffold targets the dir the existing config names, so the converted
-		// config must keep naming it or the site splits across two dirs
+		// Keep `[docs] dir` aligned with the existing directory `init` scaffolded into.
 		docs.dir = docsDir;
 	}
-	// only `false` needs carrying: luaudocs auto-enables the changelog page
-	// whenever CHANGELOG.md exists, which is moonwave's default too
+	// Only `changelog = false` needs to be written: LuauDocs enables the
+	// changelog page automatically when `CHANGELOG.md` exists, matching Moonwave.
 	if (raw.changelog === false) {
 		docs.changelog = false;
 	}
@@ -247,14 +249,12 @@ export function convertMoonwave(
 		docs.includeReadme = true;
 	}
 	if (typeof docusaurus.url === "string") {
-		// url is the host, baseUrl the path; [docs] url carries both. A
-		// project-pages site with the wrong base ships a blank page. On a junk
-		// host the URL is kept as written; the config's url check surfaces it.
+		// Combine Docusaurus's `url` (origin) and `baseUrl` (path) into `[docs] url`.
+		// If `docusaurus.url` is malformed, keep it as written so config validation surfaces it.
 		docs.url = joinedUrl(docusaurus.url, docusaurus.baseUrl, "/") ?? docusaurus.url;
 	} else if (org !== undefined) {
-		// moonwave's own defaults when url is unset: the org's pages host,
-		// based under the project's name (moonwave serves project pages from
-		// /<repo>/). Junk coordinates drop the guess rather than crash.
+		// When `docusaurus.url` is unset, use Moonwave's GitHub Pages default:
+		// `https://<org>.github.io/<project>/`.
 		const url = joinedUrl(
 			`https://${org}.github.io`,
 			docusaurus.baseUrl,
@@ -268,8 +268,8 @@ export function convertMoonwave(
 		config.docs = docs;
 	}
 
-	// the homepage branding the generated landing cannot derive becomes a real
-	// index.md; without either key the generated hero already covers it
+	// Emit a user-owned `index.md` when Moonwave configured a banner image or
+	// feature cards; otherwise the build's generated hero already covers it.
 	let homeIndexMd: string | undefined;
 	const features = Array.isArray(home.features) ? home.features.map(tableOf) : [];
 	const banner = typeof home.bannerImage === "string" ? rooted(home.bannerImage) : undefined;
@@ -278,7 +278,7 @@ export function convertMoonwave(
 			title: resolvedTitle,
 			tagline: description,
 			image: banner,
-			actions: heroActions(guideLink, entries.length > 0),
+			actions: heroActions(guideLink, true),
 			features: features.map((card) => {
 				const icon = stringOf(card.image);
 				return {
@@ -333,29 +333,30 @@ export function convertMoonwave(
  */
 
 export interface MoonwavePage {
-	/** Destination, relative to the docs dir ("guide/intro.md"). */
+	/** Destination path relative to the docs directory (`"guide/intro.md"`). */
 	destRel: string;
 	content: string | Buffer;
 }
 
 export interface MoonwavePages {
 	files: MoonwavePage[];
-	/** Report lines, same shape the config conversion emits. */
+	/** Console report lines, in the same format as `convertMoonwave`. */
 	report: string[];
 }
 
 const PAGE_EXTENSION = /\.mdx?$/;
 
 /**
- * The hand-written half of a moonwave project, read and converted but not
- * written (init owns the write protocol). docs/ pages land under guide/,
- * where the sidebar walk reads the sidebar_position frontmatter they already
- * carry; pages/ markdown lands at the docs root, standalone at its old path;
- * anything else under either folder (co-located images, the `_category_`
- * sidecars that still configure their folders) copies verbatim, and
- * .moonwave/custom.css arrives with the known Infima renames done. Draft and
- * unlisted pages stay behind (moonwave did not publish them); blog/, React
- * pages, and a pinned sidebars.js have nothing to convert to.
+ * Reads and converts a Moonwave project's hand-written content without writing
+ * to disk (`init` owns the file-writing protocol):
+ * - `docs/` Markdown/MDX pages land under `guide/`, where the sidebar walk reads
+ *   their existing `sidebar_position` frontmatter.
+ * - `pages/` Markdown/MDX pages land at the docs root (except `pages/api/*`,
+ *   which would be swept by the next build).
+ * - Co-located assets and `_category_` sidecars copy verbatim.
+ * - `.moonwave/custom.css` lands at `custom.css` with known Infima variables renamed.
+ * - Draft/unlisted pages, `blog/`, React pages, and `.moonwave/sidebars.js` are
+ *   skipped and listed in the report.
  */
 export function collectMoonwavePages(projectDir: string): MoonwavePages {
 	const files: MoonwavePage[] = [];
@@ -367,8 +368,8 @@ export function collectMoonwavePages(projectDir: string): MoonwavePages {
 	const convert = (abs: string, srcRel: string, destRel: string): void => {
 		const text = readFileSync(abs, "utf8");
 		const block = frontmatter(text);
-		// docusaurus kept draft and unlisted pages out of the published site;
-		// converting one would publish it, so it stays behind, named
+		// Skip `draft` and `unlisted` pages so unpublished Docusaurus drafts are
+		// not accidentally published on the converted site.
 		if (field(block, "draft") === "true" || field(block, "unlisted") === "true") {
 			drafts.push(srcRel);
 			return;
@@ -376,8 +377,8 @@ export function collectMoonwavePages(projectDir: string): MoonwavePages {
 		const { content, components } = convertMdxPage(text);
 		const dest = destRel.replace(PAGE_EXTENSION, ".md");
 		files.push({ destRel: dest, content });
-		// a slug or id moved the page's URL in docusaurus; here the file path
-		// is the URL, so links aimed at the old address need a look
+		// Flag frontmatter `slug` or `id` overrides because VitePress routes
+		// follow the file path directly.
 		if (field(block, "slug|id") !== undefined) {
 			checkByHand.push(
 				`  check by hand: ${dest} sets slug/id, but its URL follows the file path here`,
@@ -399,10 +400,9 @@ export function collectMoonwavePages(projectDir: string): MoonwavePages {
 		}
 		const content = readFileSync(abs);
 		files.push({ destRel: `guide/${rel}`, content });
-		// the sidecar keeps configuring its folder here, so it copies like any
-		// other file; only the keys the sidebar does not read (`link`,
-		// `className`, the rest of docusaurus's category options) need a look.
-		// One that does not parse throws here, before anything is written.
+		// Copy `_category_` sidecars and report any Docusaurus-only keys (`link`,
+		// `className`, etc.) that LuauDocs does not read. Throws before any file
+		// is written if the sidecar itself fails to parse.
 		if (CATEGORY_FILES.includes(basename(rel))) {
 			const extra = Object.keys(
 				parseCategory(`docs/${rel}`, content.toString("utf8")),
@@ -417,8 +417,7 @@ export function collectMoonwavePages(projectDir: string): MoonwavePages {
 
 	for (const { abs, rel } of filesUnder(join(projectDir, "pages"))) {
 		if (rel.startsWith("api/")) {
-			// the build makes api/ contain exactly the emitted set; a page
-			// converted into it would be deleted by the next build
+			// `<docs>/api/` is owned by the build and swept on every run.
 			apiPages.push(`pages/${rel}`);
 		} else if (PAGE_EXTENSION.test(rel)) {
 			convert(abs, `pages/${rel}`, rel);
@@ -429,8 +428,8 @@ export function collectMoonwavePages(projectDir: string): MoonwavePages {
 		}
 	}
 
-	// the custom stylesheet, with the mechanical Infima renames done; whatever
-	// variable the rename table does not know survives as written, named below
+	// Copy `.moonwave/custom.css` with known Infima variable names mapped to
+	// VitePress `--vp-*` variables, reporting any remaining `--ifm-*` names.
 	const customCss = join(projectDir, ".moonwave", "custom.css");
 	if (existsSync(customCss)) {
 		const { content, leftover } = convertInfimaCss(readFileSync(customCss, "utf8"));
@@ -452,8 +451,7 @@ export function collectMoonwavePages(projectDir: string): MoonwavePages {
 			`  skipped: ${drafts.join(", ")} (draft/unlisted; moonwave did not publish them)`,
 		);
 	}
-	// presence, not contents: the tree is never read, and it is the one folder
-	// in a moonwave project that can be genuinely large
+	// Check `blog/` presence without walking its contents.
 	const blogDir = join(projectDir, "blog");
 	if (existsSync(blogDir) && readdirSync(blogDir).length > 0) {
 		report.push("  no equivalent: blog/ (the generated site has no blog)");
@@ -473,10 +471,10 @@ export function collectMoonwavePages(projectDir: string): MoonwavePages {
  */
 
 /**
- * The Infima variables with a one-for-one VitePress spelling, longest name
- * first so a shared prefix cannot bite, each guarded against matching inside
- * a longer variable name. Docusaurus's dark-mode selector maps too: VitePress
- * marks dark mode with a `.dark` class on the root element.
+ * Infima CSS custom properties that map one-for-one to VitePress variables,
+ * ordered longest-first and guarded with `(?![\w-])` so prefixes cannot match
+ * inside longer variable names. Also maps Docusaurus's `[data-theme="dark"]`
+ * selector to VitePress's `.dark` class.
  */
 const INFIMA_RENAMES: Array<[RegExp, string]> = [
 	[/--ifm-color-primary-darker(?![\w-])/g, "--vp-c-brand-3"],
@@ -486,8 +484,10 @@ const INFIMA_RENAMES: Array<[RegExp, string]> = [
 	[/\[data-theme=["']dark["']\]/g, ".dark"],
 ];
 
-/** `.moonwave/custom.css` with the mechanical renames done; `leftover` names
- * every `--ifm-*` variable the table does not know, left as written. */
+/**
+ * Renames known Infima CSS variables in `.moonwave/custom.css` and returns any
+ * remaining `--ifm-*` variable names in `leftover`.
+ */
 export function convertInfimaCss(css: string): { content: string; leftover: string[] } {
 	let content = css;
 	for (const [pattern, replacement] of INFIMA_RENAMES) {
@@ -501,24 +501,22 @@ export function convertInfimaCss(css: string): { content: string; leftover: stri
  * ----------------------------------------------------------- one page's markup
  */
 
-/** Capitalized tags that render here: what the runtime rewrites at render
- * time, and VitePress's own global `<Badge>`. */
+/** Capitalized component tags supported in LuauDocs pages (runtime-rewritten tags plus VitePress's global `<Badge>`). */
 const KNOWN_COMPONENTS = new Set<string>([...REWRITTEN_COMPONENTS, "Badge"]);
 
 export interface ConvertedMdx {
 	content: string;
-	/** Leftover capitalized JSX tags with no counterpart here, for the report. */
+	/** Unrecognized PascalCase JSX tags remaining in the page, for the conversion report. */
 	components: string[];
 }
 
 /**
- * MDX parses a block whose first line starts with `import ` or `export ` as
- * ESM rather than prose, so under moonwave those lines fed theme components
- * and never rendered; here they would render as literal text. A block is
- * dropped through the blank line that ends it, and a blank line inside an
- * open bracket pair does not end it (MDX reads on while the statement is
- * unfinished). A mid-paragraph line starting with the word "import" stays: it
- * was prose there too.
+ * Strips top-level MDX `import` and `export` blocks. Under Docusaurus MDX, a
+ * paragraph starting with `import ` or `export ` is parsed as ESM rather than
+ * prose; in VitePress it would render as literal text. Drops each ESM block
+ * through the blank line that closes it (ignoring blank lines inside unclosed
+ * brackets), while preserving mid-paragraph lines that happen to start with
+ * `"import"` or `"export"`.
  */
 function stripEsm(segment: string): string {
 	const brackets = (line: string): number =>
@@ -544,19 +542,18 @@ function stripEsm(segment: string): string {
 	return kept.join("");
 }
 
-/** An MDX comment: a JS block comment in braces. VitePress would print it. */
+/** Matches an MDX `{/* ... * /}` comment, which VitePress would otherwise print as text. */
 const MDX_COMMENT = /\{\s*\/\*([\s\S]*?)\*\/\s*\}/g;
 
-// comment-or-span, scanned left to right: a code span opening first keeps a
-// comment mention verbatim, while a comment opening first consumes any
-// backticks in its body, the way MDX reads both
+// Scan inline code spans and MDX comments together from left to right: a code
+// span opening first preserves `{/* ... */}` inside backticks, while an MDX
+// comment opening first consumes any backticks inside the comment body.
 const COMMENT_OR_SPAN = new RegExp(`${CODE_SPAN.source}|${MDX_COMMENT.source}`, "g");
 
 /**
- * MDX comments become HTML comments before the code-span split, since a
- * comment body may hold backticks the span regex would cut it on. `--` pairs
- * in the body are spaced apart: a `-->` inside would end the HTML comment
- * early, and the text is invisible either way.
+ * Converts MDX `{/* ... * /}` comments outside inline code spans to HTML
+ * comments (`<!-- ... -->`), spacing out any `--` runs inside the comment body
+ * so an embedded `-->` cannot close the HTML comment early.
  */
 function convertMdxComments(segment: string): string {
 	return segment.replace(COMMENT_OR_SPAN, (match, _span: string | undefined, body?: string) =>
@@ -565,12 +562,10 @@ function convertMdxComments(segment: string): string {
 }
 
 /**
- * One moonwave-era link target respelled for the generated site, wherever a
- * target appears (inline links and images, reference definitions, raw HTML
- * href/src, navbar items): a path reaching into .moonwave/static/ keeps only
- * the part below it (the static copy lands in public/, served from the site
- * root), absolute /docs/ paths move to /guide/ with the pages, and a .mdx
- * target follows the rename.
+ * Rewrites a Moonwave link target for the generated VitePress site:
+ * - `.moonwave/static/...` paths become `/...` (served from `public/`)
+ * - `/docs/...` paths move to `/guide/...`
+ * - `.mdx` extensions become `.md`
  */
 function convertTarget(target: string): string {
 	return (
@@ -580,9 +575,9 @@ function convertTarget(target: string): string {
 }
 
 /**
- * A JSX expression holding only a whitespace string literal: Prettier inserts
- * `{" "}` when it wraps a JSX line, so the space survives the newline JSX
- * trims. MDX renders the space; VitePress would print the braces.
+ * Matches JSX whitespace expressions (`{" "}` or `{' '}`) that Prettier inserts
+ * when wrapping JSX lines; MDX renders them as a space, whereas VitePress would
+ * print the literal braces.
  */
 const JSX_SPACE = /\{\s*(["'])[ \t]*\1\s*\}/g;
 
@@ -593,10 +588,10 @@ function convertProse(segment: string): string {
 }
 
 /**
- * Docusaurus fence attributes respelled on the opener line only: `title="x"`
- * becomes VitePress's `[x]`, and `showLineNumbers` (optionally `={n}`) becomes
- * the `:line-numbers` suffix on the language. `{1,3-4}` line highlighting is
- * already the same syntax in both, and the fence body is never touched.
+ * Converts Docusaurus code-fence attributes on the opening fence line to
+ * VitePress syntax: `title="x"` becomes `[x]`, and `showLineNumbers` (with
+ * optional `={n}`) becomes `:line-numbers` on the language tag. `{1,3-4}` line
+ * highlights already share the same syntax, and the fence body is never touched.
  */
 function convertFence(fence: string): string {
 	const newline = fence.indexOf("\n");
@@ -618,14 +613,14 @@ function convertFence(fence: string): string {
 }
 
 /**
- * One page out of MDX: prose and fences each get their own rewrites, sharing
- * the fence split so an example that *shows* the syntax is never touched.
- * `:::note` and `<Tabs>` stay as written: the site rewrites those at render
- * time, in doc comments and guide pages alike.
+ * Converts a single MDX page to VitePress Markdown, rewriting prose and fence
+ * openers separately so code examples inside fences remain untouched. `:::note`
+ * admonitions and `<Tabs>` / `<TabItem>` stay as written because the site
+ * runtime rewrites them at render time in both guides and doc comments.
  */
 export function convertMdxPage(text: string): ConvertedMdx {
-	// frontmatter is its own block to MDX, so the body after it starts a new
-	// one; holding it aside also keeps its scalars out of every rewrite
+	// Hold frontmatter aside so ESM stripping starts at the top of the Markdown
+	// body and frontmatter scalars are never rewritten.
 	const block = frontmatterBlock(text) ?? "";
 	const body = text.slice(block.length);
 	const content =
@@ -635,9 +630,8 @@ export function convertMdxPage(text: string): ConvertedMdx {
 				index % 2 === 0 ? convertProse(segment) : convertFence(segment),
 			)
 			.join("");
-	// leftover capitalized JSX is a docusaurus theme component that would
-	// render as plain text; a tag inside an HTML comment (converted or
-	// pre-existing) never renders, so it is not one
+	// Collect any remaining unrecognized PascalCase JSX tags outside fences,
+	// code spans, and HTML comments for the conversion report.
 	const components = new Set<string>();
 	for (const segment of outsideFences(content)) {
 		for (const prose of outsideCodeSpans(segment.replace(HTML_COMMENT_INLINE, ""))) {

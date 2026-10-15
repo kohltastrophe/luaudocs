@@ -1,86 +1,37 @@
 /**
- * llms.txt / llms-full.txt, driven over real projects on disk through the same
- * calls `runBuild` makes (site sync, then llms sync), minus the extractor.
+ * Tests for `llms.txt`, `llms-full.txt`, and `luaudocs llms` (`src/llms.ts`).
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
-import { createContext } from "../src/build";
-import { syncLlms } from "../src/llms";
-import { emitDocsFromJson, type EmitResult } from "../src/render";
+import { describe, expect, it, vi } from "vitest";
+import pkg from "../package.json";
+import { createContext, type BuildContext, type RenderedModel } from "../src/build";
+import { parseDocModel } from "../src/docmodel";
+import {
+	LOCAL_LLMS_FILE,
+	renderLocalLlms,
+	runLocalLlms,
+	syncLlms,
+	type LocalLlmsOptions,
+} from "../src/llms";
+import { GENERATED_COMMENT_MARK, GENERATED_MARK } from "../src/pages";
+import { emitDocs, emitDocsFromJson, type EmitResult } from "../src/render";
 import { collectGuides, syncSite } from "../src/site";
-import { makeProjectFactory, modelJson, readFixture, testConfig } from "./helpers";
+import { has, makeProjectFactory, modelJson, readFixture, testConfig } from "./helpers";
 
-const TOML = [
-	'title = "Demo"',
-	"",
-	"[source]",
-	"entries = []",
-	"",
-	"[docs]",
-	'dir = "docs"',
-	// trailing slash: the emitted links must not double it
-	'url = "https://demo.example/"',
-].join("\n");
+const TOML =
+	'title = "Demo"\n[source]\nentries = []\n[docs]\ndir = "docs"\nurl = "https://demo.example/"';
+const HERO =
+	'---\nlayout: home\nhero:\n  name: "Demo"\n  tagline: "A demo site, for the tests."\nfeatures:\n  - title: Fast\n---\n';
+const GETTING_STARTED =
+	"---\ntitle: Getting Started\ndescription: Install it, point it at a module, ship the site.\nsidebar_position: 1\n---\n\n# Getting Started\n\nBody prose, which the frontmatter description outranks.\n";
+const ADVANCED =
+	"---\ntitle: Advanced\nsidebar_position: 2\n---\n\n## Setup\n\n```luau\nlocal x = 1\n```\n\nTune the extractor when the defaults miss. A second sentence.\n";
+const NESTED =
+	"---\ntitle: Errors\nsidebar_position: 3\n---\n\n# Errors\n\nWhat the extractor reports, and why.\n";
 
-const HERO = [
-	"---",
-	"layout: home",
-	"hero:",
-	'  name: "Demo"',
-	'  tagline: "A demo site, for the tests."',
-	"features:",
-	"  - title: Fast",
-	"---",
-	"",
-].join("\n");
-
-const GETTING_STARTED = [
-	"---",
-	"title: Getting Started",
-	"description: Install it, point it at a module, ship the site.",
-	"sidebar_position: 1",
-	"---",
-	"",
-	"# Getting Started",
-	"",
-	"Body prose, which the frontmatter description outranks.",
-	"",
-].join("\n");
-
-// no description and no H1: the summary is derived, the title is not
-const ADVANCED = [
-	"---",
-	"title: Advanced",
-	"sidebar_position: 2",
-	"---",
-	"",
-	"## Setup",
-	"",
-	"```luau",
-	"local x = 1",
-	"```",
-	"",
-	"Tune the extractor when the defaults miss. A second sentence.",
-	"",
-].join("\n");
-
-const NESTED = [
-	"---",
-	"title: Errors",
-	"sidebar_position: 3",
-	"---",
-	"",
-	"# Errors",
-	"",
-	"What the extractor reports, and why.",
-	"",
-].join("\n");
-
-/** A project on disk; luaudocs.toml is implicit but overridable. */
 const project = makeProjectFactory("luaudocs-llms-", TOML);
 
-/** The sync the build runs after emitting: site (changelog page) then llms. */
 function sync(dir: string, result?: EmitResult): void {
 	const context = createContext(dir);
 	const emitted = result ?? emitDocsFromJson(modelJson([]), context.config);
@@ -97,7 +48,6 @@ function published(dir: string): { index: string; full: string } {
 	};
 }
 
-/** The guide-only path: no extractor, no /api/. */
 function buildGuideSite(files: Record<string, string>): { index: string; full: string } {
 	const dir = project(files);
 	sync(dir);
@@ -107,101 +57,64 @@ function buildGuideSite(files: Record<string, string>): { index: string; full: s
 const entries = (index: string): string[] =>
 	index.split("\n").filter((line) => line.startsWith("- ["));
 
-describe("llms.txt", () => {
-	it("lists guides in sidebar order, flattening nested groups", () => {
-		const { index } = buildGuideSite({
+describe("site llms.txt and llms-full.txt", () => {
+	it("orders guides, derives summaries/titles, and handles hero/README/changelog pages", () => {
+		const main = buildGuideSite({
 			"docs/index.md": HERO,
 			"docs/guide/getting-started.md": GETTING_STARTED,
 			"docs/guide/advanced.md": ADVANCED,
 			"docs/guide/reference/errors.md": NESTED,
+			"CHANGELOG.md":
+				"# Changelog\n\nAll notable changes to Demo.\n\n## 1.0.0\n\n- first release\n",
 		});
-
-		expect(index.startsWith("# Demo\n")).toBe(true);
-		expect(index).toContain("## Guides");
-		expect(entries(index)).toEqual([
+		expect(main.index.startsWith("# Demo\n")).toBe(true);
+		expect(main.index).toContain("> A demo site, for the tests.");
+		expect(main.index).not.toContain("](https://demo.example/)");
+		expect(main.index).toContain("## Guides");
+		expect(main.index).toContain("## Optional");
+		expect(main.index).not.toContain("## API Reference");
+		expect(entries(main.index)).toEqual([
 			"- [Getting Started](https://demo.example/guide/getting-started): Install it, point it at a module, ship the site.",
 			"- [Advanced](https://demo.example/guide/advanced): Tune the extractor when the defaults miss.",
 			"- [Errors](https://demo.example/guide/reference/errors): What the extractor reports, and why.",
+			"- [Changelog](https://demo.example/changelog): All notable changes to Demo.",
 		]);
-		// a guide-only site has no API half to announce
-		expect(index).not.toContain("## API Reference");
-	});
+		expect(main.full).not.toContain("layout: home");
+		expect(main.full).not.toContain("first release");
 
-	it("summarizes with the hero tagline, and never lists the hero itself", () => {
-		const { index, full } = buildGuideSite({
-			"docs/index.md": HERO,
-			"docs/guide/getting-started.md": GETTING_STARTED,
-		});
-
-		expect(index).toContain("> A demo site, for the tests.");
-		expect(index).not.toContain("](https://demo.example/)");
-		expect(full).not.toContain("layout: home");
-		expect(full).not.toContain("A demo site, for the tests.");
-	});
-
-	it("prefers the configured description over the tagline", () => {
-		const { index } = buildGuideSite({
+		const configuredDesc = buildGuideSite({
 			"luaudocs.toml": `description = "Configured, and authoritative."\n${TOML}`,
 			"docs/index.md": HERO,
 			"docs/guide/getting-started.md": GETTING_STARTED,
 		});
+		expect(configuredDesc.index).toContain("> Configured, and authoritative.");
+		expect(configuredDesc.index).not.toContain("> A demo site, for the tests.");
 
-		expect(index).toContain("> Configured, and authoritative.");
-		expect(index).not.toContain("> A demo site, for the tests.");
-	});
-
-	it("lists an ordinary index.md at the site root", () => {
-		const { index, full } = buildGuideSite({
+		const rootProse = buildGuideSite({
 			"docs/index.md": "# Demo\n\nThe landing page, written as prose.\n",
 			"docs/guide/getting-started.md": GETTING_STARTED,
 		});
-
-		expect(entries(index)[0]).toBe(
+		expect(entries(rootProse.index)[0]).toBe(
 			"- [Demo](https://demo.example/): The landing page, written as prose.",
 		);
-		expect(full).toContain("The landing page, written as prose.");
-	});
+		expect(rootProse.full).toContain("The landing page, written as prose.");
 
-	it("titles the generated README landing page from the README, not its marker", () => {
-		// no docs/index.md: syncSite writes the generated landing page (the
-		// README behind the marker frontmatter, whose `#` comment lines must
-		// not read as headings), and llms indexes it as just synced
-		const { index, full } = buildGuideSite({
+		const readmeLanding = buildGuideSite({
 			"README.md": "# Demo\n\nThe README, standing in as the landing page.\n",
 			"docs/guide/getting-started.md": GETTING_STARTED,
 		});
-
-		expect(entries(index)[0]).toBe(
+		expect(entries(readmeLanding.index)[0]).toBe(
 			"- [Demo](https://demo.example/): The README, standing in as the landing page.",
 		);
-		expect(index).not.toContain("Generated by luaudocs");
-		expect(full).toContain("The README, standing in as the landing page.");
+		expect(readmeLanding.index).not.toContain("Generated by luaudocs");
+		expect(readmeLanding.full).toContain("The README, standing in as the landing page.");
+
+		const headless = buildGuideSite({ "docs/guide/advanced.md": ADVANCED });
+		expect(headless.full.startsWith("# Advanced\n")).toBe(true);
+		expect(headless.full).toContain("## Setup");
 	});
 
-	it("titles a page that has no heading of its own", () => {
-		const { full } = buildGuideSite({
-			"docs/guide/advanced.md": ADVANCED,
-		});
-
-		expect(full.startsWith("# Advanced\n")).toBe(true);
-		expect(full).toContain("## Setup");
-	});
-
-	it("puts the changelog under Optional, out of the full text", () => {
-		const { index, full } = buildGuideSite({
-			"CHANGELOG.md":
-				"# Changelog\n\nAll notable changes to Demo.\n\n## 1.0.0\n\n- first release\n",
-			"docs/guide/getting-started.md": GETTING_STARTED,
-		});
-
-		expect(index).toContain("## Optional");
-		expect(index).toContain(
-			"- [Changelog](https://demo.example/changelog): All notable changes to Demo.",
-		);
-		expect(full).not.toContain("first release");
-	});
-
-	it("strips generated chrome but leaves fenced examples alone", () => {
+	it("strips generated chrome outside fences and orders guides ahead of API pages", () => {
 		const { full } = buildGuideSite({
 			"docs/guide/components.md": [
 				"---",
@@ -228,76 +141,307 @@ describe("llms.txt", () => {
 				"",
 			].join("\n"),
 		});
-
 		expect(full).toContain("# Components\n");
 		expect(full).not.toContain("source-link ignore-header");
-		// HTML comments are invisible in rendered output, so they all come off
 		expect(full).toContain("Inside the region.");
 		expect(full).not.toContain("#region");
-		// a tag alone on its line takes the whole line, leaving no blank gap
 		expect(full).toContain("Before.\nAfter.");
 		expect(full).toContain("Call `state(0)` to begin.");
-		// the fence is the only surviving annotation and anchor, verbatim
 		expect(full).toContain(
 			'-- `x`{luau} and <a class="source-link"></a> are the documented syntax',
 		);
-		// badge text is API semantics, not chrome
 		expect(full).toContain('<Badge type="info" text="Server" />');
-	});
 
-	it("puts guides ahead of the API pages when both exist", () => {
 		const dir = project({
 			"docs/index.md": HERO,
 			"docs/guide/getting-started.md": GETTING_STARTED,
 		});
-		const result = emitDocsFromJson(
-			readFixture("docmodel-sample.json"),
-			testConfig({ repo: { url: "https://github.com/example/Sample" } }),
+		sync(
+			dir,
+			emitDocsFromJson(
+				readFixture("docmodel-sample.json"),
+				testConfig({ repo: { url: "https://github.com/example/Sample" } }),
+			),
 		);
-		sync(dir, result);
-		const { index, full } = published(dir);
-
-		expect(index.indexOf("## Guides")).toBeLessThan(index.indexOf("## API Reference"));
-		expect(index).toContain("](https://demo.example/api/State)");
-		expect(entries(index)[0]).toContain("/guide/getting-started");
-		expect(full).toContain("# Getting Started");
-		expect(full.indexOf("# Getting Started")).toBeLessThan(full.indexOf("# State"));
-		// the API pages arrive as plain markdown: fences stay, their link
-		// tables, the heading source links, and every HTML comment (the
-		// generated-by note, the region markers) come off
-		expect(full).toContain("```luau");
-		expect(full).not.toContain("luaudocs-links=");
-		expect(full).not.toContain('<a class="source-link');
-		expect(full).not.toContain("<!--");
+		const both = published(dir);
+		expect(both.index.indexOf("## Guides")).toBeLessThan(
+			both.index.indexOf("## API Reference"),
+		);
+		expect(both.index).toContain("](https://demo.example/api/State)");
+		expect(both.full.indexOf("# Getting Started")).toBeLessThan(both.full.indexOf("# State"));
+		expect(both.full).toContain("```luau");
+		expect(both.full).not.toContain("luaudocs-links=");
+		expect(both.full).not.toContain('<a class="source-link');
+		expect(both.full).not.toContain("<!--");
 	});
 
-	it("leaves existing files alone when [docs] llms is false", () => {
-		const dir = project({
+	it("preserves existing files when llms = false and removes stale files when empty", () => {
+		const disabled = project({
 			"luaudocs.toml": `${TOML}\nllms = false`,
 			"docs/guide/getting-started.md": GETTING_STARTED,
-			// a pair left by an earlier build with llms on: opting out hands
-			// them back to the user rather than deleting them
 			"docs/public/llms.txt": "mine now\n",
 			"docs/public/llms-full.txt": "mine too\n",
 		});
-		sync(dir);
+		sync(disabled);
+		expect(readFileSync(join(disabled, "docs/public/llms.txt"), "utf8")).toBe("mine now\n");
+		expect(readFileSync(join(disabled, "docs/public/llms-full.txt"), "utf8")).toBe(
+			"mine too\n",
+		);
 
-		const publicDir = join(dir, "docs", "public");
-		expect(readFileSync(join(publicDir, "llms.txt"), "utf8")).toBe("mine now\n");
-		expect(readFileSync(join(publicDir, "llms-full.txt"), "utf8")).toBe("mine too\n");
-	});
-
-	it("removes both files when there is nothing to say", () => {
-		// a site that lost its guides and sources must not keep serving the
-		// previous index of pages that no longer exist
-		const dir = project({
+		const empty = project({
 			"docs/public/llms.txt": "# stale\n",
 			"docs/public/llms-full.txt": "stale body\n",
 		});
-		sync(dir);
+		sync(empty);
+		expect(existsSync(join(empty, "docs/public/llms.txt"))).toBe(false);
+		expect(existsSync(join(empty, "docs/public/llms-full.txt"))).toBe(false);
+	});
+});
 
-		const publicDir = join(dir, "docs", "public");
-		expect(existsSync(join(publicDir, "llms.txt"))).toBe(false);
-		expect(existsSync(join(publicDir, "llms-full.txt"))).toBe(false);
+function rendered(context: BuildContext, fixture = "docmodel-sample.json"): RenderedModel {
+	const model = parseDocModel(fixture.startsWith("{") ? fixture : readFixture(fixture));
+	return { model, result: emitDocs(model, context.config) };
+}
+
+function checkoutIndex(dir: string, fixture?: string, target = join(dir, LOCAL_LLMS_FILE)): string {
+	const context = createContext(dir);
+	return renderLocalLlms(
+		context,
+		collectGuides(context.docsDir),
+		rendered(context, fixture).result,
+		target,
+	);
+}
+
+const unpinned = (text: string): string =>
+	text.replaceAll(`luaudocs@${pkg.version}`, "luaudocs@<version>");
+
+describe("the checkout's llms.txt", () => {
+	const dir = project({
+		"docs/index.md": HERO,
+		"docs/guide/getting-started.md": GETTING_STARTED,
+		"docs/guide/reference/errors.md": NESTED,
+		"CHANGELOG.md": "# Changelog\n\nAll notable changes to Demo.\n",
+		"docs/changelog.md": "---\ntitle: Changelog\n---\n\n# Changelog\n",
+	});
+	const index = checkoutIndex(dir);
+	const tagged = checkoutIndex(dir, "docmodel-tags.json");
+
+	it("matches the Sample snapshot and preserves expected markers", async () => {
+		await expect(unpinned(index)).toMatchFileSnapshot("__snapshots__/sample/llms.txt");
+
+		for (const marker of [
+			new RegExp(`^${GENERATED_COMMENT_MARK}`),
+			/^<!--.*-->\n# Demo\n/,
+			"\n> A demo site, for the tests.\n",
+			`run \`npx luaudocs@${pkg.version} llms\` in this directory`,
+			"- [Getting Started](docs/guide/getting-started.md): Install it, point it at a module, ship the site.",
+			"- [Errors](docs/guide/reference/errors.md)",
+			"\n## Sample.State\n",
+			"- [State](src/State.luau): Constructors: `Sample.compute`, `Sample.state`.",
+			"- [`State:Connect(callback: Type.Function): Type.Function`](src/State.luau#L44-L49): Adds a hook",
+			"- [`Sample.State: State`](src/State.luau): [Module]",
+			"- [`Sample.isState(object: any): boolean`](src/State.luau#L7-L9): [from State] Checks whether",
+			"- [`type Stateful<T> = T | State<T>`]",
+			"- [`type StateData<T>`](src/State.luau#L16-L23)\n",
+			"- [`Color.Linear.fromGamma(channel: number): number`](src/Color.luau#L4-L6)",
+			"(src/Interpolate.luau#L3-L8)\n",
+			"## Optional\n\n- [Changelog](CHANGELOG.md): All notable changes to Demo.",
+		]) {
+			has(index, marker);
+		}
+		for (const marker of [
+			"[Yields] [Server] [Plugin] Blocks until the widget is saved.",
+			"[Deprecated since v2: use [Tagged.create] instead] [since v0.9.0]",
+			"): [Deprecated] [Unreleased]\n",
+			"[Read Only] The registry stops accepting widgets",
+			"- [Widget](src/Widget.luau): [ui] A stateful widget.",
+			"- [`type function Widen(ty: type)`]",
+		]) {
+			has(tagged, marker);
+		}
+		for (const forbidden of [
+			"https://demo.example",
+			"/api/",
+			"docs/changelog.md",
+			"source-link",
+		]) {
+			expect(index).not.toContain(forbidden);
+		}
+		expect(tagged).not.toContain("<Badge");
+	});
+
+	it("orders sections, computes relative --out links, and handles partial/special inputs", () => {
+		expect(index.split("\n").filter((line) => line.startsWith("## "))).toEqual([
+			"## Guides",
+			"## Sample",
+			"## Sample.Color",
+			"## Sample.Interpolate",
+			"## Sample.Query",
+			"## Sample.State",
+			"## Sample.Type",
+			"## Optional",
+		]);
+
+		const nested = checkoutIndex(dir, undefined, join(dir, "agents", "api.txt"));
+		expect(nested).toContain("- [Getting Started](../docs/guide/getting-started.md)");
+		expect(nested).toContain("](../src/State.luau#L44-L49)");
+		expect(nested).toContain("- [Changelog](../CHANGELOG.md)");
+		expect(nested).toContain(`\`npx luaudocs@${pkg.version} llms .. --out api.txt\``);
+		expect(checkoutIndex(dir, undefined, join(dir, "agents", LOCAL_LLMS_FILE))).toContain(
+			`\`npx luaudocs@${pkg.version} llms .. --out llms.txt\``,
+		);
+		expect(checkoutIndex(dir, undefined, join(dir, "api.txt"))).toContain(
+			`\`npx luaudocs@${pkg.version} llms --out api.txt\``,
+		);
+		expect(checkoutIndex(dir, undefined, join(dir, "my agents", "api.txt"))).toContain(
+			`\`npx luaudocs@${pkg.version} llms .. --out api.txt\``,
+		);
+		expect(checkoutIndex(dir, undefined, join(dir, "agents", "api notes.txt"))).toContain(
+			`llms .. --out "api notes.txt"\``,
+		);
+
+		const genLanding = checkoutIndex(
+			project({
+				"docs/index.md": `---\n${GENERATED_MARK}; rewritten.\nlayout: home\nhero:\n  tagline: "Generated."\n---\n`,
+				"docs/guide/getting-started.md": GETTING_STARTED,
+			}),
+		);
+		expect(genLanding).not.toContain("Generated.");
+		expect(genLanding).not.toMatch(/^> /m);
+
+		const authoredLanding = checkoutIndex(
+			project({
+				"docs/index.md": "# Demo\n\nThe landing page, written as prose.\n",
+				"docs/guide/getting-started.md": GETTING_STARTED,
+			}),
+		);
+		expect(authoredLanding).toContain(
+			"## Guides\n\n- [Demo](docs/index.md): The landing page, written as prose.\n- [Getting Started]",
+		);
+
+		const guideOnly = checkoutIndex(
+			project({ "docs/guide/getting-started.md": GETTING_STARTED }),
+			modelJson([]),
+		);
+		expect(guideOnly).toContain("in the llms.txt format: its guides. Links are relative");
+		expect(guideOnly).not.toContain("## Sample");
+
+		const apiOnly = checkoutIndex(project());
+		expect(apiOnly).toContain("every module, type, and member its Luau source exposes.");
+		expect(apiOnly).not.toContain("## Guides");
+
+		const special = checkoutIndex(
+			project(),
+			modelJson([
+				{
+					id: "src/init.luau",
+					name: "Lib",
+					instancePath: ["Lib"],
+					doc: "The entry.",
+					source: { file: "src/init.luau", line: 1 },
+					members: [
+						{
+							id: "src/init.luau#prop.Lib.quote",
+							name: "quote",
+							kind: "prop",
+							type: ['"`" | "\'"'],
+							tags: { custom: [] },
+							visibility: "public",
+							readonly: false,
+							source: { file: "src/init.luau", line: 3 },
+						},
+					],
+				},
+				{
+					id: "vendor/Dev Tools/init.luau",
+					name: "Tools",
+					instancePath: ["vendor", "Dev Tools"],
+					doc: "Reached by nothing.",
+					source: { file: "vendor/Dev Tools/init.luau", line: 1 },
+				},
+			]),
+		);
+		expect(special).toContain('- [``Lib.quote: "`" | "\'"``](src/init.luau#L3)');
+		expect(special).toContain(
+			"\n## Tools\n\n- [Tools](<vendor/Dev Tools/init.luau>): Reached by nothing.",
+		);
+	});
+});
+
+describe("luaudocs llms CLI runner", () => {
+	async function run(dir: string, options: Partial<LocalLlmsOptions> = {}, fixture?: string) {
+		const context = createContext(dir);
+		const target = options.target ?? join(dir, LOCAL_LLMS_FILE);
+		return runLocalLlms(context, { target, rendered: rendered(context, fixture), ...options });
+	}
+	const read = (dir: string): string => readFileSync(join(dir, LOCAL_LLMS_FILE), "utf8");
+
+	it("handles write, unchanged/CRLF, --check, --out, ownership protection, and extraction errors", async () => {
+		const dir = project({ "docs/guide/getting-started.md": GETTING_STARTED });
+		expect(await run(dir, { check: true })).toEqual({ status: "missing" });
+		expect(existsSync(join(dir, LOCAL_LLMS_FILE))).toBe(false);
+
+		expect(await run(dir)).toEqual({ status: "written" });
+		const written = read(dir);
+		expect(written).toBe(checkoutIndex(dir));
+		expect(await run(dir)).toEqual({ status: "unchanged" });
+		expect(await run(dir, { check: true })).toEqual({ status: "unchanged" });
+
+		writeFileSync(join(dir, LOCAL_LLMS_FILE), written.replace(/\n/g, "\r\n"));
+		expect(await run(dir)).toEqual({ status: "unchanged" });
+		expect(await run(dir, { check: true })).toEqual({ status: "unchanged" });
+		expect(read(dir)).toContain("\r\n");
+
+		const stale = written.replace("Checks whether", "Tests whether");
+		writeFileSync(join(dir, LOCAL_LLMS_FILE), stale);
+		expect(await run(dir, { check: true })).toEqual({ status: "stale" });
+		expect(read(dir)).toBe(stale);
+		expect(await run(dir)).toEqual({ status: "written" });
+		expect(read(dir)).toContain("Checks whether");
+
+		const outDir = project();
+		const target = join(outDir, "agents", "api.txt");
+		expect(await run(outDir, { target })).toEqual({ status: "written" });
+		expect(readFileSync(target, "utf8")).toContain("](../src/State.luau#L");
+		expect(existsSync(join(outDir, LOCAL_LLMS_FILE))).toBe(false);
+
+		const handWritten = project({ [LOCAL_LLMS_FILE]: "# Mine\n\n> Hand-written.\n" });
+		await expect(
+			runLocalLlms(createContext(handWritten), {
+				target: join(handWritten, LOCAL_LLMS_FILE),
+			}),
+		).rejects.toThrow(/was not written by luaudocs.*pass --out/);
+
+		writeFileSync(join(dir, LOCAL_LLMS_FILE), read(dir).split("\n").slice(1).join("\n"));
+		await expect(run(dir)).rejects.toThrow(/was not written by luaudocs/);
+
+		const errDir = project();
+		await run(errDir);
+		const before = read(errDir);
+		const broken = JSON.stringify({
+			...JSON.parse(readFixture("docmodel-sample.json")),
+			modules: [],
+			diagnostics: [
+				{
+					severity: "error",
+					code: "parse-error",
+					message: "boom",
+					file: "src/State.luau",
+					line: 1,
+				},
+			],
+		});
+		const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			expect(await run(errDir, {}, broken)).toEqual({ status: "failed", errors: 1 });
+			expect(await run(errDir, { check: true }, broken)).toEqual({
+				status: "failed",
+				errors: 1,
+			});
+		} finally {
+			quiet.mockRestore();
+		}
+		expect(read(errDir)).toBe(before);
 	});
 });

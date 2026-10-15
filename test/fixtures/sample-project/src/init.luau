@@ -62,7 +62,6 @@ function Sample.state<T>(initialValue: T?): State.State<T>
 		_dependents = {},
 		_value = initialValue,
 	}, State)
-	Tween._tracked[self] = true
 	return self
 end
 

@@ -1,10 +1,10 @@
 /**
- * `luaudocs init`: scaffolds luaudocs.toml plus the user-owned docs content,
- * and optionally converts an existing moonwave project (the config and the
- * hand-written pages, via src/moonwave.ts). Existing files are skipped unless
- * --force, and the tool never touches them again after creation. The
- * .vitepress/ machinery is synced once at the end so the site resolves before
- * the first build, which regenerates it.
+ * `luaudocs init`: scaffolds `luaudocs.toml` plus the user-owned docs content,
+ * and optionally converts an existing Moonwave project (both config and
+ * hand-written pages, via `src/moonwave.ts`). Existing user files are skipped
+ * unless `--force` is passed, and LuauDocs never touches them again after
+ * creation. The `.vitepress/` machinery is synced once at the end so the site
+ * resolves before the first build.
  */
 import { execFile } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -12,7 +12,16 @@ import { basename, dirname, join } from "node:path";
 import pc from "picocolors";
 import pkg from "../package.json";
 import { createContext, filesUnder, printWarnings } from "./build";
-import { DEFAULT_BRANCH, DEFAULT_DOCS_DIR, type LuauDocsConfig, parseConfig } from "./config";
+import {
+	DEFAULT_BRANCH,
+	DEFAULT_DOCS_DIR,
+	DEFAULT_ENTRIES,
+	type LuauDocsConfig,
+	normalizeDocsDir,
+	parseConfig,
+	PROBED_ENTRIES,
+	probeEntries,
+} from "./config";
 import { packageRoot } from "./extract";
 import { frontmatterBlock } from "./markdown";
 import {
@@ -22,10 +31,10 @@ import {
 	type MoonwaveSource,
 	readMoonwave,
 } from "./moonwave";
-import { isGeneratedFile, toPosix } from "./pages";
+import { isGeneratedFile } from "./pages";
 import { collectGuides, firstGuidePage, syncSite } from "./site";
 
-/** The Node major from `engines.node`, which the scaffolded workflow installs. */
+/** The Node major version from `engines.node`, installed by the scaffolded workflow. */
 const NODE_MAJOR = /\d+/.exec(pkg.engines.node)![0];
 
 export interface InitOptions {
@@ -40,38 +49,37 @@ export interface InitOptions {
  * -------------------------------------------------------------- the new config
  */
 
-/** A TOML basic string: JSON escapes are a subset of TOML's, so this is one. */
+/** Formats a TOML basic string (JSON string escapes are a valid subset of TOML's). */
 function tomlString(value: string): string {
 	return JSON.stringify(value);
 }
 
 /**
- * Built here rather than shipped as a template: the two stanzas init fills in
- * when it knows better (a detected GitHub remote, an existing custom docs dir)
- * are plain conditionals.
+ * Built in code rather than shipped as a template file because `init` fills in
+ * probed source roots, a detected GitHub remote, and any existing custom docs
+ * directory conditionally.
  */
 function configToml(options: {
 	title: string;
 	description: string;
+	entries: string[];
 	repoUrl?: string;
 	docsDir?: string;
 }): string {
-	// a real remote enables [repo] (source/edit links, the GitHub icon) instead
-	// of scaffolding it commented out; `branch` stays commented, the config
-	// defaults it
+	// A detected GitHub remote enables `[repo]` (source links, edit links, and
+	// the GitHub icon) instead of leaving the table commented out; `branch`
+	// stays commented because the config loader defaults it to `"main"`.
 	const repo = options.repoUrl
 		? `[repo]\nurl = ${tomlString(options.repoUrl)}\n# branch = "main"`
 		: '# [repo]\n# url = "https://github.com/user/repo"\n# branch = "main"';
-	// a re-run against an existing custom docs dir keeps the rewritten config
-	// pointing at the directory the content below is scaffolded into
-	const dir = options.docsDir
-		? `dir = ${tomlString(toPosix(options.docsDir))}`
-		: '# dir = ".luaudocs"';
+	// When re-running against an existing custom docs directory, keep the
+	// rewritten config pointing at the directory where content is scaffolded.
+	const dir = options.docsDir ? `dir = ${tomlString(options.docsDir)}` : '# dir = ".luaudocs"';
 	return `title = ${tomlString(options.title)}
 description = ${tomlString(options.description)}
 
 [source]
-entries = ["src"]
+entries = [${options.entries.map(tomlString).join(", ")}]
 
 # Enables "View source" links on members, "Edit this page" links, and the
 # GitHub icon in the site header. (init fills this in when it detects a
@@ -87,11 +95,11 @@ ${repo}
 # ogImage = "/og.png"
 # footer = { copyright = "© ${options.title}" }
 
-# Navbar entries. Unset: Guide, API, and Changelog entries as applicable.
+# Navbar entries. When unset, LuauDocs derives Guide, API, and Changelog entries.
 # [[site.nav]]
 # text = "Guide"
 # link = "/guide/getting-started"
-# activeMatch = "^/guide/"            # routes marking the entry current, past its link
+# activeMatch = "^/guide/"            # regex of routes that highlight this entry
 
 # Extra head tags on every page (analytics, site verification).
 # [[site.head]]
@@ -106,39 +114,41 @@ linkRobloxTypes = true
 # Where the site lives (authored content + the generated machinery under it).
 ${dir}
 # Published site URL: enables sitemap.xml and, for project pages
-# (user.github.io/repo/), the derived base path.
+# (user.github.io/repo/), derives the base path.
 # url = "https://docs.example.com"
-# Pull README.md into the landing page (moonwave hide markers honored).
+# Keep .vitepress/generated/readme.md, a copy of README.md (moonwave hide
+# markers honored), fresh for an index.md that @includes it.
 # includeReadme = true
-# llms.txt + llms-full.txt in public/ (guides, then API pages), so AI tooling
-# reads the docs without scraping HTML. On by default.
+# Emit llms.txt and llms-full.txt in public/ (guides, then API pages) so AI
+# tools can read the docs without scraping HTML. Enabled by default.
 # llms = false
 `;
 }
 
-/** `git remote get-url origin`, normalized to https, or nothing to enable. */
-async function detectRepoUrl(targetDir: string): Promise<string | undefined> {
-	const stdout = await new Promise<string | undefined>((done) => {
-		execFile(
-			"git",
-			["remote", "get-url", "origin"],
-			{ cwd: targetDir, timeout: 5_000 },
-			(error, out) => done(error ? undefined : out),
+/**
+ * Returns a git command's trimmed stdout, or `undefined` outside a repository
+ * (or when git is unavailable). Every caller has a fallback, so failures are non-fatal.
+ */
+function git(args: string[], cwd: string): Promise<string | undefined> {
+	return new Promise((done) => {
+		execFile("git", args, { cwd, timeout: 5_000 }, (error, out) =>
+			done(error ? undefined : out.trim()),
 		);
 	});
-	if (stdout === undefined) {
+}
+
+/** Normalizes `git remote get-url origin` to HTTPS, or returns `undefined`. */
+async function detectRepoUrl(targetDir: string): Promise<string | undefined> {
+	const remote = await git(["remote", "get-url", "origin"], targetDir);
+	if (remote === undefined) {
 		return undefined;
 	}
-	const https = stdout
-		.trim()
-		.replace(/^git@github\.com:/, "https://github.com/")
-		.replace(/\.git$/, "");
+	const https = remote.replace(/^git@github\.com:/, "https://github.com/").replace(/\.git$/, "");
 	if (!https.startsWith("http")) {
 		return undefined;
 	}
-	// a clone carrying a token in the remote would otherwise write it into
-	// luaudocs.toml, which the user commits, and into every source link built
-	// from it
+	// Strip credentials so a clone URL containing a token never leaks into
+	// `luaudocs.toml` or generated source links.
 	try {
 		const url = new URL(https);
 		url.username = "";
@@ -150,38 +160,32 @@ async function detectRepoUrl(targetDir: string): Promise<string | undefined> {
 }
 
 /**
- * The branch HEAD is on, for the Pages workflow's trigger. `symbolic-ref` so a
- * repository with no commit yet still reports one, which is when init usually
- * runs. Falls back to the default outside a repository, or for a name the
- * template's quoted scalar cannot hold.
+ * Detects the current branch for the Pages workflow trigger. Uses `symbolic-ref`
+ * so a newly initialized repository with no commits yet still reports a branch.
+ * Falls back to `DEFAULT_BRANCH` outside a repository or when the branch name
+ * contains characters that cannot sit inside the template's quoted scalar.
  */
 async function detectBranch(targetDir: string): Promise<string> {
-	const stdout = await new Promise<string | undefined>((done) => {
-		execFile(
-			"git",
-			["symbolic-ref", "--short", "HEAD"],
-			{ cwd: targetDir, timeout: 5_000 },
-			(error, out) => done(error ? undefined : out),
-		);
-	});
-	const branch = stdout?.trim() ?? "";
+	const branch = (await git(["symbolic-ref", "--short", "HEAD"], targetDir)) ?? "";
 	return /^[^"\\]+$/.test(branch) ? branch : DEFAULT_BRANCH;
 }
 
 /**
- * The parsed existing luaudocs.toml, for the facts a re-run must respect: the
- * docs directory the scaffold targets, and (when the conversion is skipped)
- * whether the surviving config pulls the README in.
+ * Parses an existing `luaudocs.toml` for settings a re-run must preserve: the
+ * custom `[docs] dir` target and (when `--force` is not set) whether the
+ * surviving config sets `includeReadme`. Throws before writing anything if the
+ * existing file is invalid; treating a broken config as missing would scaffold
+ * into `.luaudocs/` and pin the workflow to the wrong directory.
  */
 function existingConfig(targetDir: string): LuauDocsConfig | undefined {
-	try {
-		return parseConfig(
-			readFileSync(join(targetDir, "luaudocs.toml"), "utf8"),
-			basename(targetDir),
-		);
-	} catch {
-		return undefined; // no config, or an unreadable one; the defaults apply
+	const path = join(targetDir, "luaudocs.toml");
+	if (!existsSync(path)) {
+		return undefined;
 	}
+	return normalizeDocsDir(
+		parseConfig(readFileSync(path, "utf8"), basename(targetDir)),
+		targetDir,
+	);
 }
 
 /*
@@ -191,18 +195,18 @@ function existingConfig(targetDir: string): LuauDocsConfig | undefined {
 type Put = (destRel: string, content: string | Buffer) => void;
 
 /**
- * The one scaffold write protocol: skip a user-owned file (unless --force),
- * replace a marker-carrying generated copy, and tally for the summary line.
- * Everything `init` writes goes through the returned `put`. The marker check
- * reads an existing file as text even when writing a Buffer: a binary cannot
- * carry the marker.
+ * Creates the single file-writing helper for `init`: skips user-owned files
+ * (unless `--force` is set), replaces marker-carrying generated files with
+ * editable templates, and tallies created/skipped counts for the summary line.
+ * Reading an existing file as UTF-8 for the marker check is safe even when
+ * writing a `Buffer`, because a binary file never starts with the marker.
  */
 function makePut(targetDir: string, force: boolean | undefined) {
 	const counts = { created: 0, skipped: 0 };
 	const put: Put = (destRel, content) => {
 		const dest = join(targetDir, destRel);
-		// a marker-carrying file was written by a config-less build, not the
-		// user: the editable template replaces it rather than deferring to it
+		// A file carrying the generated marker was written by a config-less build,
+		// not by the user; replace it with the editable template.
 		const existing = existsSync(dest) ? readFileSync(dest, "utf8") : undefined;
 		if (existing !== undefined && !force && !isGeneratedFile(existing)) {
 			console.log(pc.dim(`  skipped (exists)  ${destRel}`));
@@ -218,30 +222,30 @@ function makePut(targetDir: string, force: boolean | undefined) {
 }
 
 /**
- * Copies one packaged template tree through `put`, resolving its placeholders.
- * `templates/site` lands under the docs dir and `templates/project` at the
- * project root; both are written once and belong to the user afterwards.
+ * Copies a packaged template tree through `put`, substituting `@TOKEN@`
+ * placeholders. `templates/site` lands under the docs directory and
+ * `templates/project` lands at the project root; both belong to the user once
+ * written.
  */
 function copyTemplateTree(
 	tree: "site" | "project",
 	destPrefix: string,
 	put: Put,
 	tokens: Record<string, string>,
-	/** Templates the converted moonwave content displaces, by tree-relative path. */
+	/** Skips templates displaced by converted Moonwave content (by tree-relative path). */
 	skip?: (rel: string) => boolean,
 ): void {
-	// @TITLE@, not __TITLE__: markdown formatters rewrite __x__ to **x**,
-	// destroying a placeholder in a template .md. The pattern is the shape
-	// rather than the vocabulary, so an unknown token is left as written for
-	// the placeholder test to catch.
+	// Placeholders use `@TITLE@` rather than `__TITLE__` because Markdown
+	// formatters rewrite `__x__` to `**x**`. Unknown `@TOKEN@` strings are left
+	// untouched so the placeholder test catches them.
 	const escapeQuoted = (value: string) => value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 	const substitute = (text: string, escape: boolean) =>
 		text.replace(/@[A-Z_]+@/g, (token) => {
 			const value = tokens[token];
 			return value === undefined ? token : escape ? escapeQuoted(value) : value;
 		});
-	// tokens inside .md frontmatter sit in quoted YAML scalars: escape there so
-	// a quote or backslash in the title cannot break the page
+	// Tokens inside `.md` frontmatter sit inside double-quoted YAML scalars, so
+	// quotes and backslashes in the title must be escaped there.
 	const apply = (text: string, destRel: string): string => {
 		if (destRel.endsWith(".md")) {
 			const block = frontmatterBlock(text);
@@ -256,7 +260,7 @@ function copyTemplateTree(
 		if (skip?.(rel)) {
 			continue;
 		}
-		// gitignore -> .gitignore (npm strips dotfiles from published packages)
+		// Rename `gitignore` -> `.gitignore` (npm strips dotfiles from published tarballs).
 		const destRel = join(destPrefix, rel.replace(/(^|\/)gitignore$/, "$1.gitignore"));
 		put(destRel, apply(readFileSync(abs, "utf8"), destRel));
 	}
@@ -267,18 +271,22 @@ async function scaffold(options: {
 	put: Put;
 	title: string;
 	description: string;
-	/** Where the site lives; the caller owns the read, since the config it comes
-	 * from is the one this is about to rewrite. */
+	/** Target docs directory, read by the caller before `scaffold` rewrites `luaudocs.toml`. */
 	docsDir: string;
 	skipTemplate?: (rel: string) => boolean;
 }): Promise<void> {
 	const { targetDir, put, title, description, docsDir } = options;
 
+	// Run the same entry probe as a config-less build, requiring an `init`
+	// module so `init` never writes an entry directory that would fail the
+	// first build.
+	const probed = probeEntries(targetDir, PROBED_ENTRIES, true);
 	put(
 		"luaudocs.toml",
 		configToml({
 			title,
 			description,
+			entries: probed.length > 0 ? probed : DEFAULT_ENTRIES,
 			repoUrl: await detectRepoUrl(targetDir),
 			docsDir: docsDir !== DEFAULT_DOCS_DIR ? docsDir : undefined,
 		}),
@@ -296,7 +304,7 @@ async function scaffold(options: {
 	);
 }
 
-/** The whole `luaudocs init` behavior: optional moonwave conversion + scaffold. */
+/** Runs `luaudocs init`: optional Moonwave conversion followed by project scaffolding. */
 export async function initProject(options: InitOptions): Promise<void> {
 	const targetDir = options.targetDir;
 	let title = options.title;
@@ -307,25 +315,23 @@ export async function initProject(options: InitOptions): Promise<void> {
 	const configPath = join(targetDir, "luaudocs.toml");
 	const hadConfig = existsSync(configPath);
 	const { put, counts } = makePut(targetDir, options.force);
-	// read once, before scaffold rewrites it under --force: a custom [docs] dir
-	// must survive into the converted config, which carries none of its own, and
-	// includeReadme decides the converted homepage's include when the existing
-	// config outlives the conversion. Every write below reproduces this dir
-	// rather than moving it, so it stays the answer for the whole run.
+	// Read any existing config before `scaffold` rewrites it under `--force`:
+	// a custom `[docs] dir` must carry over into the converted config, and
+	// `includeReadme` determines whether the converted homepage includes the
+	// README when an existing config is kept.
 	const existing = existingConfig(targetDir);
 	const existingDocsDir = existing?.docs.dir;
 	const docsDirName = existingDocsDir ?? DEFAULT_DOCS_DIR;
 
 	if (options.fromMoonwave) {
-		// moonwave's own config read order: moonwave.toml, then moonwave.json
+		// Match Moonwave's config lookup order: `moonwave.toml`, then `moonwave.json`.
 		const moonwavePath = ["moonwave.toml", "moonwave.json"]
 			.map((name) => join(targetDir, name))
 			.find(existsSync);
 		if (!moonwavePath) {
 			throw new Error(`--from-moonwave: no moonwave.toml or moonwave.json in ${targetDir}`);
 		}
-		// parsed before anything lands on disk, so a malformed config aborts a
-		// clean tree rather than leaving a half-converted one
+		// Parse everything before writing to disk so a malformed config aborts cleanly.
 		source = readMoonwave(moonwavePath);
 		pages = collectMoonwavePages(targetDir);
 		for (const page of pages.files) {
@@ -335,11 +341,11 @@ export async function initProject(options: InitOptions): Promise<void> {
 		description = description ?? source.description;
 	}
 
-	// Converted content displaces the matching templates, so even --force
-	// cannot scaffold over it: any template path a converted file claimed, the
-	// homepage the conversion is about to write, and, when real guides came
-	// over, the sample guide tree plus the landing page that links it (the
-	// build's generated hero serves until the user writes an index.md).
+	// Converted Moonwave content displaces matching starter templates even under
+	// `--force`: skip any template path claimed by a converted file, the homepage
+	// when Moonwave home branding is present, and the sample guide + landing page
+	// when real guides were converted (the build's generated hero serves until
+	// the user writes an `index.md`).
 	const claimed = new Set((pages?.files ?? []).map((page) => page.destRel));
 	const pagesClaimIndex = claimed.has("index.md");
 	if (source?.hasHomeBranding) {
@@ -360,12 +366,11 @@ export async function initProject(options: InitOptions): Promise<void> {
 	});
 
 	if (source !== undefined && pages !== undefined) {
-		// the conversion runs after the scaffold, so the navbar and the hero
-		// can aim at the guide tree's real first page, converted or scaffolded,
-		// read back from disk the way a build derives it
+		// Convert after scaffolding so the navbar and hero can link to the
+		// guide tree's actual first page on disk (whether converted or scaffolded).
 		const guideLink = firstGuidePage(collectGuides(join(targetDir, docsDirName)));
-		// existing config + no --force: the conversion is skipped below, so the
-		// homepage obeys the surviving config's includeReadme, not moonwave's
+		// When an existing `luaudocs.toml` is kept (no `--force`), the homepage
+		// follows the surviving config's `includeReadme` setting rather than Moonwave's.
 		const configWritten = !hadConfig || options.force === true;
 		const conversion = convertMoonwave(source, {
 			fallbackTitle: title ?? basename(targetDir),
@@ -376,8 +381,8 @@ export async function initProject(options: InitOptions): Promise<void> {
 			guideLink,
 			homeReadme: configWritten ? undefined : existing?.docs.includeReadme === true,
 		});
-		// the moonwave homepage's branding, ported as a real landing page; a
-		// converted pages/index.md was the real homepage and keeps the slot
+		// Port Moonwave homepage branding to `index.md` unless `pages/index.md`
+		// already claimed the homepage slot.
 		if (conversion.homeIndexMd !== undefined && !pagesClaimIndex) {
 			put(join(docsDirName, "index.md"), conversion.homeIndexMd);
 		}
@@ -390,8 +395,8 @@ export async function initProject(options: InitOptions): Promise<void> {
 			console.log("");
 		}
 
-		// written after the scaffold: with --force the scaffold rewrites the
-		// built-in config, and the converted one must win
+		// Write the converted config after `scaffold` so it overwrites the
+		// starter `luaudocs.toml` when `--force` is set.
 		if (!configWritten) {
 			console.log(
 				pc.yellow(
@@ -407,7 +412,7 @@ export async function initProject(options: InitOptions): Promise<void> {
 	if (options.fromMoonwave) {
 		const staticDir = join(targetDir, ".moonwave", "static");
 		if (existsSync(staticDir)) {
-			// force: false keeps anything already in public/ (a CNAME included)
+			// `force: false` preserves any existing files in `public/` (including `CNAME`).
 			cpSync(staticDir, join(targetDir, docsDirName, "public"), {
 				recursive: true,
 				force: false,
@@ -419,25 +424,23 @@ export async function initProject(options: InitOptions): Promise<void> {
 		}
 	}
 
-	// the project-root tree (the Pages workflow) is scaffolded like any other
-	// user-owned file, but after the config settles: its [docs] dir is the
-	// artifact path. An unreadable config falls back to the default.
+	// Scaffold the project-root tree (the GitHub Pages workflow) after the
+	// config settles so `@DOCS_DIR@` reflects the final `[docs] dir`.
 	copyTemplateTree("project", "", put, {
-		"@DOCS_DIR@": toPosix(docsDirName),
+		"@DOCS_DIR@": docsDirName,
 		"@BRANCH@": await detectBranch(targetDir),
 		"@NODE_MAJOR@": NODE_MAJOR,
-		// pinned, not floating: the workflow is scaffold-once and user-owned, so
-		// a later breaking release cannot reach it to fix it, and a bare `npx
-		// luaudocs` would pick that release up on the next unrelated push
+		// Pin the CLI version in the scaffold-once workflow so a future breaking
+		// release cannot break deployments on an unrelated push.
 		"@VERSION@": pkg.version,
 	});
 
 	console.log("");
 	console.log(`${pc.bold(String(counts.created))} files created, ${counts.skipped} skipped.`);
 
-	// the .vitepress/ machinery, synced once so the site resolves before the
-	// first build. apiSidebar undefined keeps an existing baked sidebar on a
-	// re-run and writes an empty one on a fresh project.
+	// Sync `.vitepress/` once so the site resolves before the first build.
+	// Passing `apiSidebar: undefined` preserves any existing baked API sidebar on
+	// a re-run and writes an empty one in a fresh project.
 	try {
 		const context = createContext(targetDir);
 		printWarnings(

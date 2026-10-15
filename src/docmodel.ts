@@ -1,25 +1,27 @@
 /**
- * The doc model: the wire contract with the Lute extractor (schema v1,
- * documented in extractor/model/init.luau).
+ * The doc model: the JSON wire contract with the Lute extractor (`schemaVersion: 1`,
+ * documented in `extractor/model/init.luau`).
  *
- * No runtime field-by-field validator, deliberately: the sole producer is this
- * repo's own extractor, and `regen:docmodels --check` pins both captures
- * byte-for-byte in CI. What a user can hit is a stale model or the wrong file
- * entirely, and that is what parseDocModel checks.
+ * Intentionally omits a field-by-field runtime schema validator: the sole
+ * producer is this repo's own extractor, and `regen:docmodels --check` pins both
+ * fixture captures byte-for-byte in CI. `parseDocModel` validates what a user
+ * can actually hit in practice: invalid JSON, a non-object payload, or a
+ * mismatched `schemaVersion`.
  */
 
 /**
- * One piece of a rendered type or signature display. `id` names a project
- * declaration; an object without one is a candidate the renderer may resolve
- * by text (the @external map, then the Roblox name lists). Joining every
- * piece's text reproduces the display verbatim.
+ * One segment of a rendered type or signature display. `id` names a declaration
+ * in the project; an object without `id` is an unresolved type-position
+ * identifier that the renderer may link by text (`@external` mappings first,
+ * then Roblox engine types). Concatenating every segment's text reproduces the
+ * display string verbatim.
  */
 export type Seg = string | { text: string; id?: string };
 
-/** An inline type position: params, returns, prop types, field types, generic defaults. */
+/** An inline type position: parameters, returns, property types, field types, and generic defaults. */
 export type Inline = Seg[];
 
-/** A type-alias definition: an array of display LINES (no segment contains a newline). */
+/** A type-alias definition: an array of display lines (no individual segment contains a newline). */
 export type Block = Seg[][];
 
 export interface SourceSpan {
@@ -51,9 +53,9 @@ export interface Return {
 }
 
 export interface Signature {
-	/** How it is called (`Flux.compute`, `State:Connect`); the display follows it. */
+	/** Call prefix (`Flux.compute`, `State:Connect`); `segs` follows immediately after it. */
 	callee: string;
-	/** Everything after the callee (`<T>(x: T): T`), as segments. */
+	/** Everything after `callee` (`<T>(x: T): T`), as segments. */
 	segs: Inline;
 	params: Param[];
 	returns: Return[];
@@ -95,9 +97,9 @@ export interface TypeField {
 	name: string;
 	type?: Inline;
 	doc?: string;
-	/** 1-based index into `definition`'s lines; absent when the definition spells no line for it. */
+	/** 1-based line index into `definition`; absent when the definition has no dedicated line for this field. */
 	line?: number;
-	/** The line already carries a source comment, so the renderer must not inject the doc again. */
+	/** True when the definition line already includes an inline `--` source comment, so the renderer must not splice `doc` above it again. */
 	docInDisplay?: boolean;
 }
 
@@ -107,9 +109,9 @@ export interface TypeDecl {
 	exported: boolean;
 	kind: "alias" | "interface" | "typefunction";
 	generics: Generic[];
-	/** Absent for tag-declared types with no expression and for `type function`s. */
+	/** Absent for tag-declared types with no type expression and for `type function` declarations. */
 	definition?: Block;
-	/** A `type function`'s parenthesized parameter display, that kind only. */
+	/** Parenthesized parameter display, present only on `typefunction` declarations. */
 	params?: Inline;
 	fields?: TypeField[];
 	doc?: string;
@@ -130,25 +132,31 @@ export interface Class {
 }
 
 export interface Reexport {
-	/** Doc-model id the inlined member (and its anchor) is keyed on. */
+	/** Doc-model id for the inlined member and its heading anchor. */
 	id: string;
 	name: string;
+	/** Enclosing nested container (`Flux.Clock`, `KA.Shared`) when the re-export lives inside a nested table. */
+	within?: string;
 	targetModule: string;
-	/** Names something inside targetModule rather than the module itself. */
+	/** Member name inside `targetModule`; absent when mounting the entire module. */
 	targetMember?: string;
-	/** The id of what it names there; absent when that module documents no such member. */
+	/** Target member or class id in `targetModule`; absent when the target module documents no matching member. */
 	targetId?: string;
+	/** External docs URL for a runtime alias (`[source] aliases`), where `targetModule` is the require path (`@lute/fs`) and `targetId` is absent. */
+	url?: string;
+	/** Realm where the re-export exists, from a realm guard (`RunService:IsServer() and require(X)`) or a realm tag on its doc comment. */
+	realm?: Badges["realm"];
 	doc?: string;
 }
 
 export interface Module {
-	/** Project-relative posix path; stable, used in symbol ids and source links. */
+	/** Project-relative POSIX file path; stable, used in symbol ids and source links. */
 	id: string;
 	name: string;
-	/** Instance path, root-first (rojo tree, else folder layout). */
+	/** Instance path, root-first (from the Rojo project tree, or folder layout without one). */
 	instancePath: string[];
 	doc?: string;
-	/** Marks a passthrough (`return require(X)`): callers are sent to X's page. */
+	/** Target module id for a passthrough module (`return require(X)`); references resolve to `X`'s page. */
 	aliasOf?: string;
 	classes: Class[];
 	members: Member[];
@@ -165,18 +173,37 @@ export interface Diagnostic {
 	line?: number;
 }
 
+/**
+ * A name reached through a runtime alias (`[source] aliases`): either a whole
+ * runtime module mount (`@lute/fs`) or a type accessed on one (`fs.File`).
+ * `alias` and `path` record the require target (`lute`, `fs`), `name` is the
+ * exported type name when referencing a type, and `url` is the module page URL
+ * derived from the alias's base URL. If the alias also provides a published doc
+ * model, the renderer resolves this reference to the exact declaration anchor.
+ */
+export interface ExternalRef {
+	url?: string;
+	alias: string;
+	path: string;
+	name?: string;
+}
+
 export interface DocModel {
 	schemaVersion: number;
 	project: { entryPoints: string[] };
 	modules: Module[];
-	/** @external-declared type names to docs URLs; absent when no module declares any. */
-	externals?: Record<string, string>;
+	/**
+	 * External names linked by text: `@external` declarations map directly to a
+	 * URL string, while runtime-alias references map to an `ExternalRef`.
+	 * Absent when empty.
+	 */
+	externals?: Record<string, string | ExternalRef>;
 	diagnostics: Diagnostic[];
 }
 
 const SCHEMA_VERSION = 1;
 
-/** Parses extractor output, rejecting anything that is not a current model. */
+/** Parses extractor JSON output, rejecting anything that is not a current doc model. */
 export function parseDocModel(jsonText: string): DocModel {
 	let parsed: unknown;
 	try {
@@ -200,10 +227,10 @@ export function parseDocModel(jsonText: string): DocModel {
 }
 
 /**
- * The model as `build --model` writes it. Keys are sorted the way
- * `extractor/emit.luau` sorts them, so a dump diffs against the checked-in
- * captures on content rather than on key order; it is not byte-identical to
- * one, since emit also compacts leaf objects.
+ * Formats the doc model for `build --model` and `public/docmodel.json`. Sorts
+ * object keys alphabetically like `extractor/emit.luau` so dumps diff cleanly
+ * by content rather than key order (though `emit.luau` also compacts leaf objects
+ * onto single lines).
  */
 export function formatDocModel(model: DocModel): string {
 	const sorted = (_key: string, value: unknown): unknown =>
