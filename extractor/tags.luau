@@ -1,20 +1,21 @@
 --- Moonwave-compatible tag grammar over doc-block content lines.
 ---
 --- A line is a tag line iff it matches `@word ...` AND `word` is one of the 24
---- known moonwave tags; anything else (`@Kohl`, `@2x`, emails) stays prose, as
+--- known Moonwave tags; anything else (`@Kohl`, `@2x`, emails) stays prose, as
 --- does anything inside a markdown code fence. Prose before the first tag is
---- the description; lines after a tag continue that tag's own description when
---- it carries one (@param, @return, ...) and rejoin the block description
---- otherwise (moonwave's `@class X` + prose-below pattern).
+--- the description; lines after a tag continue that tag's description when the
+--- tag accepts continuation (`@param`, `@return`, etc.) and rejoin the block
+--- description otherwise (supporting Moonwave's `@class X` + prose-below pattern).
 ---
---- @__index is accepted but ignored: auto-detection makes it redundant.
---- @external Name URL is a real data tag, linking otherwise-unresolvable type
---- names to an external docs site.
+--- `@__index` is accepted and ignored because implementation tables are detected
+--- automatically. `@external Name URL` is a data tag that links external type
+--- names to their documentation URLs.
 ---
---- Type/description split follows moonwave: `@param name Type -- desc`; with no
---- separator the whole remainder is the TYPE. Our extensions: the type may be
---- omitted (`@param name -- desc`) because types are inferred, a single ` - `
---- also separates (JSDoc style), and a trailing colon on the name is tolerated.
+--- Type/description splitting follows Moonwave (`@param name Type -- desc`);
+--- with no separator, the entire remainder is the type. LuauDocs extensions:
+--- the type may be omitted (`@param name -- desc`) because types are read from
+--- annotations, a single ` - ` also works as a separator (JSDoc style), and a
+--- trailing colon on the parameter or field name is stripped.
 
 local util = require("./util")
 
@@ -54,9 +55,8 @@ export type ParsedDoc = {
 	diagnostics: { Diagnostic },
 }
 
---- The realm subset of the flag tags, in the order the `realm` badge lists
---- them. The one spelling of the vocabulary: realmList below walks this, so
---- adding a realm here is the whole change.
+--- Realm flag tags in the order the `realm` badge renders them. `realmList`
+--- iterates this array so the realm vocabulary is defined in one place.
 local REALM_FLAGS = { "server", "client", "plugin" }
 
 local FLAG_TAGS = {
@@ -70,7 +70,7 @@ for _, realm in REALM_FLAGS do
 	FLAG_TAGS[realm] = true
 end
 
---- The tag names that name a declaration; each IS its `Placing.kind`.
+--- Tag names that declare a member or container; each key matches its `Placing.kind`.
 local PLACING_TAGS = {
 	class = true,
 	prop = true,
@@ -92,13 +92,13 @@ local DATA_TAGS = {
 	external = true,
 }
 
---- Redundant with auto-detection: consumed (never prose), reported, dropped.
+--- Redundant with auto-detection: consumed (never treated as prose), reported as info, and dropped.
 local IGNORED_TAGS: { [string]: string } = {
 	__index = "@__index is ignored: implementation tables are detected automatically",
 }
 
---- Tags whose trailing prose continues the tag's own description; for every
---- other tag it rejoins the block description.
+--- Tags whose subsequent non-blank lines continue the tag's own description;
+--- for all other tags, subsequent prose rejoins the block description.
 local CONTINUABLE = {
 	param = true,
 	["return"] = true,
@@ -115,8 +115,7 @@ end
 
 local tags = {}
 
---- The realm subset of `flags` in badge order, nil when none are set: the one
---- walk behind both the tag badges and code-signal detection.
+--- Returns the active realm flags from `flags` in canonical badge order, or `nil` when none are set.
 function tags.realmList(flags: { [string]: boolean }): { string }?
 	local realm = {}
 	for _, flag in REALM_FLAGS do
@@ -127,21 +126,15 @@ function tags.realmList(flags: { [string]: boolean }): { string }?
 	return if #realm > 0 then realm else nil
 end
 
---- Splits `Type -- desc` per moonwave (also `Type - desc`): no separator means
---- everything is the type.
+--- Splits `Type -- desc` (or JSDoc `Type - desc`); with no separator, the entire string is the type.
 local function splitTypeDesc(rest: string): (string?, string?)
 	rest = util.trim(rest)
 	if rest == "" then
 		return nil, nil
 	end
-	local desc = rest:match("^%-%-%s*(.*)$")
+	-- Starts directly with the separator (`--` or `- `): description only, no type.
+	local desc = rest:match("^%-%-%s*(.*)$") or rest:match("^%-%s+(.*)$")
 	if desc ~= nil then
-		-- starts with the separator: no type at all
-		return nil, if desc ~= "" then desc else nil
-	end
-	desc = rest:match("^%-%s+(.*)$")
-	if desc ~= nil then
-		-- same, JSDoc style
 		return nil, if desc ~= "" then desc else nil
 	end
 	local typePart, descPart = rest:match("^(.-)%s+%-%-%s*(.*)$")
@@ -155,8 +148,8 @@ local function splitTypeDesc(rest: string): (string?, string?)
 	return rest, nil
 end
 
---- `Class.Nested.Name` -> name, within? Splits at the last dot, so nested
---- containers keep their qualified name.
+--- Splits `Class.Nested.Name` at the last dot into `(memberName, withinClass?)`,
+--- keeping dotted container names intact.
 local function splitQualified(name: string): (string, string?)
 	local class, member = name:match("^([%w_%.]+)%.([%w_]+)$")
 	if class ~= nil then
@@ -217,9 +210,9 @@ function tags.parse(content: { string }): ParsedDoc
 		local wasBlank = prevBlank
 		prevBlank = blank
 
-		-- CommonMark allows a fence at most three spaces of indentation: a
-		-- further-indented ``` is indented code (below), and reading it as a
-		-- fence would swallow every tag line after the example
+		-- CommonMark allows at most three spaces of indentation before a code
+		-- fence; a 4-space-indented ``` is an indented code line (handled below),
+		-- and treating it as a fence opener would swallow subsequent tag lines.
 		local indent = line:match("^([ \t]*)") :: string
 		local fence: string? = nil
 		if #indent <= 3 and indent:find("\t", 1, true) == nil then
@@ -227,8 +220,7 @@ function tags.parse(content: { string }): ParsedDoc
 		end
 		if inFence then
 			sink(line)
-			-- a closer must use the opener's character: a ``` inside a ~~~
-			-- fence is content, not a closer
+			-- A closing fence must match the opening fence's character and be at least as long.
 			if fence ~= nil and fence:sub(1, 1) == fenceMarker:sub(1, 1) and #fence >= #fenceMarker then
 				inFence = false
 			end
@@ -241,10 +233,11 @@ function tags.parse(content: { string }): ParsedDoc
 			continue
 		end
 
-		-- indented code cannot interrupt a paragraph (CommonMark), so a
-		-- 4-space-indented line only opens one after a blank boundary: @words
-		-- in an example are code, but `@interface` directly followed by
-		-- indented `.field` lines still parses as tags
+		-- In CommonMark, an indented code block cannot interrupt a paragraph, so
+		-- a 4-space-indented line only opens a code block after a blank line.
+		-- That keeps `@words` inside indented code examples from parsing as tags
+		-- while still allowing `@interface` followed immediately by indented
+		-- `.field` lines.
 		local codeIndent = not blank and (#indent >= 4 or indent:find("\t", 1, true) ~= nil)
 		if inIndentedCode then
 			if blank or codeIndent then
@@ -258,12 +251,10 @@ function tags.parse(content: { string }): ParsedDoc
 			continue
 		end
 
-		-- a blank line ends a continuable tag's description: the next
-		-- paragraph rejoins the block prose (moonwave has no continuation at
-		-- all, so anything else strands trailing prose inside the last tag).
-		-- An @interface's dot-field list survives the break: moonwave reads
-		-- `.field` lines anywhere in the block, blank lines between groups
-		-- included
+		-- A blank line ends a continuable tag's description so the following
+		-- paragraph rejoins the block description. `@interface` `.field` lines
+		-- still match across blank lines because `sawInterface` stays true for
+		-- the rest of the block.
 		if blank then
 			current = nil
 		end
@@ -284,7 +275,7 @@ function tags.parse(content: { string }): ParsedDoc
 			continue
 		end
 
-		-- `.fieldName Type -- desc` inside an @interface block
+		-- `.fieldName Type -- desc` inside an `@interface` block.
 		if sawInterface then
 			local fieldArg = line:match("^%s*%.([%w_]+.*)$")
 			if fieldArg ~= nil then
@@ -310,8 +301,8 @@ function tags.parse(content: { string }): ParsedDoc
 		return base .. "\n" .. extra
 	end
 
-	--- The shared `@param`/`@field` shape: `name Type -- desc`, tolerating a
-	--- trailing colon on the name. nil when the entry names nothing.
+	--- Parses the shared `@param`/`@field` shape (`name Type -- desc`), stripping
+	--- any trailing colon on `name`. Returns `nil` when `entry` has no name.
 	local function parseNamedEntry(entry: Entry): (string?, string?, string?)
 		local name, rest = util.trim(entry.arg):match("^(%S+)%s*(.*)$")
 		if name == nil then
@@ -321,8 +312,8 @@ function tags.parse(content: { string }): ParsedDoc
 		return ((name :: string):gsub(":$", "")), typeStr, mergeDesc(desc, entry)
 	end
 
-	--- False when a placing already exists: the caller must then discard the
-	--- duplicate tag's payload too (type/desc/owner), not just the placing.
+	--- Sets `doc.placing`, or returns `false` if a placing tag was already seen
+	--- so the caller also discards the duplicate tag's type, description, and owner.
 	local function setPlacing(entry: Entry, kind: string, name: string): boolean
 		if doc.placing ~= nil then
 			report(
@@ -354,7 +345,7 @@ function tags.parse(content: { string }): ParsedDoc
 			local declName: string? = nil
 			local rest: string? = nil
 			if name == "method" or name == "function" then
-				-- `Class:method` is the colon-accessor spelling of a qualified name
+				-- `Class:method` is the colon-accessor spelling of a qualified name.
 				local qualifier, colonName, colonRest = arg:match("^([%w_%.]+):([%w_]+)%s*(.*)$")
 				if qualifier ~= nil then
 					declName = qualifier .. "." .. colonName
@@ -369,7 +360,7 @@ function tags.parse(content: { string }): ParsedDoc
 			else
 				local memberName = declName
 				local qualifiedWithin: string? = nil
-				-- classes keep dotted names; member tags split `Class.name`
+				-- `@class` keeps dotted names intact; member placing tags split `Class.name`.
 				if name ~= "class" then
 					local short, within = splitQualified(declName)
 					memberName = short
@@ -409,7 +400,7 @@ function tags.parse(content: { string }): ParsedDoc
 			table.insert(doc.errors, { type = typeStr or "unknown", desc = mergeDesc(desc, entry) })
 		elseif name == "deprecated" then
 			local version = arg:match("^([^%s]+)")
-			-- `@deprecated -- note` starts with the separator: no version
+			-- `@deprecated -- note` starts with the separator: no version string.
 			if version ~= nil and version:sub(1, 1) == "-" then
 				version = nil
 			end
@@ -425,8 +416,8 @@ function tags.parse(content: { string }): ParsedDoc
 				table.insert(doc.externals, { name = extName, url = url, lineOffset = entry.lineOffset })
 			end
 		elseif name == "tag" then
-			-- `@tag name -- comment` sheds the comment like every sibling data
-			-- tag; with no separator the whole argument is the value
+			-- `@tag name -- comment` strips the trailing comment like other data
+			-- tags; with no separator, the entire argument is the tag value.
 			local value = splitTypeDesc(arg)
 			if value ~= nil and value ~= "" then
 				table.insert(doc.customTags, value)
@@ -437,7 +428,7 @@ function tags.parse(content: { string }): ParsedDoc
 	return doc
 end
 
---- The class name a block explicitly declares via @class, if any.
+--- Returns the class name declared by `@class`, if any.
 function tags.className(doc: ParsedDoc): string?
 	local placing = doc.placing
 	return if placing ~= nil and placing.kind == "class" then placing.name else nil

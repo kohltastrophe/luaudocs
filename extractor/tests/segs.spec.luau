@@ -1,7 +1,6 @@
 local t = require("./harness")
 local segs = require("../segs")
 
---- (parsed, first typealias stat, claimIndex, trailingIndex) for `src`.
 local function typeAlias(src: string)
 	local parsed, claimIndex, trailingIndex = t.parseWithComments(src)
 	for _, stat in parsed.cst.root.statements do
@@ -12,181 +11,113 @@ local function typeAlias(src: string)
 	error("no typealias in source")
 end
 
-local function ref(text: string, name: string, prefix: string?): any
-	return { text = text, __name = name, __prefix = prefix }
+local function inline(rhs: string, generics: { [string]: boolean }?): any
+	local parsed, stat = typeAlias("type X = " .. rhs)
+	return segs.inline(parsed, stat.type, generics)
 end
 
+local function fieldsOf(rhs: string)
+	local parsed, stat, claim, trailing = typeAlias("type X = " .. rhs)
+	return segs.fields(parsed, stat.type, claim, trailing)
+end
+
+local ref = segs.ref
 local function tagRef(text: string, name: string, prefix: string?): any
-	return { text = text, __name = name, __prefix = prefix, __tag = true }
+	return segs.ref(text, name, prefix, true)
 end
 
 return function()
 	t.suite("segs: inline")
 
-	local parsed, stat = typeAlias("type X = { tint: Color3, name: string }")
-	local inline = segs.inline(parsed, stat.type) :: any
-	t.eq(segs.text(inline), "{ tint: Color3, name: string }", "inline display is the source spelling")
-	t.eq(inline, {
-		"{ tint: ",
-		ref("Color3", "Color3"),
-		", name: ",
-		ref("string", "string"),
-		" }",
-	}, "field keys are plain, type positions are refs")
-
-	local parsed2, stat2 = typeAlias("type X = Map<Widget, A.B>")
-	t.eq(segs.inline(parsed2, stat2.type), {
-		ref("Map", "Map"),
-		"<",
-		ref("Widget", "Widget"),
-		", ",
-		ref("A.B", "B", "A"),
-		">",
-	}, "generic head and arguments are separate refs; prefixed refs spell both parts")
-
-	local parsed3, stat3 = typeAlias(table.concat({
-		"type X = Foo |",
-		"	-- legacy",
-		"	Bar",
-	}, "\n"))
-	t.eq(segs.inline(parsed3, stat3.type), {
-		ref("Foo", "Foo"),
-		" | ",
-		ref("Bar", "Bar"),
-	}, "comments strip and the whitespace run across lines collapses to one space")
-
-	local parsed4, stat4 = typeAlias('type X = "a--b" | Foo')
-	t.eq(segs.text(segs.inline(parsed4, stat4.type) :: any), '"a--b" | Foo', "a -- inside a string opens no comment")
-
-	local parsed5, stat5 = typeAlias("type X = (T) -> T")
-	t.eq(segs.inline(parsed5, stat5.type, { T = true }), {
-		"(T) -> T",
-	}, "generic names in scope come out plain, merged into one piece")
+	local tbl = inline("{ tint: Color3, name: string }")
+	t.eq(segs.text(tbl), "{ tint: Color3, name: string }", "inline display text")
+	t.eq(tbl, { "{ tint: ", ref("Color3", "Color3"), ", name: ", ref("string", "string"), " }" }, "table type segs")
+	t.eq(
+		inline("Map<Widget, A.B>"),
+		{ ref("Map", "Map"), "<", ref("Widget", "Widget"), ", ", ref("A.B", "B", "A"), ">" },
+		"generic head, args, and prefixed ref"
+	)
+	t.eq(inline("Foo |\n\t-- legacy\n\tBar"), { ref("Foo", "Foo"), " | ", ref("Bar", "Bar") }, "line comment stripped")
+	t.eq(segs.text(inline("{ a: --[[ first\n\tline ]] number }")), "{ a: number }", "block comment stripped")
+	t.eq(segs.text(inline('"a--b" | Foo')), '"a--b" | Foo', "-- inside string literal preserved")
+	t.eq(inline("(T) -> T", { T = true }), { "(T) -> T" }, "generics in scope demoted to plain text")
 
 	t.suite("segs: block")
 
-	local parsed6, stat6 = typeAlias(table.concat({
-		"type X = {",
-		"	-- speed in studs",
-		"	speed: number,",
-		"",
-		"	target: Widget,",
-		"}",
-	}, "\n"))
+	local parsed6, stat6 = typeAlias("type X = {\n\t-- speed in studs\n\tspeed: number,\n\n\ttarget: Widget,\n}")
 	local lines, lineOf = segs.block(parsed6, stat6.type)
-	-- the closing `}` sits at column 1, so the shared dedent prefix is empty
-	-- and the body keeps its tabs, exactly as the author spelled it
-	t.eq(
-		segs.blockText(lines :: any),
+	t.eq({ segs.blockText(lines :: any), lineOf[3], lineOf[5], (lines :: any)[4] }, {
 		"{\n\t-- speed in studs\n\tspeed: number,\n\ttarget: Widget,\n}",
-		"blanks dropped, comments and indentation kept"
-	)
-	t.eq(lineOf[3], 3, "field line maps through the blank drop")
-	t.eq(lineOf[5], 4, "line after the blank shifts up")
-	t.eq((lines :: any)[4], { "\ttarget: ", ref("Widget", "Widget"), "," }, "refs survive into block lines")
+		3,
+		4,
+		{ "\ttarget: ", ref("Widget", "Widget"), "," },
+	}, "blanks dropped, comments and indentation kept, line mapping shifted")
 
-	-- an alias whose every continuation line is indented (the closer included)
-	-- does dedent, and a ref on a dedented line keeps its exact column
-	local parsedD, statD = typeAlias(table.concat({
-		"type Y = (",
-		"		Widget",
-		"	) -> ()",
-	}, "\n"))
+	local parsedD, statD = typeAlias("type Y = (\n\t\tWidget\n\t) -> ()")
 	local linesD = select(1, segs.block(parsedD, statD.type)) :: any
-	t.eq(segs.blockText(linesD), "(\n\tWidget\n) -> ()", "continuation lines dedent by the shared prefix")
-	t.eq(linesD[2], { "\t", ref("Widget", "Widget") }, "ref column survives the dedent")
+	t.eq(
+		{ segs.blockText(linesD), linesD[2] },
+		{ "(\n\tWidget\n) -> ()", { "\t", ref("Widget", "Widget") } },
+		"continuation lines dedent by shared prefix"
+	)
 
 	t.suite("segs: fromTag")
 
-	t.eq(segs.fromTag("{ tint: Color3 }"), {
-		"{ tint: ",
-		tagRef("Color3", "Color3"),
-		" }",
-	}, "parsed tag type: field keys plain, verbatim spacing, refs marked tag-authored")
-
-	t.eq(segs.fromTag("{  tint:Color3 }"), {
-		"{  tint:",
-		tagRef("Color3", "Color3"),
-		" }",
-	}, "tag display is verbatim, never collapsed")
-
-	t.eq(segs.fromTag("number[]"), {
-		tagRef("number", "number"),
-		"[]",
-	}, "invalid Luau falls back to the lexical scan")
-
-	t.eq(segs.fromTag("fn: Callback"), {
-		"fn: ",
-		tagRef("Callback", "Callback"),
-	}, "lexical scan skips an identifier followed by a colon")
-
-	t.eq(segs.fromTag('"a" | Foo.Bar[]'), {
-		'"a" | ',
-		tagRef("Foo.Bar", "Bar", "Foo"),
-		"[]",
-	}, "lexical scan: quoted text is plain, dotted pairs join into one prefixed ref")
-
-	t.eq(segs.fromTag("Promise<T>", { T = true }), {
-		tagRef("Promise", "Promise"),
-		"<T>",
-	}, "generic names demote to plain text on the tag path too")
+	t.eq(segs.fromTag("{ tint: Color3 }"), { "{ tint: ", tagRef("Color3", "Color3"), " }" }, "parsed tag type")
+	t.eq(segs.fromTag("{  tint:Color3 }"), { "{  tint:", tagRef("Color3", "Color3"), " }" }, "verbatim tag spacing")
+	t.eq(segs.fromTag("number[]"), { tagRef("number", "number"), "[]" }, "lexical fallback on shorthand")
+	t.eq(segs.fromTag("fn: Callback"), { "fn: ", tagRef("Callback", "Callback") }, "lexical skips field key")
+	t.eq(
+		segs.fromTag('"a" | Foo.Bar[]'),
+		{ '"a" | ', tagRef("Foo.Bar", "Bar", "Foo"), "[]" },
+		"lexical quotes and dotted refs"
+	)
+	t.eq(segs.fromTag("Promise<T>", { T = true }), { tagRef("Promise", "Promise"), "<T>" }, "tag generics demoted")
 
 	local first = segs.fromTag("Widget") :: any
-	local second = segs.fromTag("Widget") :: any
 	first[1].id = "poisoned"
-	t.eq(second[1].id, nil, "memoized tag segments come back as fresh clones")
+	t.eq((segs.fromTag("Widget") :: any)[1].id, nil, "memoized tag segments return fresh clones")
 
 	t.suite("segs: fields")
 
-	local parsed7, stat7, claim7, trailing7 = typeAlias(table.concat({
-		"type P = {",
-		"	--- lead doc",
-		"	a: string,",
-		"	b: number, -- trail doc",
-		"	c: boolean,",
-		"}",
-	}, "\n"))
-	local fields7 = select(1, segs.fields(parsed7, stat7.type, claim7, trailing7)) :: any
-	local function shape(f: any)
-		return { name = f.name, desc = f.desc, line = f.line, docInDisplay = f.docInDisplay }
-	end
-	t.eq(#fields7, 3, "three fields collected")
-	t.eq(shape(fields7[1]), { name = "a", desc = "lead doc", line = 3, docInDisplay = true }, "leading doc claims")
+	local fields7 =
+		select(1, fieldsOf("{\n\t--- lead doc\n\ta: string,\n\tb: number, -- trail doc\n\tc: boolean,\n}")) :: any
+	t.eq(fields7, {
+		{ name = "a", type = { ref("string", "string") }, desc = "lead doc", line = 3, docInDisplay = true },
+		{ name = "b", type = { ref("number", "number") }, desc = "trail doc", line = 4, docInDisplay = true },
+		{ name = "c", type = { ref("boolean", "boolean") }, line = 5 },
+	}, "direct table fields claim leading/trailing docs")
+
+	local own8, facts8 = fieldsOf("Base & {\n\tfrozen: boolean, -- capture state\n\tat: number,\n}")
 	t.eq(
-		shape(fields7[2]),
-		{ name = "b", desc = "trail doc", line = 4, docInDisplay = true },
-		"trailing doc falls back"
+		{ own8, facts8 },
+		{ nil, { frozen = { line = 2, docInDisplay = true }, at = { line = 3, docInDisplay = false } } },
+		"intersection operands record line facts without claiming own fields"
 	)
-	t.eq(shape(fields7[3]), { name = "c", desc = nil, line = 5, docInDisplay = nil }, "undocumented field")
-	t.eq(segs.text(fields7[1].type), "string", "field types are inline segments")
 
-	local parsed8, stat8, claim8, trailing8 = typeAlias(table.concat({
-		"type S = Base & {",
-		"	frozen: boolean, -- capture state",
-		"	at: number,",
-		"}",
-	}, "\n"))
-	local own8, facts8 = segs.fields(parsed8, stat8.type, claim8, trailing8)
-	t.eq(own8, nil, "an intersection's operand table yields no own fields")
-	t.eq(facts8.frozen, { line = 2, docInDisplay = true }, "operand fields still name display lines")
-	t.eq(facts8.at, { line = 3, docInDisplay = false }, "operand line facts without docs")
+	local _, facts9 = fieldsOf("{ x: number } & { x: string, y: boolean, z: buffer }")
+	t.eq(facts9, {}, "duplicate field names and shared lines are omitted from lineFacts")
 
-	local parsed9, stat9, claim9, trailing9 = typeAlias("type D = { x: number } & { x: string, y: boolean, z: buffer }")
-	local _, facts9 = segs.fields(parsed9, stat9.type, claim9, trailing9)
-	t.eq(facts9.x, nil, "a name spelled twice goes line-less")
-	t.eq(facts9.y, nil, "a second entry on a used line is skipped")
-	t.eq(facts9.z, nil, "a third entry on a used line is skipped too")
-
-	t.suite("segs: generics")
-
-	local parsed10, stat10 = typeAlias("type G<K, V = K, W = Widget> = W")
-	local list10 = segs.generics(parsed10, stat10.generics, stat10.genericPacks)
-	t.eq(#list10, 3, "three parameters")
-	t.eq(list10[1], { name = "K", isPack = false }, "no default")
-	t.eq(list10[2], { name = "V", isPack = false, default = { "K" } }, "a default naming an earlier parameter is plain")
+	local ownOpt = select(1, fieldsOf("{\n\t--- lead doc\n\ta: string,\n}?")) :: any
 	t.eq(
-		list10[3],
+		ownOpt,
+		{ { name = "a", type = { ref("string", "string") }, desc = "lead doc", line = 3, docInDisplay = true } },
+		"optional table type unwraps and yields own fields"
+	)
+
+	t.suite("segs: generics and vararg packs")
+
+	local parsed10, stat10 = typeAlias("type G<K, V = K, W = Widget, U... = (number, Widget)> = (W, U...) -> ()")
+	t.eq(segs.generics(parsed10, stat10.generics, stat10.genericPacks), {
+		{ name = "K", isPack = false },
+		{ name = "V", isPack = false, default = { "K" } },
 		{ name = "W", isPack = false, default = { ref("Widget", "Widget") } },
-		"a project-type default is a ref"
-	)
+		{ name = "U", isPack = true, default = { "(", ref("number", "number"), ", ", ref("Widget", "Widget"), ")" } },
+	}, "generics and typepack defaults")
+
+	local parsedFn = t.parse("local function f<T...>(...: T...) end")
+	local fnNode = parsedFn.cst.root.statements[1].func
+	local fnGenerics, fnNames = segs.generics(parsedFn, fnNode.generics, fnNode.genericPacks)
+	local fnParams = segs.paramEntries(parsedFn, fnNode, fnNames)
+	t.eq(segs.text(segs.signature(fnGenerics, fnParams, nil)), "<T...>(...: T...)", "vararg pack signature")
 end

@@ -1,16 +1,16 @@
---- The type a value implies, for a member whose code declares none. A prop
---- assigned `RunService:IsClient()` is a boolean whether or not anyone wrote
---- `: boolean`.
+--- Value-based type inference for members without an explicit type annotation,
+--- cast, or `@prop` type. For example, a property assigned `RunService:IsClient()`
+--- infers as `boolean` even without `: boolean`.
 ---
---- Only inferences that cannot be wrong belong here. A rendered type is
---- indistinguishable from a declared one, so a plausible guess is worse than
---- the blank it replaces. That bar keeps out arithmetic (`a + b` is a Vector3
---- as readily as a number), limits engine lookups to receivers already
---- established as engine-owned, and stops an instance path at its first `.X`
---- step, which names a property (`script.Name`) as readily as a child.
+--- Only unambiguous inferences belong here: a rendered inferred type looks
+--- identical to a declared type, so a plausible guess is worse than omitting
+--- the type. Arithmetic (`a + b` could be `Vector3` or `number`) is excluded,
+--- engine method lookups apply only to known engine receivers, and instance
+--- paths stop at the first `.X` step (`script.Name` could be a string property
+--- or a child Instance).
 ---
---- Cross-module call returns are inferred in model/finalize instead: they need
---- every module's surface, which pass 1 does not have.
+--- Cross-module call return types are inferred in `model/finalize.luau`, where
+--- the full module graph's surfaces are available.
 
 local engineMod = require("./engine")
 local segsMod = require("./segs")
@@ -19,17 +19,17 @@ local surfaceMod = require("./surface")
 type Seg = segsMod.Seg
 type SymValue = surfaceMod.SymValue
 
---- The generated engine tables, absent in a checkout that never installed:
---- inference then knows everything but these.
+--- Generated Roblox API lookup tables (`nil` when `bun run generate` has not run).
 local ENGINE = engineMod.lists
 
 local infer = {}
 
---- Luau's own libraries that construct a value named after the library.
+--- Built-in Luau libraries whose constructors return a value of the same name (`vector`, `buffer`).
 local LUAU_LIBS: { [string]: boolean } = { vector = true, buffer = true }
 
---- Statics that RETURN the type they hang off, so only a call of one is it.
---- Listed rather than assumed: `Color3.toHSV` returns three numbers.
+--- Static constructor functions that return an instance of the library they
+--- hang off when called (`Vector3.new()`, `CFrame.Angles()`). Listed explicitly
+--- because other functions on those libraries (`Color3.toHSV`) return different types.
 local CONSTRUCTOR_NAMES: { [string]: boolean } = {
 	new = true,
 	create = true,
@@ -38,8 +38,8 @@ local CONSTRUCTOR_NAMES: { [string]: boolean } = {
 	lookAt = true,
 }
 
---- Statics that ARE the type they hang off, so an index of one already is it:
---- the split separating `Vector3.zero` from `Vector3.new`.
+--- Static constants whose value is already an instance of the library they hang
+--- off (`Vector3.zero`, `CFrame.identity`), without being called.
 local CONSTANT_NAMES: { [string]: boolean } = {
 	identity = true,
 	zero = true,
@@ -53,17 +53,16 @@ local function namesTheType(name: string, called: boolean): boolean
 	return CONSTRUCTOR_NAMES[name] == true or name:match("^[Ff]rom%u") ~= nil
 end
 
---- A type name as the one reference segment an annotation of it would produce.
---- Through segs' constructor, so "resolves like a declared one" is structural
---- rather than a shape restated here.
+--- Builds a single reference segment through `segs.ref` so inferred type names
+--- resolve and link identically to annotated type references.
 local function ref(text: string, prefix: string?): Seg
 	return segsMod.ref(if prefix ~= nil then prefix .. "." .. text else text, text, prefix)
 end
 
 local PRIMITIVES: { [string]: boolean } = { boolean = true, number = true, string = true }
 
---- One engine type spelling as segments. `{ Instance }` is the only shape the
---- dump produces around a name, so its brackets are plain text either side.
+--- Converts an engine return-type string from `engine.luau` into segments.
+--- `{ Instance }` is the only composite shape emitted by `scripts/generate.ts`.
 local function engineSegs(text: string): { Seg }
 	if PRIMITIVES[text] then
 		return { text }
@@ -79,8 +78,7 @@ local function engineSegs(text: string): { Seg }
 	return { ref(text) }
 end
 
---- `Enum.Material.SmoothPlastic` -> `Enum.Material`. A member is the enum item
---- itself, so this needs no call.
+--- Infers `Enum.<Name>` from a 3-part `Enum.Material.SmoothPlastic` path.
 local function fromEnumPath(callee: string): { Seg }?
 	local parts = string.split(callee, ".")
 	if parts[1] == "Enum" and #parts == 3 and ENGINE ~= nil and ENGINE.enums[parts[2]] then
@@ -89,8 +87,8 @@ local function fromEnumPath(callee: string): { Seg }?
 	return nil
 end
 
---- `Color3.new()` -> `Color3`, `Vector3.zero` -> `Vector3`: the type a dotted
---- global path names, where `called` says which of the two spellings this is.
+--- Infers a datatype or Luau library type from `Color3.new()` (`called == true`)
+--- or `Vector3.zero` (`called == false`).
 local function fromStaticPath(callee: string, called: boolean): { Seg }?
 	local parts = string.split(callee, ".")
 	local root = parts[1]
@@ -100,20 +98,16 @@ local function fromStaticPath(callee: string, called: boolean): { Seg }?
 	if LUAU_LIBS[root] then
 		return { root }
 	end
-	-- `Instance.new` is the one Class spelled like a datatype constructor
+	-- `Instance.new` is the only Roblox class constructor spelled like a datatype constructor.
 	if root == "Instance" or (ENGINE ~= nil and ENGINE.datatypes[root]) then
 		return { ref(root) }
 	end
 	return nil
 end
 
---- `T` where a guard admits it. Spelled `T?` rather than the `T | false` that
---- `and` literally yields: a reader needs to know the value can be absent, not
---- which falsy value stands in. A guarded boolean absorbs the `false`.
----
---- `?` suffixes everything left of it, so a type it cannot simply follow is
---- parenthesized first: `A & B?` does not parse, and `(s) -> R?` binds to R
---- rather than the function. Only finalize reaches those.
+--- Returns true when `list` must be wrapped in parentheses before appending `?`
+--- (`A & B?` is a syntax error, and `(s) -> R?` would bind `?` to `R` rather
+--- than the function type).
 local function needsParens(list: { Seg }): boolean
 	for _, seg in list do
 		local text = if type(seg) == "string" then seg else seg.text
@@ -124,19 +118,20 @@ local function needsParens(list: { Seg }): boolean
 	return false
 end
 
---- `boolean`, however it is spelled: pass 1 emits the bare string, an
---- annotation arrives through finalize as a reference segment. Exported so the
---- realm rule in `detect` asks the same question rather than its own copy.
+--- Returns true when `list` spells `boolean` (whether as a plain string from
+--- pass 1 or a reference segment from `finalize`). Shared with `detect.propRealm`.
 function infer.isBoolean(list: { Seg }?): boolean
 	return list ~= nil and #list == 1 and segsMod.text(list) == "boolean"
 end
 
+--- Appends `?` to a guarded type `T` (rendering `T?` rather than `T | false`).
+--- Guarded `boolean` values stay `boolean` since `false` is already a boolean.
 local function optional(list: { Seg }?): { Seg }?
 	if list == nil or infer.isBoolean(list) then
 		return list
 	end
 	local last = list[#list]
-	-- already optional: the guard adds no case the type does not carry
+	-- Already optional; do not append a second `?`.
 	if type(last) == "string" and last:sub(-1) == "?" then
 		return list
 	end
@@ -149,20 +144,19 @@ local function optional(list: { Seg }?): { Seg }?
 	return segsMod.canonical(out)
 end
 
---- Shared with finalize, which optionalizes a guarded cross-module return the
---- same way (`IsServer and Registry.new()`).
+--- Shared with `finalize`, which optionalizes guarded cross-module call returns
+--- (`IsServer and Registry.new()`).
 infer.optional = optional
 
---- The type `value` implies, or nil when nothing about it is certain. Callers
---- reach here only for a member no annotation, cast, or `@prop` tag typed.
+--- Infers the type segments implied by `value`, or `nil` when `value`'s type
+--- cannot be determined with certainty.
 function infer.fromValue(value: SymValue): { Seg }?
 	local unguarded, guarded = surfaceMod.unguard(value)
 	if guarded then
 		return optional(infer.fromValue(unguarded))
 	end
 	if value.kind == "literal" then
-		-- `nil` is a placeholder for a value assigned elsewhere, never a type
-		-- worth printing
+		-- `nil` is typically a placeholder for a value assigned later, never a useful property type.
 		local valueKind = value.valueKind
 		return if valueKind ~= nil and valueKind ~= "nil" then { valueKind } else nil
 	end
@@ -173,8 +167,8 @@ function infer.fromValue(value: SymValue): { Seg }?
 		if value.arrayItemKind ~= nil then
 			return { "{ " .. value.arrayItemKind .. " }" }
 		end
-		-- a metatable is what makes `setmetatable({}, Class)` an instance of
-		-- something rather than the empty table it is spelled as
+		-- A table with a metatable (`setmetatable({}, Class)`) is an instance
+		-- rather than a plain empty table.
 		if value.metatable ~= nil then
 			return nil
 		end
@@ -187,9 +181,9 @@ function infer.fromValue(value: SymValue): { Seg }?
 		local returns = if ENGINE ~= nil then ENGINE.methodReturns[value.engineMethod] else nil
 		return if returns ~= nil then engineSegs(returns) else nil
 	end
-	-- only `game:GetService("X")` NAMES a service. `game.X` is stamped with one
-	-- too, enough for a realm whitelist to filter but not to print:
-	-- `game.PlaceId` is a number, and typing it `PlaceId` invents a class.
+	-- Only `game:GetService("X")` is guaranteed to return service `X`. `game.X`
+	-- also sets `value.service` for realm whitelist checks, but `game.PlaceId`
+	-- is a number property rather than a `PlaceId` class.
 	if value.service ~= nil and value.callee == "game:GetService" then
 		return { ref(value.service) }
 	end
@@ -200,10 +194,10 @@ function infer.fromValue(value: SymValue): { Seg }?
 	if enum ~= nil then
 		return enum
 	end
-	-- an index and a call spell `callee` identically and mean different things:
-	-- `Instance.new` is the function, `Instance.new()` is what it builds. Only
-	-- a call carries a `calleeValue`, which tells them apart -- and what it
-	-- EVALUATED to tells a datatype from a required module of the same name.
+	-- Distinguish a property access (`Instance.new` -> function) from a call
+	-- (`Instance.new()` -> `Instance`): only calls set `calleeValue`, and a
+	-- non-opaque `calleeValue` means the root local was a required module rather
+	-- than an engine global.
 	local calleeValue = value.calleeValue
 	if calleeValue ~= nil and calleeValue.kind ~= "opaque" then
 		return nil

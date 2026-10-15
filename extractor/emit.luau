@@ -21,8 +21,8 @@ local function escapeString(s: string): string
 	return out
 end
 
---- An object key, quoted and escaped. Memoized: keys come from the schema's
---- small vocabulary, so each distinct key escapes once, not once per record.
+--- Quotes and escapes an object key, memoized across records since the doc-model
+--- schema uses a small, fixed vocabulary of field names.
 local quotedKeys: { [string]: string } = {}
 local function quotedKey(k: any): string
 	local s = tostring(k)
@@ -34,15 +34,24 @@ local function quotedKey(k: any): string
 	return cached
 end
 
---- True when nothing under `keys` needs a line of its own (scalars, and empty
---- tables, which encode as `[]` either way). Pretty mode prints such objects on
---- one line: the model is mostly two- and three-field records, and a line per
---- field would bury a capture diff under brace noise.
+--- `__`-prefixed keys are internal assembler scratch fields (`model/init.luau`)
+--- and are omitted from the serialized doc model.
+local function isScratchKey(k: any): boolean
+	return type(k) == "string" and k:sub(1, 2) == "__"
+end
+
+--- Returns true when every value under `keys` is a scalar or an empty/scratch-only
+--- table. Pretty mode formats leaf objects on a single line so 2- and 3-field
+--- segment records stay compact in snapshot diffs.
 local function isLeafObject(t: { [any]: any }, keys: { any }): boolean
 	for _, k in keys do
 		local v = t[k]
-		if type(v) == "table" and next(v) ~= nil then
-			return false
+		if type(v) == "table" then
+			for inner in v do
+				if not isScratchKey(inner) then
+					return false
+				end
+			end
 		end
 	end
 	return true
@@ -59,9 +68,9 @@ local function isArray(t: { [any]: any }): boolean
 	return count == #t
 end
 
---- Marks a table as a record for the wire: an empty table would otherwise
---- satisfy isArray and encode as `[]`. The scratch key defeats isArray, then
---- the `__`-prefix strip in encodeValue drops it, leaving `{}`.
+--- Marks a table as a JSON object even when empty (an unmarked empty table
+--- satisfies `isArray` and would serialize as `[]`). `encodeValue` strips the
+--- `__record` scratch key and emits `{}`.
 function emit.record(t: { [any]: any }): { [any]: any }
 	t.__record = true
 	return t
@@ -104,9 +113,7 @@ local function encodeValue(value: any, pretty: boolean, indent: string, out: { s
 		else
 			local keys = {}
 			for k in value do
-				-- `__`-prefixed keys are the assembler's scratch space
-				-- (model/init.luau); they never belong in the doc model
-				if type(k) ~= "string" or k:sub(1, 2) ~= "__" then
+				if not isScratchKey(k) then
 					table.insert(keys, k)
 				end
 			end

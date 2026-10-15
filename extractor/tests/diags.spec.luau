@@ -34,6 +34,8 @@ return function()
 	end)
 
 	t.eq(seen, {
+		-- at the first error's own line (1-based), not the file's first
+		{ code = "parse-error", severity = "error", file = "broken.luau", line = 4 },
 		{ code = "require-unresolved", severity = "warning", file = "main.luau", line = 6 },
 		{ code = "unresolved-reexport", severity = "info", file = "main.luau", line = 9 },
 		{ code = "duplicate-external", severity = "warning", file = "main.luau", line = 14 },
@@ -50,6 +52,23 @@ return function()
 		{ code = "return-count-mismatch", severity = "warning", file = "main.luau", line = 32 },
 		{ code = "orphaned-doc-block", severity = "info", file = "main.luau", line = 36 },
 		{ code = "duplicate-class", severity = "info", file = "main.luau", line = 38 },
+		-- the one require failure reported as info, not a warning
+		{ code = "require-nonmodule", severity = "info", file = "main.luau", line = 46 },
 		{ code = "surface-opaque", severity = "info", file = "opaque.luau", line = 5 },
+		-- Kept is re-spelled by main.luau and Moved is documented on the Diags
+		-- page, so only Lost counts, at its own line
+		{ code = "unreached-types", severity = "info", file = "types.luau", line = 9 },
 	}, "every otherwise-unreached code, once, at its own line")
+
+	-- the parse error speaks of the user's file: no Lute-internal chunk name,
+	-- and 1-based positions. The parser's own wording is Lute's, so only the
+	-- shape around it is pinned.
+	local message = ""
+	for _, d in diag.list do
+		if d.code == "parse-error" then
+			message = d.message
+		end
+	end
+	t.eq(message:sub(1, 5), "4:1: ", "parse-error message opens with the user's line and column")
+	t.eq(message:find("parser.luau", 1, true), nil, "and names no Lute-internal file")
 end

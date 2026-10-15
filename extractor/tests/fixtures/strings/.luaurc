@@ -1,6 +1,7 @@
 {
 	// alias used by main.luau (mixed case: Luau aliases are case-insensitive)
 	"aliases": {
-		"Pkg": "vendor"
-	}
+		-- Luau lexes this file itself, so Luau comments and trailing commas parse
+		"Pkg": "vendor",
+	},
 }

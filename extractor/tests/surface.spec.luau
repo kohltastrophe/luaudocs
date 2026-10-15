@@ -5,6 +5,7 @@ local paths = require("./paths")
 local surface = require("../surface")
 
 local eval = t.eval
+local field = surface.fieldOf
 
 local function fieldNames(sym: any): { string }
 	local names = {}
@@ -14,43 +15,44 @@ local function fieldNames(sym: any): { string }
 	return names
 end
 
-local function field(sym: any, name: string): any
-	return surface.fieldOf(sym, name)
-end
-
 return function()
-	t.suite("surface: module table members")
+	t.suite("surface: module table members and classification")
 
-	local res = eval(table.concat({
-		"local M = {}",
-		"--- doc for f",
-		"function M.f(x: number): string",
-		"\treturn tostring(x)",
-		"end",
-		"function M:g() end",
-		"M.x = 5 -- the x constant",
-		"M.__index = M",
-		"return M",
-	}, "\n"))
-	local root = res.result :: any
+	local root = eval(
+		"local M = {}\n--- doc for f\nfunction M.f(x: number): string return tostring(x) end\nfunction M:g() end\nM.x = 5 -- the x constant\nM.__index = M\nreturn M"
+	).result :: any
 	t.eq(root.kind, "table", "returns table")
 	t.eq(fieldNames(root), { "f", "g", "x" }, "field names in source order (__index excluded)")
-	t.eq(field(root, "f").isColonMethod, false, "dot function")
-	t.ok(field(root, "f").defDoc ~= nil, "dot function claimed doc")
-	t.eq(field(root, "g").isColonMethod, true, "colon method")
-	t.eq(field(root, "x").value.kind, "literal", "prop literal")
-	t.eq(field(root, "x").trailingDesc, "the x constant", "trailing desc")
-	t.eq(surface.classify(root, false), true, "root with colon methods is a class")
+	t.eq({
+		field(root, "f").isColonMethod,
+		field(root, "f").defDoc ~= nil,
+		field(root, "g").isColonMethod,
+		field(root, "x").value.kind,
+		field(root, "x").trailingDesc,
+		surface.classify(root, false),
+	}, { false, true, true, "literal", "the x constant", true }, "member properties and class classification")
 
-	-- `__index = self` is not a classification rule: it is equally the idiom for
-	-- a self-indexing module, and it never reaches the fields either
-	res = eval("local M = {}\nM.__index = M\nfunction M.only() end\nreturn M")
-	t.eq(surface.classify(res.result :: any, false), false, "__index = self alone does not make a class")
-	t.eq(fieldNames(res.result :: any), { "only" }, "__index never surfaces as a field")
+	local selfIdx = eval("local M = {}\nM.__index = M\nfunction M.only() end\nreturn M").result :: any
+	local otherIdx = eval("local M = {}\nlocal MT = {}\nM.__index = MT\nreturn M").result :: any
+	t.eq({
+		surface.classify(selfIdx, false),
+		fieldNames(selfIdx),
+		surface.isSelfIndexing(selfIdx),
+		surface.isSelfIndexing(otherIdx),
+	}, { false, { "only" }, true, false }, "self-indexing alone does not classify as class")
 
-	t.suite("surface: literal fields")
+	local explicitSelf = eval("local M = {}\nfunction M.f(self: M, n: number) end\nreturn M").result :: any
+	local nonFirstSelf = eval("local M = {}\nfunction M.f(n: number, self) end\nreturn M").result :: any
+	t.eq({
+		surface.isSelfMethod(field(explicitSelf, "f").value.fnNode),
+		surface.classify(explicitSelf, false),
+		surface.isSelfMethod(field(nonFirstSelf, "f").value.fnNode),
+		surface.classify(nonFirstSelf, false),
+	}, { true, true, false, false }, "explicit self first parameter classification")
 
-	res = eval(table.concat({
+	t.suite("surface: literal fields, quotes, and list items")
+
+	root = eval(table.concat({
 		"local SYM = {}",
 		"local M = {",
 		"\t--- symbol prop",
@@ -61,231 +63,189 @@ return function()
 		"\tinline = function(v: boolean?) end,",
 		"}",
 		"return M",
-	}, "\n"))
-	root = res.result :: any
+	}, "\n")).result :: any
 	t.eq(fieldNames(root), { "Clean", "quoted-key", "inline" }, "record + string-general keys only")
-	t.ok(field(root, "Clean").declaredType ~= nil, "cast type captured")
-	t.ok(field(root, "Clean").fieldDoc ~= nil, "field doc claimed")
-	t.eq(field(root, "Clean").value.kind, "table", "freeze unwrapped to table")
-	t.eq(field(root, "inline").value.kind, "function", "inline function value")
+	t.eq({
+		field(root, "Clean").declaredType ~= nil,
+		field(root, "Clean").fieldDoc ~= nil,
+		field(root, "Clean").value.kind,
+		field(root, "inline").value.kind,
+	}, { true, true, "table", "function" }, "cast, field doc, freeze, and inline function")
 
-	-- string tokens arrive delimiter-less from the parser, so content that
-	-- merely LOOKS quoted must survive as written; general string keys are the
-	-- surface's reader of string-token text, so they observe it
-	res = eval(table.concat({
-		"local M = {",
-		"\t['\"'] = 1,",
-		'\t["[[x]]"] = 2,',
-		"}",
-		"return M",
-	}, "\n"))
-	root = res.result :: any
-	t.eq(fieldNames(root), { '"', "[[x]]" }, "quote- and long-bracket-shaped key content is not stripped")
+	root = eval('return { [\'"\'] = 1, ["[[x]]"] = 2 }').result :: any
+	t.eq(fieldNames(root), { '"', "[[x]]" }, "quote- and long-bracket-shaped keys preserved")
 
-	-- a list item is read for its element type, which a nested table cannot
-	-- have: evaluating one anyway would claim the block above its first field,
-	-- and the model's floating-declaration sweep only picks up unclaimed blocks
-	local parsed, claimIndex, trailingIndex = t.parseWithComments(table.concat({
-		"local M = {}",
-		"M.presets = {",
-		"\t--- @class Preset",
-		"\t--- One preset.",
-		'\t{ name = "dark" },',
-		"}",
-		"return M",
-	}, "\n"))
-	surface.evaluate(parsed, claimIndex, trailingIndex)
-	local block = claimIndex[5]
-	t.ok(block ~= nil, "the block above the nested table is indexed at its field's line")
-	t.eq(block and block.claimed, false, "a nested list item claims no doc block")
-
-	t.suite("surface: forward-declared assignment docs")
-
-	res = eval(table.concat({
-		"local Config",
-		"--- Maximum retries before giving up.",
-		"Config = { maxRetries = 3 }",
-		"return Config",
-	}, "\n"))
-	root = res.result :: any
-	t.eq(root.kind, "table", "forward-declared table surfaces")
-	t.ok(root.defDoc ~= nil, "the doc above `X = ...` attaches like on `local X = ...`")
-
-	t.suite("surface: requires, imports, passthrough")
-
-	res = eval(table.concat({
-		'local State = require("./State")',
-		"local M = {",
-		"\tState = State,",
-		"\traw = State.raw,",
-		"}",
-		"return M",
-	}, "\n"))
-	root = res.result :: any
-	t.eq(field(root, "State").value.kind, "require", "submodule mount")
-	t.eq(field(root, "raw").value.kind, "import", "member import")
-	t.eq(field(root, "raw").value.path, { "raw" }, "import path")
-	t.ok(res.requireLocals["State"] ~= nil, "require local recorded")
-
-	res = eval('return require("./impl")')
-	t.eq((res.result :: any).kind, "require", "passthrough module")
-
-	t.suite("surface: conditional mounts")
-
-	res = eval(table.concat({
-		"local M = {}",
-		"if IS_CLIENT then",
-		'\tM.UI = require("./UI")',
-		"elseif IS_SERVER then",
-		'\tM.Net = require("./Net")',
-		"else",
-		'\tM.Fallback = require("./Fallback")',
-		"end",
-		"do",
-		"\tM.Scoped = 2",
-		"end",
-		"while IS_CLIENT do",
-		"\tM.Skipped = 3",
-		"end",
-		"return M",
-	}, "\n"))
-	root = res.result :: any
-	t.eq(
-		fieldNames(root),
-		{ "UI", "Net", "Fallback", "Scoped" },
-		"if/elseif/else and do bodies surface, loop bodies do not"
+	local parsed, claimIndex, trailingIndex = t.parseWithComments(
+		'local M = {}\nM.presets = {\n\t--- @class Preset\n\t--- One preset.\n\t{ name = "dark" },\n}\nreturn M'
 	)
-	t.eq(field(root, "UI").value.kind, "require", "then-branch require mount")
-	t.eq(field(root, "Net").value.kind, "require", "elseif-branch require mount")
-	t.eq(field(root, "Fallback").value.kind, "require", "else-branch require mount")
+	surface.evaluate(parsed, claimIndex, trailingIndex)
+	t.eq(claimIndex[5] and claimIndex[5].claimed, false, "nested list item does not claim doc block")
 
-	res = eval("--- A function module\nlocal function go() end\nreturn go")
+	t.suite("surface: assignments, requires, and conditional mounts")
+
+	root = eval("local Config\n--- Maximum retries.\nConfig = { maxRetries = 3 }\nreturn Config").result :: any
+	t.eq({ root.kind, root.defDoc ~= nil }, { "table", true }, "forward-declared assignment attaches doc")
+
+	root = eval("local a = {}\nlocal b = 1\na, b = b, a\nreturn { x = a, y = b }").result :: any
+	t.eq({ field(root, "x").value.kind, field(root, "y").value.kind }, { "literal", "table" }, "parallel assignment")
+
+	local res = eval('local State = require("./State")\nreturn { State = State, raw = State.raw }')
 	root = res.result :: any
-	t.eq(root.kind, "function", "function module")
-	t.ok(root.defDoc ~= nil, "function module doc")
+	t.eq({
+		field(root, "State").value.kind,
+		field(root, "raw").value.kind,
+		field(root, "raw").value.path,
+		res.requireLocals["State"] ~= nil,
+		(eval('return require("./impl")').result :: any).kind,
+	}, { "require", "import", { "raw" }, true, "require" }, "requires, imports, and passthrough")
 
-	res = eval("return nil")
-	t.eq((res.result :: any).valueKind, "nil", "nil module")
-
-	t.suite("surface: freeze and services")
-
-	res = eval("local M = { limit = 5 }\ntable.freeze(M)\nreturn M")
-	t.eq((res.result :: any).frozen, true, "statement-form freeze marks the table")
-
-	res = eval("local M = { limit = 5 }\nreturn table.freeze(M)")
-	t.eq((res.result :: any).frozen, true, "return-form freeze marks the table")
-
-	res = eval("local M = { limit = 5 }\nreturn M")
-	t.eq((res.result :: any).frozen, nil, "an unfrozen table stays unmarked")
-
-	res = eval(table.concat({
-		'local DataStoreService = game:GetService("DataStoreService")',
-		"local Players = game.Players",
-		"local M = { ds = DataStoreService, players = Players }",
+	root = eval(table.concat({
+		"local M = {}",
+		'if IS_CLIENT then M.UI = require("./UI")',
+		'elseif IS_SERVER then M.Net = require("./Net")',
+		'else M.Fallback = require("./Fallback") end',
+		"do M.Scoped = 2 end",
+		"while IS_CLIENT do M.Skipped = 3 end",
 		"return M",
-	}, "\n"))
-	root = res.result :: any
-	t.eq(field(root, "ds").value.service, "DataStoreService", "GetService records the service name")
-	t.eq(field(root, "players").value.service, "Players", "game.X records the service name")
+	}, "\n")).result :: any
+	t.eq(fieldNames(root), { "UI", "Net", "Fallback", "Scoped" }, "if/elseif/else and do surface; loops skipped")
+	t.eq(
+		{ field(root, "UI").value.kind, field(root, "Net").value.kind, field(root, "Fallback").value.kind },
+		{ "require", "require", "require" },
+		"branch require mounts"
+	)
 
-	t.suite("surface: setmetatable and ipaths")
+	root = eval("--- A function module\nlocal function go() end\nreturn go").result :: any
+	t.eq(
+		{ root.kind, root.defDoc ~= nil, (eval("return nil").result :: any).valueKind },
+		{ "function", true, "nil" },
+		"function and nil modules"
+	)
 
-	res = eval("local M = setmetatable({}, { __call = function() end })\nfunction M.f() end\nreturn M")
-	root = res.result :: any
-	t.ok(root.metatable ~= nil, "metatable captured")
-	t.eq(fieldNames(root), { "f" }, "fields after setmetatable")
+	t.suite("surface: freeze, services, metatables, ipaths, and clone")
 
-	res = eval(table.concat({
-		"local Shared = script.Parent",
-		'local Data = Shared.Data:WaitForChild("Defaults")',
-		"local M = { dep = require(Shared.Mod) }",
-		"return M",
-	}, "\n"))
-	root = res.result :: any
-	t.eq(field(root, "dep").value.kind, "require", "instance-style require captured")
+	t.eq({
+		(eval("local M = { limit = 5 }\ntable.freeze(M)\nreturn M").result :: any).frozen,
+		(eval("local M = { limit = 5 }\nreturn table.freeze(M)").result :: any).frozen,
+		(eval("local M = { limit = 5 }\nreturn M").result :: any).frozen,
+	}, { true, true, nil }, "table.freeze tracking")
 
-	-- FindFirstChild extends an instance path exactly as WaitForChild does. Both
-	-- reach the same branch, so only one being wired stays invisible until a
-	-- project uses the other.
-	res = eval(table.concat({
-		"local Shared = script.Parent",
-		'local M = { found = Shared:FindFirstChild("Mod") }',
-		"return M",
-	}, "\n"))
-	root = res.result :: any
-	t.eq(field(root, "found").value.segs, { "Parent", "Mod" }, "FindFirstChild extends the instance path")
+	root =
+		eval('local ds = game:GetService("DataStoreService")\nreturn { ds = ds, players = game.Players }').result :: any
+	t.eq(
+		{ field(root, "ds").value.service, field(root, "players").value.service },
+		{ "DataStoreService", "Players" },
+		"service names"
+	)
 
-	-- table.clone yields a NEW table. Sharing the original's field list would
-	-- leak members later defined on the copy back onto the original, reading as
-	-- a member on a page that never declared it.
-	res = eval(table.concat({
-		"local Base = { a = 1 }",
-		"local Copy = table.clone(Base)",
-		"Copy.b = 2",
-		"return { orig = Base, copy = Copy }",
-	}, "\n"))
-	root = res.result :: any
-	t.eq(fieldNames(field(root, "copy").value), { "a", "b" }, "clone carries the original's fields and its own")
-	t.eq(fieldNames(field(root, "orig").value), { "a" }, "the original is untouched by members added to the clone")
+	root = eval("local M = setmetatable({}, { __call = function() end })\nfunction M.f() end\nreturn M").result :: any
+	t.eq({ root.metatable ~= nil, fieldNames(root) }, { true, { "f" } }, "setmetatable + fields")
 
-	t.suite("surface: whole sample-project modules")
+	root = eval(
+		'local Shared = script.Parent\nreturn { dep = require(Shared.Mod), found = Shared:FindFirstChild("Mod") }'
+	).result :: any
+	t.eq(
+		{ field(root, "dep").value.kind, field(root, "found").value.segs },
+		{ "require", { "Parent", "Mod" } },
+		"instance require and FindFirstChild"
+	)
 
-	-- The docmodel-sample.json diff already pins this fixture's full roster, so
-	-- these assertions stick to what only the surface pass shows: how each
-	-- definition style lands in one member list.
+	root = eval(
+		"local Base = { a = 1 }\nlocal Copy = table.clone(Base)\nCopy.b = 2\nreturn { orig = Base, copy = Copy }"
+	).result :: any
+	t.eq(
+		{ fieldNames(field(root, "copy").value), fieldNames(field(root, "orig").value) },
+		{ { "a", "b" }, { "a" } },
+		"table.clone isolates fields"
+	)
+
+	t.suite("surface: lazy require loaders, __index delegation, and typeof(require) mounts")
+
+	-- Lazy loader functions capture `returnedRequire` from a single `return require(...)` statement.
+	root = eval('local M = {}\nfunction M.server()\n\treturn require("@self/Server")\nend\nreturn M').result :: any
+	local loader = field(root, "server").value
+	t.eq(
+		{ loader.kind, loader.returnedRequire and loader.returnedRequire.requireInfo },
+		{ "function", { kind = "string", text = "@self/Server" } },
+		"returnedRequire captured on lazy loader function"
+	)
+
+	-- `__index` delegation copies fields from a prototype table or factory function call.
+	root = eval(table.concat({
+		"local function make()",
+		"\tlocal R = { a = 1, extra = 0 }",
+		"\tfunction R.run() end",
+		"\treturn R",
+		"end",
+		"local base = make()",
+		"return table.freeze(setmetatable({ extra = 1 }, { __index = base }))",
+	}, "\n")).result :: any
+	t.eq(
+		{ root.frozen, fieldNames(root), field(root, "extra").value.kind, field(root, "run").value.kind },
+		{ true, { "extra", "a", "run" }, "literal", "function" },
+		"__index factory delegation merges unshadowed prototype fields"
+	)
+
+	-- `Key: typeof(require(...))` entries on the returned table's type annotation synthesize module mounts.
+	root = eval(table.concat({
+		"type Z = {",
+		"\t--- Submodule doc",
+		'\tSub: typeof(require("@self/Sub")),',
+		"\t num: number,",
+		"}",
+		"local api: Z = { num = 1 } :: any",
+		"return api",
+	}, "\n")).result :: any
+	local subField = field(root, "Sub")
+	t.eq(
+		{ fieldNames(root), subField.value.kind, subField.value.requireInfo, subField.fieldDoc ~= nil },
+		{ { "num", "Sub" }, "require", { kind = "string", text = "@self/Sub" }, true },
+		"typeof(require(...)) synthesized from table type annotation"
+	)
+
+	t.suite("surface: sample-project modules")
+
 	local SAMPLE = util.joinPath(paths.projectFixtures, "sample-project", "src")
 	local function evalFile(name: string)
 		return eval(fs.readFileToString(util.joinPath(SAMPLE, name)))
 	end
 
-	--- 1-based position of `name`, or -1, so order assertions survive unrelated
-	--- members being added to the fixture.
-	local function orderOf(names: { string }, name: string): number
-		for i, v in names do
-			if v == name then
-				return i
-			end
-		end
-		return -1
-	end
-
 	res = evalFile("init.luau")
 	root = res.result :: any
 	local names = fieldNames(root)
-	t.eq(orderOf(names, "Clean"), 1, "literal field opens the member list")
-	t.ok(orderOf(names, "Color") > orderOf(names, "Clean"), "require mount follows the literal fields")
-	t.eq(orderOf(names, "new"), #names, "cast assign after the literal table closes it")
-	t.eq(surface.classify(root, false), false, "Sample root is a module, not a class")
-	t.ok(root.defDoc ~= nil, "Sample module table doc")
-	t.eq(field(root, "new").isColonMethod, false, "Sample.new via cast assign")
-	t.ok(field(root, "new").declaredType ~= nil, "Sample.new declared type from cast")
+	t.eq({
+		table.find(names, "Clean"),
+		(table.find(names, "Color") :: number) > (table.find(names, "Clean") :: number),
+		table.find(names, "new") == #names,
+		surface.classify(root, false),
+		root.defDoc ~= nil,
+		field(root, "new").isColonMethod,
+		field(root, "new").declaredType ~= nil,
+	}, { 1, true, true, false, true, false, true }, "Sample init.luau surface")
 
 	res = evalFile("State.luau")
 	root = res.result :: any
-	t.eq(surface.classify(root, false), true, "State is a class")
-	t.ok(field(root, "deferUpdates") ~= nil, "State.deferUpdates prop present")
-	t.eq(field(root, "Connect").isColonMethod, true, "State:Connect method")
-	t.eq(field(root, "__call").isColonMethod, false, "metamethod present in raw surface")
-	local typeNames = {}
+	local exportedTypes = {}
 	for _, ty in res.types do
 		if ty.exported then
-			table.insert(typeNames, ty.name)
+			table.insert(exportedTypes, ty.name)
 		end
 	end
-	t.eq(typeNames, { "StateData", "State", "Stateful" }, "State exported types")
+	t.eq({
+		surface.classify(root, false),
+		field(root, "deferUpdates") ~= nil,
+		field(root, "Connect").isColonMethod,
+		field(root, "__call").isColonMethod,
+		exportedTypes,
+	}, { true, true, true, false, { "StateData", "State", "Stateful" } }, "State.luau surface")
 
-	res = evalFile("Interpolate.luau")
-	t.eq((res.result :: any).kind, "function", "Interpolate returns a function")
+	t.eq((evalFile("Interpolate.luau").result :: any).kind, "function", "Interpolate returns function")
+	t.eq((evalFile("Type.luau").result :: any).valueKind, "nil", "Type returns nil")
 
-	res = evalFile("Type.luau")
-	t.eq((res.result :: any).valueKind, "nil", "Type returns nil")
-
-	res = evalFile("Color.luau")
-	root = res.result :: any
-	t.eq(fieldNames(root), { "Linear", "Polar" }, "Color nested sections")
+	root = evalFile("Color.luau").result :: any
 	t.eq(
-		fieldNames(field(root, "Linear").value),
-		{ "fromGamma", "toGamma" },
-		"nested section members are discovered by name, not just counted"
+		{ fieldNames(root), fieldNames(field(root, "Linear").value) },
+		{ { "Linear", "Polar" }, { "fromGamma", "toGamma" } },
+		"Color nested sections"
 	)
 end

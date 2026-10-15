@@ -69,6 +69,30 @@ return function()
 	t.eq(blocks[1].doc, true, "--[[ block with --]] closer is doc")
 	t.eq(blocks[1].content, { "Module overview prose.", "More prose." }, "--]] closer stripped from content")
 
+	-- text on the opener line is not at the body's indentation: it must not
+	-- stop the tab-indented body from dedenting, or the `@param` below the
+	-- blank line reads as an indented code line
+	parsed = t.parse(table.concat({
+		"--[=[ Summary on the opener.",
+		"	More prose.",
+		"",
+		"	@param x number",
+		"]=]",
+		"local function h(x) end",
+		"return h",
+	}, "\n"))
+	blocks = comments.segment(parsed)
+	t.eq(
+		blocks[1].content,
+		{ "Summary on the opener.", "More prose.", "", "@param x number" },
+		"opener-line text is trimmed and the body still dedents"
+	)
+	t.eq(blocks[1].contentLine, 1, "content[1] is on the opener line")
+
+	parsed = t.parse("--[[ single line ]]\nlocal function k() end\nreturn k")
+	blocks = comments.segment(parsed)
+	t.eq(blocks[1].content, { "single line" }, "the padding before a same-line closer is not content")
+
 	t.suite("comments: claims + attributes")
 
 	parsed = t.parse(table.concat({
@@ -87,6 +111,21 @@ return function()
 	local claimed = comments.claim(index, startLine)
 	t.ok(claimed ~= nil, "doc block claimed through attribute")
 	t.eq(claimed and claimed.content, { "doc for f" }, "claimed content")
+
+	parsed = t.parse(table.concat({
+		"--- doc for bracketed",
+		"@[",
+		"	checked,",
+		"	native",
+		"]",
+		"local function b() end",
+		"return b",
+	}, "\n"))
+	blocks = comments.segment(parsed)
+	index = comments.claimIndex(blocks)
+	stat = parsed.cst.root.statements[1]
+	t.eq(parseMod.effectiveStartLine(stat), 2, "effective start includes @[ opener line on multiline attribute list")
+	t.ok(comments.claim(index, parseMod.effectiveStartLine(stat)) ~= nil, "doc block claimed through multiline @[...]")
 
 	t.suite("comments: trailing text")
 

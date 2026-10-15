@@ -2,7 +2,12 @@
 ---
 --- Usage:
 ---   lute run extractor/main.luau -- --root <projectDir> --entry <fileOrDir> [--entry ...]
----     [--project-file <p>] [--pretty]
+---     [--project-file <p>] [--alias <name>[=<docsUrl>] ...] [--report-undocumented] [--pretty]
+---
+--- `--alias` names a require alias supplied by the runtime (`lute`, `lune`)
+--- rather than a `.luaurc` file. Requires through that alias are treated as
+--- external rather than unresolved, and the optional URL points to where its
+--- modules are documented.
 ---
 --- Emits doc-model JSON to stdout; the schema lives in ./model. Diagnostics are
 --- embedded in the JSON, and all error gating lives in the TS CLI
@@ -31,6 +36,8 @@ local args = util.argsAfterSeparator(process.args)
 local root: string? = nil
 local entries: { string } = {}
 local projectFile: string? = nil
+local aliases: { [string]: string | boolean } = {}
+local reportUndocumented = false
 local pretty = false
 
 local i = 1
@@ -50,6 +57,15 @@ while i <= #args do
 		table.insert(entries, nextValue())
 	elseif arg == "--project-file" then
 		projectFile = nextValue()
+	elseif arg == "--alias" then
+		local spec = nextValue()
+		local name, url = spec:match("^([^=]+)=(.*)$")
+		if name == nil then
+			name = spec
+		end
+		aliases[(name :: string):lower()] = if url ~= nil and url ~= "" then url else true
+	elseif arg == "--report-undocumented" then
+		reportUndocumented = true
 	elseif arg == "--pretty" then
 		pretty = true
 	else
@@ -62,8 +78,8 @@ if root == nil then
 	fail("--root is required")
 end
 if #entries == 0 then
-	-- the caller always passes these: an empty `[source] entries` means
-	-- guide-only, which never spawns the extractor at all
+	-- The caller always passes at least one `--entry`; an empty `[source] entries`
+	-- config means a guide-only site, which never spawns the extractor.
 	fail("--entry is required")
 end
 
@@ -72,12 +88,12 @@ if not fs.exists(rootAbs) then
 	fail("root does not exist: " .. rootAbs)
 end
 
--- lute inherits whatever cwd the caller had, which is not necessarily the user
--- project, so a relative --project-file must resolve against --root
+-- Lute inherits the caller's working directory, which is not necessarily the
+-- user project, so a relative `--project-file` must resolve against `--root`.
 if projectFile ~= nil and not util.isAbsolute(projectFile :: string) then
 	projectFile = util.normPath(util.joinPath(rootAbs, projectFile :: string))
 end
-local proj, projErr = requiresMod.load(rootAbs, { projectFile = projectFile })
+local proj, projErr = requiresMod.load(rootAbs, { projectFile = projectFile, aliases = aliases })
 if projErr ~= nil then
 	fail(projErr)
 end
@@ -95,7 +111,7 @@ for _, entry in entries do
 end
 
 local g = graphMod.build(proj, entryAbsPaths, diag)
-local docModel = modelMod.assemble(g, diag, { entryPoints = entryIds })
+local docModel = modelMod.assemble(g, diag, { entryPoints = entryIds, reportUndocumented = reportUndocumented })
 
 print(emitMod.encode(docModel, pretty))
 

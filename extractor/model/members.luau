@@ -1,17 +1,17 @@
---- Shared assembly context + member building: the Ctx every pass threads, the
---- small builders they all share (ids, spans, badges, visibility, memoized
---- doc-block parsing), and the member builders (signatures assembled from
---- segments, functions, props, containers, the recursive walk over a table
---- SymValue's fields).
+--- Shared assembly context and member builders: the `Ctx` threaded through
+--- every pass, shared helpers (IDs, source spans, badges, visibility, and
+--- memoized doc-block parsing), and the member builders (signatures, functions,
+--- properties, containers, and the recursive walk over a table `SymValue`'s fields).
 ---
---- The context lives here because build and finalize both need it and Luau
---- requires may not cycle: the shared floor sits below both.
+--- `Ctx` lives here because both `build` and `finalize` depend on it and Luau
+--- requires cannot cycle.
 
 local comments = require("../comments")
 local detectMod = require("../detect")
 local emitMod = require("../emit")
 local graphMod = require("../graph")
 local inferMod = require("../infer")
+local parseMod = require("../parse")
 local segs = require("../segs")
 local surfaceMod = require("../surface")
 local tagsMod = require("../tags")
@@ -27,23 +27,26 @@ local members = {}
 local EMPTY_DOC: ParsedDoc = tagsMod.parse({})
 members.EMPTY_DOC = EMPTY_DOC
 
+export type ExternalEntry = string | { url: string?, alias: string, path: string, name: string? }
+
 export type Ctx = {
 	diag: Collector,
 	modules: { any }, -- doc-model Module entries, parallel to g.modules
 	containersByName: { [string]: any }, -- class/module name -> container entry
 	containerOfSym: { [any]: any }, -- class table SymValue -> class entry
 	classByTypeId: { [string]: any }, -- classType type-id -> class entry
-	-- module id -> (type name -> the decl id a ref naming one resolves to). Ids
-	-- rather than a presence flag: dedupe settles which declaration owns a name
-	-- two of them spell, and every ref reads that decision from here.
+	-- module id -> (type name -> declaration id). Stores the resolved declaration
+	-- id rather than a boolean so `finalize`'s type deduplication can settle
+	-- which declaration owns a duplicate name in one place.
 	typesByModule: { [string]: { [string]: string } },
-	externals: { [string]: string }, -- @external name -> docs url, first declaration wins
-	-- a member without `__valueSym` is a tag-declared stub (no code behind
-	-- it), which may always merge into an existing member; a code member may
-	-- only merge into another name for the same value (see finalize's moves).
-	-- `targetContainer` pins a move to a specific container object: a floating
-	-- member with no @within belongs to its OWN module's container, not
-	-- another module's same-named one.
+	-- Unresolved external names -> `@external` URL string or runtime-alias ExternalRef (first wins).
+	externals: { [string]: ExternalEntry },
+	-- Pending `@within` relocations. A member without `__valueSym` is a
+	-- tag-declared stub (with no backing code) that can merge into any existing
+	-- member of the same name; a code-backed member can only merge into an alias
+	-- of the same `SymValue`. `targetContainer` pins a floating member without
+	-- `@within` to its own module's root container rather than a same-named
+	-- container in another module.
 	pendingMoves: {
 		{
 			member: any,
@@ -53,9 +56,9 @@ export type Ctx = {
 		}
 	},
 	docCache: { [any]: ParsedDoc }, -- doc block -> its ParsedDoc
-	forwardedBlocks: { [any]: boolean }, -- blocks whose tag diagnostics already reported
-	-- the module graph, set by model.assemble: detect resolves calls across
-	-- modules through it. Absent (policy tests), detection stops at requires.
+	forwardedBlocks: { [any]: boolean }, -- blocks whose tag diagnostics have already been reported
+	-- Module graph set by `model.assemble` so `detect` can follow calls across
+	-- modules (absent in isolated unit tests).
 	graph: any?,
 }
 
@@ -82,13 +85,13 @@ function members.span(modId: string, s: any): any
 end
 
 function members.buildBadges(doc: ParsedDoc): any
-	-- cloned: undocumented members all share EMPTY_DOC, and the overlay below
-	-- mutates badges.custom in place
+	-- Clone `customTags` because undocumented members share `EMPTY_DOC`, and
+	-- `overlayBadges` mutates `badges.custom` in place.
 	local badges: any = { custom = table.clone(doc.customTags) }
 	if doc.deprecated ~= nil then
 		badges.deprecated = { version = doc.deprecated.version, note = doc.deprecated.desc }
 		if next(badges.deprecated) == nil then
-			-- a bare @deprecated still reaches the wire as an object
+			-- Mark bare `@deprecated` tables so `emit` encodes `{}` instead of `[]`.
 			emitMod.record(badges.deprecated)
 		end
 	end
@@ -105,12 +108,9 @@ function members.buildBadges(doc: ParsedDoc): any
 	return badges
 end
 
---- Merges tag-declared badges into code-discovered ones: first-wins except
---- `custom`, which is unioned. The keys are spelled out because `deprecated`
---- and `realm` are a record and a list, so a generic walk would have to guess
---- which shape it is merging. Beside the builder on purpose: the two spell one
---- vocabulary, and a badge added to only one of them silently goes missing on
---- every @within-merged member.
+--- Merges tag-declared badges into code-discovered badges (first-wins, except
+--- `custom`, which is unioned). Kept adjacent to `buildBadges` so any new badge
+--- field is updated in both functions together.
 function members.overlayBadges(into: any, from: any)
 	into.deprecated = into.deprecated or from.deprecated
 	into.since = into.since or from.since
@@ -124,11 +124,10 @@ function members.overlayBadges(into: any, from: any)
 	end
 end
 
---- The `_`-prefix privacy convention, in one place. `@private` always wins.
---- `exempt` overrides the prefix in two cases: an explicit `export`, and a
---- `__`-named *function*, which is a documented metamethod. Metamethod-ness
---- stays a call-site test because only the function paths may claim it: a
---- `__`-named data property is plumbing.
+--- Applies the `_`-prefix privacy rule in one place. `@private` always wins.
+--- `exempt` overrides the `_` prefix for explicit `export type` declarations
+--- and `__`-prefixed metamethod functions (whereas `__`-prefixed data properties
+--- like `__index` remain private).
 function members.visibilityOf(name: string, doc: ParsedDoc, exempt: boolean?): string
 	if doc.flags.private then
 		return "private"
@@ -139,17 +138,17 @@ function members.visibilityOf(name: string, doc: ParsedDoc, exempt: boolean?): s
 	return if name:sub(1, 1) == "_" then "private" else "public"
 end
 
---- Doc-model id: `<moduleId>#<kind>.<qualified name>`, where the qualified name
---- is `Container.member` for members and the bare name for classes and types.
---- Every id is built here, so an `@within` move rebuilds rather than rewrites.
+--- Formats a doc-model ID: `<moduleId>#<kind>.<qualified name>`, where the
+--- qualified name is `Container.member` for members and the bare name for
+--- classes and types.
 function members.memberId(modId: string, kind: string, container: string?, name: string): string
 	local qualified = if container ~= nil and container ~= "" then container .. "." .. name else name
 	return modId .. "#" .. kind .. "." .. qualified
 end
 
---- Lua's reserved words (`continue` is contextual, so not here): `T.end` is a
---- parse error, `T["end"]` is how source reaches it. Mirrors LUAU_KEYWORDS in
---- src/render.ts, which spells prop fences the same way.
+--- Luau reserved keywords (`continue` is contextual, so it is excluded):
+--- `T.end` is a syntax error, so bracket access `T["end"]` is required.
+--- Mirrors `LUAU_KEYWORDS` in `src/pages.ts`.
 local LUAU_KEYWORDS: { [string]: boolean } = {}
 for _, word in
 	{
@@ -183,11 +182,9 @@ local function isIdentName(name: string): boolean
 	return name:match("^[%a_][%w_]*$") ~= nil and LUAU_KEYWORDS[name] == nil
 end
 
---- How a member is called (`Flux.compute`, `State:Connect`), bare for a
---- callable module. Signature assembly and finalize's @within retarget must
---- spell it the same way. A name no identifier can spell (`["12187368317"]`, `["end"]`) gets bracket
---- access; the colon accessor keeps the plain join, since a method cannot
---- carry such a name.
+--- Formats a member's callee prefix (`Flux.compute`, `State:Connect`, or bare
+--- `name` for a callable module). Non-identifier property names (`"12187368317"`,
+--- `"end"`) use bracket syntax `Container["name"]`.
 function members.callee(container: string, accessor: string, name: string): string
 	if container == "" then
 		return name
@@ -198,9 +195,9 @@ function members.callee(container: string, accessor: string, name: string): stri
 	return container .. accessor .. name
 end
 
---- Identity key for container bookkeeping. A cast clones a SymValue but shares
---- its `fields` (tables) or `fnNode` (functions), so those are the identity:
---- two SymValues sharing one are two names for one thing.
+--- Returns the identity key for a `SymValue`. Because type casts clone a
+--- `SymValue` while sharing its `fields` table or `fnNode`, keying by `fields`
+--- or `fnNode` treats cast clones as the same underlying value.
 function members.symKey(value: any): any
 	if value == nil then
 		return value
@@ -214,10 +211,8 @@ function members.symKey(value: any): any
 	return value
 end
 
---- Every member a module entry owns, its own plus each class's, with the
---- container it landed on. A module carries members like a class does (a
---- `function M:method`, a documented `__call`, an `@within` move landing
---- there).
+--- Visits every member owned by a module entry (both top-level module members
+--- and class members), passing the member and its owning container.
 function members.eachMember(entry: any, visit: (member: any, owner: any) -> ())
 	for _, member in entry.members do
 		visit(member, entry)
@@ -229,8 +224,7 @@ function members.eachMember(entry: any, visit: (member: any, owner: any) -> ())
 	end
 end
 
---- Registers a container under a name for `@within` targeting. First one wins:
---- a later same-named container must not capture moves aimed at the first.
+--- Registers a container by name for `@within` resolution (first registration wins).
 function members.registerContainer(ctx: Ctx, name: string, container: any)
 	if ctx.containersByName[name] == nil then
 		ctx.containersByName[name] = container
@@ -247,22 +241,50 @@ function members.mergeDescs(primary: string?, secondary: string?): string?
 	return primary .. "\n\n" .. secondary
 end
 
---- The block's prose merged with the trailing ` -- desc` on the @type line, so
---- a floating declaration cannot drop what the code-backed path keeps.
+--- Merges a doc block's body prose with any trailing `-- desc` on its placing
+--- tag line (`@type`, `@interface`).
 function members.placingDoc(doc: ParsedDoc): string?
 	return members.mergeDescs(if doc.desc ~= "" then doc.desc else nil, doc.placingDesc)
 end
 
+--- Finds the first entry in `list` with `entry.name == name`.
+function members.byName(list: { any }, name: string): any?
+	for _, entry in list do
+		if entry.name == name then
+			return entry
+		end
+	end
+	return nil
+end
+
+--- Converts `segs.fields` output (`desc`) into doc-model `TypeField` entries (`doc`).
+function members.toModelFields(fields: { segs.Field }?): { any }?
+	if fields == nil then
+		return nil
+	end
+	local out = {}
+	for _, f in fields do
+		table.insert(out, {
+			name = f.name,
+			type = f.type,
+			doc = f.desc,
+			line = f.line,
+			docInDisplay = f.docInDisplay,
+		})
+	end
+	return out
+end
+
 function members.forwardTagDiagnostics(ctx: Ctx, modId: string, block: any, doc: ParsedDoc)
-	-- once per block, not once per reader: several members may share one block
-	-- (aliased exports fall back to the same defDoc)
+	-- Report diagnostics at most once per doc block, even when multiple aliased
+	-- exports share the same `defDoc`.
 	if ctx.forwardedBlocks[block] then
 		return
 	end
 	ctx.forwardedBlocks[block] = true
 	for _, d in doc.diagnostics do
-		-- contentLine, not span.beginLine: `--[=[ ]=]` openers and leading
-		-- blanks are stripped from content, so offsets are content-relative
+		-- `d.lineOffset` is relative to `block.contentLine` (after stripping
+		-- `--[=[` openers and leading blank lines), not `block.span.beginLine`.
 		local line = block.contentLine + d.lineOffset - 1
 		if d.severity == "info" then
 			ctx.diag:info(d.code, d.message, modId, line)
@@ -272,8 +294,7 @@ function members.forwardTagDiagnostics(ctx: Ctx, modId: string, block: any, doc:
 	end
 end
 
---- One parse per block serves every pass: ParsedDoc is immutable once
---- tags.parse returns.
+--- Parses and caches a doc block's tags (`ParsedDoc` is immutable once parsed).
 function members.parseTags(ctx: Ctx, block: any): ParsedDoc
 	local cached = ctx.docCache[block]
 	if cached == nil then
@@ -292,15 +313,14 @@ function members.parseBlock(ctx: Ctx, modId: string, block: any?): ParsedDoc
 	return doc
 end
 
---- segs.fromTag with the nil-display convention every tag position shares.
+--- Wraps `segs.fromTag` for optional tag type strings.
 function members.tagType(display: string?, generics: { [string]: boolean }?): { Seg }?
 	return if display ~= nil then segs.fromTag(display, generics) else nil
 end
 
---- The type nodes a function annotates itself returning, in order. Lute spells
---- the annotation three ways (a parenthesized list, a variadic, or the one type
---- on its own) and an unhandled shape silently drops the return, so the three
---- live here rather than in each caller that has to read them.
+--- Extracts the return-type AST nodes from a function node in order, handling
+--- all three shapes Lute's parser produces (`explicit` parenthesized list,
+--- `variadic`, or a single bare type node).
 function members.returnNodes(fnNode: any?): { any }
 	local returnAnnotation = if fnNode ~= nil then fnNode.returnAnnotation else nil
 	if returnAnnotation == nil then
@@ -321,6 +341,42 @@ function members.returnNodes(fnNode: any?): { any }
 	return nodes
 end
 
+--- Builds the return-type tail after `: ` in a function signature. Uses the AST
+--- return annotation verbatim unless a `@return` tag supplied a type override,
+--- in which case the tail is rebuilt from `sig.returns` (`T` for one return, or
+--- `(A, B)` for multiple) so the signature fence matches the **Returns** list.
+local function returnTail(sig: any): { Seg }?
+	local rows = sig.returns
+	if not sig.__tagReturns or #rows == 0 then
+		return sig.__annotationTail
+	end
+	for _, row in rows do
+		if row.type == nil then
+			return sig.__annotationTail
+		end
+	end
+	if #rows == 1 then
+		return rows[1].type
+	end
+	-- Copy segment tables by reference so `finalize`'s reference resolution
+	-- populates `.id` on both the signature display and the return row at once.
+	local tail: { Seg } = { "(" }
+	for i, row in rows do
+		if i > 1 then
+			table.insert(tail, ", ")
+		end
+		table.move(row.type, 1, #row.type, #tail + 1, tail)
+	end
+	table.insert(tail, ")")
+	return tail
+end
+
+--- Assembles a signature's `segs` display from its generics, parameters, and
+--- return tail (called by both `buildSignature` and `finalize.mergeSignature`).
+function members.signatureSegs(sig: any): { Seg }
+	return segs.canonical(segs.signature(sig.__generics or {}, sig.params, returnTail(sig)))
+end
+
 local function buildSignature(
 	ctx: Ctx,
 	mod: ModuleData,
@@ -329,7 +385,8 @@ local function buildSignature(
 	accessor: string,
 	fnNode: any?,
 	doc: ParsedDoc,
-	memberLine: number?
+	memberLine: number?,
+	dropSelf: boolean?
 ): any
 	local qualified = if containerName == "" then name else containerName .. "." .. name
 	local parsedFile = mod.parsed :: any
@@ -343,11 +400,9 @@ local function buildSignature(
 	local paramLines: { [number]: number } = {}
 	if fnNode ~= nil then
 		params, paramLines = segs.paramEntries(parsedFile, fnNode, genericNames)
-		-- a trailing comment on a parameter's own line documents it, the way
-		-- prop and type-field trailers do. The signature's opening line is
-		-- excluded (a comment there reads as the function's), so is the line
-		-- the return annotation starts on (it reads as the return's), and a
-		-- line several parameters share documents only the last of them.
+		-- Attach a trailing `-- comment` on a parameter's line as its doc,
+		-- excluding the signature's opening line and the return annotation's
+		-- line (when multiple parameters share a line, only the last claims it).
 		local sigLine = if fnNode.location ~= nil then fnNode.location.beginLine else nil
 		local ra = fnNode.returnAnnotation
 		local retLine = if ra ~= nil and ra.location ~= nil then ra.location.beginLine else nil
@@ -357,6 +412,9 @@ local function buildSignature(
 				param.doc = comments.trailingText(mod.trailingIndex :: any, line)
 			end
 		end
+		if dropSelf and params[1] ~= nil and params[1].name == "self" then
+			table.remove(params, 1)
+		end
 	end
 
 	local returnAnnotation = if fnNode ~= nil then fnNode.returnAnnotation else nil
@@ -365,18 +423,13 @@ local function buildSignature(
 		table.insert(returns, { type = segs.inline(parsedFile, node, genericNames) })
 	end
 
-	-- merge @param tags by name; an explicit type overrides, and an unknown name
-	-- appends when there is no code signature, otherwise warns
+	-- Merge `@param` tags by parameter name: explicit tag types override AST
+	-- types, and unmatched `@param` tags append when there is no AST function
+	-- or emit a `param-mismatch` warning when there is one.
 	for _, tagParam in doc.params do
-		local found: any = nil
-		for _, p in params do
-			if p.name == tagParam.name then
-				found = p
-				break
-			end
-		end
+		local found = members.byName(params, tagParam.name)
 		if found ~= nil then
-			-- the tag wins; a type-only @param must not erase a trailing doc
+			-- Keep any trailing comment doc when `@param` only supplies a type override.
 			found.doc = tagParam.desc or found.doc
 			if tagParam.type ~= nil then
 				found.type = members.tagType(tagParam.type, genericNames)
@@ -397,8 +450,11 @@ local function buildSignature(
 		end
 	end
 
-	-- merge @return tags positionally; append beyond inferred when unannotated
+	-- Merge `@return` tags by position; append extra `@return` tags when the
+	-- function has no return annotation, or warn on `return-count-mismatch`.
+	local tagReturns = false
 	for i, tagReturn in doc.returns do
+		tagReturns = tagReturns or tagReturn.type ~= nil
 		local target = returns[i]
 		if target ~= nil then
 			target.doc = tagReturn.desc
@@ -411,7 +467,7 @@ local function buildSignature(
 				doc = tagReturn.desc,
 			}
 			if next(row) == nil then
-				-- a bare @return holds its position as an object on the wire
+				-- Mark empty `@return` rows so `emit` encodes `{}` instead of `[]`.
 				emitMod.record(row)
 			end
 			table.insert(returns, row)
@@ -425,46 +481,76 @@ local function buildSignature(
 		end
 	end
 
-	-- the whole annotation, not the per-return types: `): (Widget, string)` is
-	-- one slice, and `returns` splits it into entries that spell no parentheses
-	local returnTail = if returnAnnotation ~= nil then segs.inline(parsedFile, returnAnnotation, genericNames) else nil
-	local sig = segs.signature(generics, params, returnTail)
-	-- callee and display stay apart: a re-export renames the function, so the
-	-- renderer swaps the callee and leaves the display untouched
-	return {
+	-- Keep `callee` separate from `segs` so re-exports can swap the callee name
+	-- without rebuilding the parameter/return display.
+	local sig = {
 		callee = members.callee(containerName, accessor, name),
-		segs = segs.canonical(sig),
 		params = params,
 		returns = returns,
+		-- Slice the full return annotation (including outer parentheses on
+		-- multi-returns like `(Widget, string)`) for `signatureSegs`.
+		__generics = generics,
+		__annotationTail = if returnAnnotation ~= nil
+			then segs.inline(parsedFile, returnAnnotation, genericNames)
+			else nil,
+		__tagReturns = if tagReturns then true else nil,
 	}
+	sig.segs = members.signatureSegs(sig)
+	return sig
 end
 
---- Routes tag-declared and callable-module members through buildFn/buildProp,
---- the same path code-discovered members take, so the two cannot drift.
+--- Constructs a synthetic field descriptor so tag-declared and callable-module
+--- members go through `buildFn` / `buildProp` just like AST-discovered fields.
 function members.pseudoField(name: string, value: any, isColonMethod: boolean, span: any): any
 	return { name = name, value = value, isColonMethod = isColonMethod, keySpan = span, defSpan = span }
 end
 
---- The CST local binding behind `setmetatable(x, Class)`'s second argument when
---- it is a plain local reference: the class-table shape both the constructor
---- and classType idioms match on.
+--- Returns the CST local binding for the second argument of `setmetatable(x, Class)`
+--- when it is a local variable reference.
 function members.setmetatableClassLocal(callNode: any): any?
+	callNode = parseMod.unwrapExpr(callNode, true)
 	if callNode == nil or callNode.tag ~= "call" then
 		return nil
 	end
-	local func = callNode.func
+	local func = parseMod.unwrapExpr(callNode.func, true)
 	if func == nil or func.tag ~= "global" or func.name.text ~= "setmetatable" then
 		return nil
 	end
 	local args = callNode.arguments
-	local second = args and args[2]
-	if second == nil or second.node == nil or second.node.tag ~= "local" then
+	local second = if args ~= nil and args[2] ~= nil then parseMod.unwrapExpr(args[2].node, true) else nil
+	if second == nil or second.tag ~= "local" then
 		return nil
 	end
-	return second.node["local"]
+	return second["local"]
 end
 
---- Detects `return setmetatable(_, Class)` constructors (same module).
+--- Returns the class local referenced by a metatable type alias in either idiom:
+--- `typeof(setmetatable(_, Class))` or `setmetatable<_, typeof(Class)>`.
+function members.setmetatableTypeClassLocal(typeNode: any): any?
+	typeNode = parseMod.unwrapType(typeNode)
+	if typeNode == nil then
+		return nil
+	end
+	if typeNode.tag == "typeof" then
+		return members.setmetatableClassLocal(typeNode.expression)
+	end
+	if typeNode.tag ~= "reference" or typeNode.prefix ~= nil or typeNode.name == nil then
+		return nil
+	end
+	if typeNode.name.text ~= "setmetatable" or typeNode.parameters == nil then
+		return nil
+	end
+	local second = typeNode.parameters[2]
+	local arg = if second ~= nil then parseMod.unwrapType(second.node) else nil
+	local expr = if arg ~= nil and arg.tag == "typeof" then parseMod.unwrapExpr(arg.expression, true) else nil
+	if expr == nil or expr.tag ~= "local" then
+		return nil
+	end
+	return expr["local"]
+end
+
+--- Detects same-module constructors returning `setmetatable(_, Class)` directly
+--- or via `local self = setmetatable(_, Class); ...; return self`.
 local function constructedSym(mod: ModuleData, fnNode: any): any?
 	if fnNode == nil or fnNode.body == nil or fnNode.body.statements == nil then
 		return nil
@@ -478,7 +564,20 @@ local function constructedSym(mod: ModuleData, fnNode: any): any?
 	if first == nil or first.node == nil then
 		return nil
 	end
-	local classLocal = members.setmetatableClassLocal(first.node)
+	local retExpr = parseMod.unwrapExpr(first.node, true)
+	local classLocal = members.setmetatableClassLocal(retExpr)
+	if classLocal == nil and retExpr ~= nil and retExpr.tag == "local" then
+		for _, stat in stats do
+			if stat.tag == "local" and stat.values ~= nil then
+				for i, varPair in stat.variables do
+					if varPair.node == retExpr["local"] and stat.values[i] ~= nil then
+						classLocal = members.setmetatableClassLocal(stat.values[i].node)
+						break
+					end
+				end
+			end
+		end
+	end
 	if classLocal == nil then
 		return nil
 	end
@@ -499,17 +598,20 @@ function members.buildFn(
 	local isColon = field.isColonMethod
 	local isMetamethod = surfaceMod.isMetamethod(name)
 	local placingKind = if doc.placing ~= nil then doc.placing.kind else nil
+	local fnNode = field.value.fnNode
 	local kind = "function"
 	if isMetamethod then
 		kind = "metamethod"
-	elseif isColon or placingKind == "method" then
+	elseif isColon or placingKind == "method" or surfaceMod.isSelfMethod(fnNode) then
 		kind = "method"
 	end
 	if placingKind == "function" then
 		kind = "function"
 	end
 	local accessor = if kind == "method" then ":" else "."
-	local fnNode = field.value.fnNode
+	-- Dot-defined methods with an explicit `self` parameter (`function T.f(self: T, ...)`)
+	-- display with `:` syntax (`T:f(...)`) and omit `self` from the parameter list.
+	local dropSelf = kind == "method" and not isColon and surfaceMod.isSelfMethod(fnNode)
 	local memberLine = field.defSpan and field.defSpan.beginLine
 	local visibility = members.visibilityOf(name, doc, isMetamethod)
 
@@ -520,16 +622,15 @@ function members.buildFn(
 		doc = members.mergeDescs(doc.desc, secondaryDesc),
 		tags = members.buildBadges(doc),
 		visibility = visibility,
-		signature = buildSignature(ctx, mod, containerName, name, accessor, fnNode, doc, memberLine),
+		signature = buildSignature(ctx, mod, containerName, name, accessor, fnNode, doc, memberLine, dropSelf),
 		errors = {},
 		source = members.span(mod.id, field.defSpan),
 	}
 	for _, err in doc.errors do
 		table.insert(fn.errors, { type = err.type, doc = err.desc })
 	end
-	-- code-signal badges fill only what the block left unsaid: an explicit
-	-- realm tag overrides detection, @yields simply agrees with it, and a
-	-- slot the block already filled skips its walk entirely
+	-- Fill `yields` and `realm` from AST body signals only when the doc block
+	-- did not set them explicitly.
 	if fn.tags.yields ~= true and detectMod.yields(ctx.graph, mod, fnNode, ownerSym) then
 		fn.tags.yields = true
 	end
@@ -540,16 +641,15 @@ function members.buildFn(
 	if sym ~= nil then
 		fn.__constructsSym = sym
 	end
+	if field.value.returnedRequire ~= nil then
+		fn.__returnedRequire = mod.requireTargets[field.value.returnedRequire]
+	end
 	return fn
 end
 
---- A value this model already documents as a container, named as its own type.
---- `Z.boolean = Z.bool` is one table under two names; only the first became the
---- section, and the second renders bare beside it unless typed as the link.
---- (Across modules that is a re-export, which names the hop it crossed.)
----
---- By id, not by name: a container's is minted once in newContainer and never
---- re-minted, where two modules may spell one name.
+--- If `value` is a table already registered as a container (e.g., an alias
+--- `Z.boolean = Z.bool` where `Z.bool` became the nested section), returns a
+--- reference segment linking to that container's ID.
 local function containerType(ctx: Ctx, value: any): { Seg }?
 	if value.kind ~= "table" then
 		return nil
@@ -571,9 +671,19 @@ function members.buildProp(
 	local visibility = members.visibilityOf(name, doc)
 	local parsedFile = mod.parsed :: any
 
-	-- a `@prop x Widget` type is tag-authored like any other and resolves the
-	-- same way; failing every declaration, the value itself is asked
+	-- Prefer `@prop` tag types, then explicit AST type annotations/casts (falling
+	-- back to the owning table's type annotation when unannotated or cast to a
+	-- placeholder `:: any`), and finally literal/constructor value inference.
 	local typeNode = field.declaredType or field.value.castType or field.value.annotation
+	local isAny = typeNode ~= nil
+		and typeNode.tag == "reference"
+		and typeNode.prefix == nil
+		and typeNode.name ~= nil
+		and typeNode.name.text == "any"
+	local ownerEntry = if typeNode == nil or isAny then detectMod.ownerFieldEntry(mod, ownerSym, name) else nil
+	if ownerEntry ~= nil and ownerEntry.value ~= nil then
+		typeNode = ownerEntry.value
+	end
 	local typeSegs: { Seg }? = nil
 	local inferred = false
 	if doc.placingType ~= nil then
@@ -592,7 +702,6 @@ function members.buildProp(
 	desc = members.mergeDescs(desc, doc.placingDesc)
 
 	local badges = members.buildBadges(doc)
-	-- as in buildFn: the code signal fills only the slot the block left unsaid
 	local mountRealm = false
 	if badges.realm == nil then
 		badges.realm = detectMod.propRealm(field.value)
@@ -609,18 +718,15 @@ function members.buildProp(
 		visibility = visibility,
 		readonly = doc.flags.readonly == true or detectMod.propReadonly(mod, ownerSym, name),
 		source = members.span(mod.id, field.defSpan),
-		-- the weakest of the three: a floating `@prop x T` merging in later
-		-- outranks whatever the value happens to be made of
+		-- Mark value-inferred types so a later `@prop x T` tag stub can override them.
 		__inferred = if inferred then true else nil,
-		-- a call this pass cannot see across: finalize types it from what the
-		-- callee returns. Unguarded, since `IsServer and Registry.new()` keeps
-		-- its callee under the guard; finalize unguards the same way.
+		-- Record unresolved call expressions (`IsServer and Registry.new()`) so
+		-- `finalize` can infer the property type from the callee's return annotation.
 		__inferCall = if typeSegs == nil and surfaceMod.unguard(field.value).calleeValue ~= nil
 			then field.value
 			else nil,
-		-- detected, not authored: finalize withdraws it if the callee turns out
-		-- to return a boolean, which makes the guard a predicate rather than a
-		-- mount. A `@server` the author wrote stands either way.
+		-- Mark guard-detected realms so `finalize` can clear them if the guarded
+		-- call turns out to return a boolean predicate rather than a realm mount.
 		__mountRealm = if mountRealm then true else nil,
 	}
 end
@@ -634,8 +740,8 @@ function members.newContainer(
 	within: string?
 ): any
 	local class = {
-		-- a nested class's id carries the qualified spelling, so same-named
-		-- tables under different parents cannot collide
+		-- Qualify nested class IDs with `within` so same-named nested tables
+		-- under different parents do not collide.
 		id = members.memberId(mod.id, "class", within, name),
 		name = name,
 		doc = if doc.desc ~= "" then doc.desc else nil,
@@ -647,42 +753,51 @@ function members.newContainer(
 	}
 	members.registerContainer(ctx, name, class)
 	if within ~= nil then
-		-- `@within Color.Oklab` must resolve as readily as `@within Oklab`
+		-- Register both the short name (`Oklab`) and qualified name (`Color.Oklab`) for `@within`.
 		members.registerContainer(ctx, within .. "." .. name, class)
 	end
 	return class
 end
 
---- Members land on the container itself; classes and re-exports always belong
---- to the module, wherever they are discovered, so a class passes those on.
-function members.sinks(container: any, from: any): any
+--- Routes members to `container.members` while forwarding discovered classes
+--- and re-exports to the enclosing module's lists.
+function members.sinks(container: any, from: any, within: string?): any
 	return {
 		members = container.members,
 		classes = from.classes,
 		reexports = from.reexports,
+		within = within,
 	}
 end
 
---- By priority: a later `function M.f` definition, the table field, then the
---- value's own definition (`local function f` exported as `return { f = f }`).
+--- Returns the highest-priority doc block for a field: a later `function M.f`
+--- definition block, the table field's own block, or the assigned local's block.
 function members.docBlockOf(field: any): any?
 	return field.defDoc or field.fieldDoc or (field.value :: any).defDoc
 end
 
---- `ownerSym` overrides which table the members' `self` (and readonly signal)
---- resolves against: metamethods iterate the metatable's fields but run with
---- `self` bound to the table it is attached to.
+--- Builds members from `sym.fields` into `out`. `ownerSym` overrides the table
+--- that `self` and readonly detection resolve against (used when harvesting
+--- metamethods from a metatable attached to `ownerSym`).
 function members.buildMembers(ctx: Ctx, mod: ModuleData, containerName: string, sym: any, out: any, ownerSym: any?)
 	local owner = ownerSym or sym
 	for _, field in sym.fields do
-		-- a dotted name can only come from a string key (`M["A.b"]`), and dots
-		-- join the id grammar: an id for it would collide with a nested
-		-- container's member (`M.A.b`)
+		-- Skip string keys containing dots (`M["A.b"]`), which would collide
+		-- with nested container member IDs (`M.A.b`).
 		if field.name:find(".", 1, true) ~= nil then
 			continue
 		end
 		local block = members.docBlockOf(field)
 		local doc = members.parseBlock(ctx, mod.id, block)
+		if block == nil and mod.claimIndex ~= nil then
+			local ownerEntry = detectMod.ownerFieldEntry(mod, owner, field.name)
+			local entryBlock = if ownerEntry ~= nil and ownerEntry.key ~= nil
+				then (mod.claimIndex :: any)[ownerEntry.key.location.beginLine]
+				else nil
+			if entryBlock ~= nil then
+				doc = members.parseTags(ctx, entryBlock)
+			end
+		end
 		local secondaryDesc: string? = nil
 		if field.defDoc ~= nil and field.fieldDoc ~= nil then
 			local fieldParsed = members.parseBlock(ctx, mod.id, field.fieldDoc)
@@ -694,32 +809,46 @@ function members.buildMembers(ctx: Ctx, mod: ModuleData, containerName: string, 
 
 		local member: any = nil
 		local value = field.value
+		-- Unwrap realm-guarded mounts (`IsServer() and require(X)`) so they
+		-- emit as re-exports with a realm badge.
+		local mounted = surfaceMod.unguard(value)
 
-		if value.kind == "require" or value.kind == "import" then
-			-- a member import re-exports through its require's target module.
-			-- One whose target never resolved is no re-export, so it falls
-			-- through to the plain-prop tail below like any other value.
-			local base = if value.kind == "import" then value.base else value
+		if mounted.kind == "require" or mounted.kind == "import" then
+			-- Emit a re-export when the target module resolved (or matched a
+			-- configured runtime alias); otherwise fall through to `buildProp`.
+			local isImport = mounted.kind == "import"
+			local base = if isImport then mounted.base else mounted
 			local targetModule = if base ~= nil then mod.requireTargets[base] else nil
-			if targetModule ~= nil then
+			local external = if base ~= nil then mod.externalRequires[base] else nil
+			if external ~= nil or targetModule ~= nil then
 				table.insert(out.reexports, {
-					id = members.memberId(mod.id, "reexport", nil, field.name),
+					id = members.memberId(mod.id, "reexport", out.within, field.name),
 					name = field.name,
-					targetModule = targetModule,
-					targetMember = if value.kind == "import" then table.concat(value.path :: any, ".") else nil,
+					within = out.within,
+					targetModule = if external ~= nil then external.spelling else targetModule,
+					targetMember = if isImport then table.concat(mounted.path :: any, ".") else nil,
+					url = if external ~= nil then external.url else nil,
 					doc = if doc.desc ~= "" then doc.desc else nil,
-					-- as segments: splitting targetMember back apart would give
-					-- the path two spellings
-					__path = if value.kind == "import" then value.path else nil,
-					__line = field.keySpan.beginLine,
+					realm = tagsMod.realmList(doc.flags) or detectMod.propRealm(value),
+					__external = if external ~= nil then true else nil,
+					__path = if external == nil and isImport then mounted.path else nil,
+					__line = if external == nil then field.keySpan.beginLine else nil,
+					__sink = if external == nil and isImport then out.members else nil,
+					__prop = if external == nil and isImport
+						then members.buildProp(ctx, mod, containerName, field, doc, secondaryDesc, owner)
+						else nil,
 				})
+				if external ~= nil and ctx.externals[external.spelling] == nil then
+					ctx.externals[external.spelling] =
+						{ url = external.url, alias = external.alias, path = external.path }
+				end
 				continue
 			end
 		end
 
 		if value.kind == "function" then
 			if block == nil and surfaceMod.isMetamethod(field.name) then
-				continue -- undocumented metamethods are noise
+				continue -- skip undocumented metamethods (`__index`, `__newindex`, etc.)
 			end
 			member = members.buildFn(ctx, mod, containerName, field, doc, secondaryDesc, owner)
 		elseif
@@ -728,27 +857,29 @@ function members.buildMembers(ctx: Ctx, mod: ModuleData, containerName: string, 
 			and value.castType == nil
 			and value.annotation == nil
 			and #value.fields > 0
-			-- already a container elsewhere (including cyclic references, which
-			-- would recurse forever): document as a plain prop instead
+			-- Tables already registered as containers (including cyclic references)
+			-- render as plain properties linking to the existing container.
 			and ctx.containerOfSym[members.symKey(value)] == nil
-			-- a class entry carries no visibility, so a private table would
-			-- become a section with public members; a prop keeps the
-			-- `_`-prefix and @private rule working
+			-- Keep `_`-prefixed and `@private` tables as properties so they can
+			-- carry `visibility = "private"` instead of becoming public sections.
 			and members.visibilityOf(field.name, doc) == "public"
+			-- A non-`@class` placing tag (`@prop Defaults { size: number }`) or
+			-- `@readonly` marks the table as a single property rather than a namespace section.
+			and (doc.placing == nil or doc.placing.kind == "class")
+			and not doc.flags.readonly
 		then
 			local nestedName = containerName .. "." .. field.name
 			local nested = members.newContainer(ctx, mod, field.name, doc, field.defSpan, containerName)
 			ctx.containerOfSym[members.symKey(value)] = nested
-			members.buildMembers(ctx, mod, nestedName, value, members.sinks(nested, out))
+			members.buildMembers(ctx, mod, nestedName, value, members.sinks(nested, out, nestedName))
 			table.insert(out.classes, nested)
 			continue
 		else
 			member = members.buildProp(ctx, mod, containerName, field, doc, secondaryDesc, owner)
 		end
 
-		-- the value is the member's identity: an alias (`Target.run = Impl.run`)
-		-- binds a second name to one value, which the finalize moves must tell
-		-- apart from two members landing on one name
+		-- Record the underlying `SymValue` key so `finalize` can distinguish
+		-- aliases of the same value from collisions between two distinct definitions.
 		member.__valueSym = members.symKey(value)
 
 		if doc.within ~= nil and doc.within ~= containerName then

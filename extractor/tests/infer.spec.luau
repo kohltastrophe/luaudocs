@@ -37,6 +37,13 @@ return function()
 
 	t.eq(typeOfExpr("5"), "number", "number literal")
 	t.eq(typeOfExpr('"s"'), "string", "string literal")
+	t.eq(typeOfExpr("`hello {name}`"), "string", "interpolated string literal")
+	t.eq(
+		typeOfExpr("if flag then 1 elseif other then 2 else 3"),
+		"number",
+		"conditional expression with uniform literal branches"
+	)
+	t.eq(typeOfExpr('if flag then 1 else "no"'), nil, "conditional expression with mixed branches infers nothing")
 	t.eq(typeOfExpr("true"), "boolean", "boolean literal")
 	-- a placeholder for a value assigned elsewhere: the type is not `nil`
 	t.eq(typeOfExpr("nil"), nil, "nil literal infers nothing")
@@ -56,7 +63,7 @@ return function()
 	t.suite("infer: tables")
 
 	t.eq(typeOfExpr("{}"), "{}", "empty table literal")
-	t.eq(typeOfExpr('{ "a", "b" }'), "{ string }", "homogeneous string list")
+	t.eq(typeOfExpr('{ "a", `b {x}` }'), "{ string }", "homogeneous string list (plain + interpolated)")
 	t.eq(typeOfExpr("{ 1, 2 }"), "{ number }", "homogeneous number list")
 	-- negating a number is still a number, where every other arithmetic
 	-- operator could be anything
@@ -98,9 +105,10 @@ return function()
 
 	t.suite("infer: conditional mounts")
 
-	-- `A and B` is B where the guard passes and falsy where it does not, so the
-	-- type is B's, optional
+	-- `A and B` (or `if A then B else nil`) is B where the guard passes and
+	-- falsy where it does not, so the type is B's, optional
 	t.eq(typeOfExpr("flag and script"), "Instance?", "a guarded instance is optional")
+	t.eq(typeOfExpr("if flag then script else nil"), "Instance?", "an if-then-nil guarded instance is optional")
 	eqEngine(typeOfExpr("flag and Color3.new(1, 1, 1)"), "Color3?", "a guarded datatype is optional")
 	t.eq(typeOfExpr("flag and {}"), "{}?", "a guarded table is optional")
 	-- `false | boolean` is just boolean: nothing became absent

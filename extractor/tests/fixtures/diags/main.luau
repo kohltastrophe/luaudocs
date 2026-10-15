@@ -37,4 +37,12 @@ end
 
 --- @class Twin
 
+local types = require("./types")
+export type Kept = types.Kept
+
+-- a require-local is enough to join the graph, and to fail parsing there
+local broken = require("./broken")
+-- the folder holding this file: an instance, but not a module
+M.Folder = require(script.Parent)
+
 return M

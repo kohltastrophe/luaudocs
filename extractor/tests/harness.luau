@@ -140,8 +140,8 @@ end
 
 --- Load + expandEntry + graph.build over a fixture root: the graph every
 --- whole-fixture spec starts from, with the entry asserted valid.
-function harness.buildGraph(root: string, entry: string): (any, any)
-	local proj = requiresMod.load(root)
+function harness.buildGraph(root: string, entry: string, opts: any?): (any, any)
+	local proj = requiresMod.load(root, opts)
 	local diag = utilMod.diagnostics()
 	local entryAbs, err = graphMod.expandEntry(root, entry)
 	assert(entryAbs ~= nil, tostring(err))

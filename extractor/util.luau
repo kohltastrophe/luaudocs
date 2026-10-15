@@ -1,8 +1,7 @@
---- Small shared helpers for the extractor: the diagnostic collector every
---- stage reports through (Lute has no stderr write API, so problems ride
---- inside the model), path helpers (relPath keeps module ids posix-spelled
---- on every platform, mirroring the renderer's toPosix; the Windows CI leg
---- is why), and the line-trimming the doc-comment passes share.
+--- Shared helpers for the extractor: the diagnostic collector every stage
+--- reports through (Lute has no stderr write API, so diagnostics travel inside
+--- the doc-model JSON), path helpers (`relPath` normalizes separators to `/`
+--- across platforms to match the renderer's `toPosix`), and string/line utilities.
 
 local fs = require("@std/fs")
 local pathlib = require("@std/path")
@@ -26,8 +25,8 @@ export type Collector = {
 	info: (self: Collector, code: string, message: string, file: string?, line: number?) -> (),
 }
 
---- Diagnostics are emitted into the doc-model JSON; the extractor never crashes
---- on weird-but-parseable code, it degrades and reports.
+--- Diagnostics are emitted into the doc-model JSON; on unexpected or malformed
+--- constructs, the extractor records a diagnostic and degrades gracefully.
 function util.diagnostics(): Collector
 	local collector = { list = {} } :: Collector
 	function collector.add(self, severity, code, message, file, line)
@@ -51,8 +50,8 @@ function util.diagnostics(): Collector
 	return collector
 end
 
--- @std/path returns path objects (tables with __tostring); these wrappers hand
--- back plain strings.
+-- `@std/path` returns path objects (tables with `__tostring`); these wrappers
+-- return plain strings.
 
 function util.joinPath(...: string): string
 	return tostring(pathlib.join(...))
@@ -62,8 +61,8 @@ function util.normPath(p: string): string
 	return tostring(pathlib.normalize(p))
 end
 
---- Always `/`-separated: results become module ids, which land in the doc-model
---- JSON and in source-link URLs, never in filesystem calls.
+--- Always `/`-separated: results become module IDs in the doc-model JSON and
+--- source-link URLs rather than OS filesystem paths.
 function util.relPath(from: string, to: string): string
 	return (tostring(pathlib.relative(from, to)):gsub("\\", "/"))
 end
@@ -84,25 +83,18 @@ function util.isAbsolute(p: string): boolean
 	return pathlib.isAbsolute(p)
 end
 
---- `dir/init.luau` *is* `dir`, an exact match, so `init.client.luau` stays a
---- plain module.
+--- Matches `init.luau` and `init.lua` only, so `init.client.luau` remains a plain module.
 function util.isInitFile(fileAbs: string): boolean
-	local base = util.basename(fileAbs)
-	return base == "init.luau" or base == "init.lua"
+	return util.basename(fileAbs):match("^init%.luau?$") ~= nil
 end
 
---- Strips one extension only: `data.lua.luau` stems to `data.lua`, not `data`.
+--- Strips a single `.luau`/`.lua` extension (`data.lua.luau` stems to `data.lua`).
 function util.stem(p: string): string
-	local base = util.basename(p)
-	local stripped = base:gsub("%.luau$", "")
-	if stripped == base then
-		stripped = base:gsub("%.lua$", "")
-	end
+	local stripped = util.basename(p):gsub("%.luau?$", "")
 	return stripped
 end
 
---- fs.type throws on paths it cannot stat, so the pcall doubles as the
---- existence check. nil means missing.
+--- `fs.type` throws when `p` does not exist; wrapping it in `pcall` returns `nil` for missing paths.
 function util.pathType(p: string): string?
 	local ok, kind = pcall(fs.type, p)
 	return if ok then kind else nil
@@ -116,28 +108,16 @@ function util.isFile(p: string): boolean
 	return util.pathType(p) == "file"
 end
 
---- nil collapses missing and unreadable: every caller treats them alike.
+--- Reads `p` as a string, returning `nil` if the file is missing or unreadable.
 function util.readFileSafe(p: string): string?
-	if not fs.exists(p) then
-		return nil
-	end
 	local ok, text = pcall(fs.readFileToString, p)
 	return if ok then text else nil
 end
 
---- The args after the `--` separator in process.args: the script's own argv
---- (Lute puts the runner's args first).
+--- Returns the arguments after `--` in `process.args` (Lute places its own runner arguments before `--`).
 function util.argsAfterSeparator(processArgs: { string }): { string }
-	local out: { string } = {}
-	local past = false
-	for _, a in processArgs do
-		if past then
-			table.insert(out, a)
-		elseif a == "--" then
-			past = true
-		end
-	end
-	return out
+	local sep = table.find(processArgs, "--")
+	return if sep ~= nil then table.move(processArgs, sep + 1, #processArgs, 1, {}) else {}
 end
 
 function util.trim(s: string): string
@@ -145,13 +125,13 @@ function util.trim(s: string): string
 	return trimmed
 end
 
---- Splits on \n and \r\n. Always yields at least one line.
+--- Splits on `\n` and `\r\n`, always returning at least one line.
 function util.splitLines(text: string): { string }
 	local lines = string.split(text, "\n")
 	for index, line in lines do
 		lines[index] = (line:gsub("\r$", ""))
 	end
-	-- split yields a trailing empty line when text already ends with \n
+	-- `string.split` produces a trailing empty element when `text` ends with `\n`.
 	if #lines > 1 and lines[#lines] == "" and text:sub(-1) == "\n" then
 		table.remove(lines)
 	end
@@ -166,15 +146,12 @@ function util.trimEmptyLines(lines: { string }): { string }
 	while last >= first and util.trim(lines[last]) == "" do
 		last -= 1
 	end
-	local out = {}
-	for i = first, last do
-		table.insert(out, lines[i])
-	end
-	return out
+	return if first <= last then table.move(lines, first, last, 1, {}) else {}
 end
 
---- A shared prefix string, not a character count: counting would treat a tab
---- and a space as equal width and mis-strip blocks that mix them.
+--- Returns the longest whitespace prefix shared by all non-blank lines. Compares
+--- exact characters rather than character counts so mixed tabs and spaces are
+--- never stripped past their shared prefix.
 function util.commonIndent(lines: { string }): string?
 	local prefix: string? = nil
 	for _, line in lines do
@@ -216,6 +193,36 @@ end
 
 function util.joinDesc(lines: { string }): string
 	return table.concat(util.trimEmptyLines(lines), "\n")
+end
+
+--- Clamped to the last index when the string literal opening at `i` never closes.
+function util.closingQuote(text: string, i: number): number
+	local quote = text:sub(i, i)
+	local n = #text
+	local j = i + 1
+	while j <= n do
+		local cj = text:sub(j, j)
+		if cj == "\\" then
+			j += 2
+		elseif cj == quote then
+			break
+		else
+			j += 1
+		end
+	end
+	return math.min(j, n)
+end
+
+--- Index of the first character after a `--` or `--[=[...]=]` comment opening
+--- at `i` (the terminating `\n` of a line comment, or `#text + 1` at EOF).
+function util.commentEnd(text: string, i: number): number
+	local n = #text
+	local eq = text:match("^%[(=*)%[", i + 2)
+	if eq ~= nil then
+		local closeAt = text:find("]" .. eq .. "]", i + 2, true)
+		return if closeAt ~= nil then closeAt + #eq + 2 else n + 1
+	end
+	return text:find("\n", i, true) or (n + 1)
 end
 
 return util
