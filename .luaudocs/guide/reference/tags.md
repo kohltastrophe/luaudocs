@@ -6,67 +6,65 @@ sidebar_position: 2
 
 # Tags
 
-Every tag corrects or extends what the extractor already inferred, and none of them is ever required. [Overriding with Tags](/guide/overriding-with-tags) covers the ones that come up in practice; the 23 tags listed below, plus [`@__index`](#tags-that-do-nothing), form the complete vocabulary. The tables group them by shape: flags take no argument, placement tags declare what a block documents, and data tags carry values and descriptions.
+Every tag overrides or extends what the extractor inferred; none is required. [Overriding with Tags](/guide/overriding-with-tags) covers common use cases, while the tables below catalog all 24 Moonwave tags grouped into flags, placement tags, and data tags.
 
-Prose can sit before or after the tags. A `-- desc` (a single `-` works too) continues onto the lines directly below it until a blank line; after that, and after any tag that takes no description, prose rejoins the item's own description.
+Prose can sit before or after tags. A tag description after `--` (or `-`) continues across adjacent non-blank lines; after a blank line (or a tag that takes no description), subsequent lines return to the item's main description.
 
 ## Flags
 
-These take no argument. Most add a badge; two change whether the item is documented at all.
+Flags take no arguments:
 
-| Tag           | Effect                                                                        |
+| Tag           | Effect                                                                          |
 | :------------ | :------------------------------------------------------------------------------ |
-| `@yields`     | <Badge type="warning" text="Yields" /> the function may yield the calling thread. |
-| `@unreleased` | <Badge type="warning" text="Unreleased" />                                    |
-| `@server`     | <Badge type="info" text="Server" class="luaudocs-server" />                   |
-| `@client`     | <Badge type="info" text="Client" class="luaudocs-client" />                   |
-| `@plugin`     | <Badge type="info" text="Plugin" class="luaudocs-plugin" />                   |
-| `@readonly`   | <Badge type="info" text="Read Only" /> on a property.                         |
-| `@private`    | <Badge type="danger" text="Private" /> even without a `_` prefix.             |
-| `@ignore`     | Drops the item from the docs entirely.                                        |
+| `@yields`     | <Badge type="warning" text="Yields" /> function may yield the calling thread.   |
+| `@unreleased` | <Badge type="warning" text="Unreleased" />                                      |
+| `@server`     | <Badge type="info" text="Server" class="luaudocs-server" />                     |
+| `@client`     | <Badge type="info" text="Client" class="luaudocs-client" />                     |
+| `@plugin`     | <Badge type="info" text="Plugin" class="luaudocs-plugin" />                     |
+| `@readonly`   | <Badge type="info" text="Read Only" /> on a property.                           |
+| `@private`    | <Badge type="danger" text="Private" /> even without a `_` prefix.               |
+| `@ignore`     | Omits the item from the docs unconditionally.                                   |
 
-`@server`, `@client`, and `@plugin` combine and render in that order. The Yields and realm badges are also [detected from what a body does](/guide/overriding-with-tags#adding-badges), and a prop renders Read Only when its table is `table.freeze`d or its field is marked `read` in the table's own type (not one imported from another module), so these flags are only needed when the signal is not in the code ([live](/api/Queue#pop): a Yields badge with no tag behind it). A realm tag replaces the detected realm, so the tag wins when they disagree.
+`@server`, `@client`, and `@plugin` can be combined and render in that order. Because Yields, realm, and Read Only badges are [inferred from code](/guide/overriding-with-tags#adding-badges) (see [`Queue:pop`](/api/Queue#pop)), these flags are only needed when the signal is not visible in source (or when `read` is declared on an imported type). Explicit realm tags replace detected realms.
 
-The last two rows differ: `@private` keeps the member and renders it when `[api] includePrivate = true`, while `@ignore` drops it either way. Without either tag, a leading `_` means private, except on an `export type` or a `__`-named function (a documented metamethod).
+`@private` hides an item unless `[api] includePrivate = true`, whereas `@ignore` always drops it. Untagging an item falls back to the leading-`_` convention (`export type` and documented `__` metamethods stay public).
 
 ## Placement
 
-These declare what a block documents when inference cannot reach it, or when you want a member filed under a different class.
+Placement tags declare what a block documents when static analysis cannot discover it:
 
 | Tag                       | Effect                                                                     |
 | :------------------------ | :------------------------------------------------------------------------- |
 | `@class Name`             | Documents the block as a class named `Name`.                               |
-| `@prop Name Type -- desc` | Documents a property. `@prop Class.name` also files it under `Class`.      |
+| `@prop Name Type -- desc` | Documents a property (`@prop Class.name` files it under `Class`).          |
 | `@type Name Type -- desc` | Documents a type declaration.                                              |
-| `@function Name`          | Documents a function. `@function Class.name` files it under `Class`.       |
-| `@method Name`            | Documents a method. `@method Class:name` is the colon spelling of the same. |
-| `@interface Name`         | Documents a shape, with its members written as `.field Type -- desc` lines, blank lines between groups included. |
+| `@function Name`          | Documents a function (`@function Class.name` files it under `Class`).      |
+| `@method Name`            | Documents a method (`@method Class:name` files it under `Class`).          |
+| `@interface Name`         | Documents a table shape whose fields are written as `.field Type -- desc`. |
 
 ::: warning
-A second placement tag in one block is a conflict: the first wins, the later one is reported and dropped.
+A doc block may contain at most one placement tag; any additional placement tag warns and is ignored.
 :::
 
 ## Data
 
 | Tag                        | Effect                                                                       |
 | :------------------------- | :--------------------------------------------------------------------------- |
-| `@param name Type -- desc` | Documents one parameter. The type is optional; the signature already has it. |
-| `@return Type -- desc`     | Documents one return value, in order.                                        |
+| `@param name Type -- desc` | Documents a parameter (`Type` is optional and overrides the annotation).     |
+| `@return Type -- desc`     | Documents a return value, matched in order.                                  |
 | `@error Type -- desc`      | Documents an error the function can raise.                                   |
-| `@field name Type -- desc` | Documents one field of an `@interface` or of a type declaration.             |
-| `@within Class`            | Files the item under `Class`, wherever it is defined.                        |
-| `@deprecated v2 -- use X`  | <Badge type="danger" text="Deprecated since v2" /> plus a warning callout ([live](/api/State#destroy)). Both parts are optional. |
+| `@field name Type -- desc` | Documents a field of an `@interface` or type declaration.                    |
+| `@within Class`            | Files the item under `Class`.                                                |
+| `@deprecated v2 -- use X`  | <Badge type="danger" text="Deprecated since v2" /> plus a warning callout ([live](/api/State#destroy)). |
 | `@since 1.2.0`             | <Badge type="tip" text="since 1.2.0" /> ([live](/api/Queue#push))            |
-| `@tag name`                | <Badge type="info" text="name" /> a badge carrying the tag's name.           |
-| `@external Name URL`       | Points an unresolvable type name at its own docs site.                       |
+| `@tag name`                | <Badge type="info" text="name" /> custom badge.                              |
+| `@external Name URL`       | Maps an external type name to its documentation URL site-wide.               |
 
-`@param` is also unnecessary in a [multi-line signature](/guide/overriding-with-tags#describing-parameters-and-returns), where a trailing `-- comment` on a parameter's line documents it; when both exist the tag wins field by field, so a type-only `@param` keeps the trailing description.
-
-`@external` is the one tag that affects the whole site rather than the item it sits on: declared once, in any module, that name links wherever it appears in a signature or a `[bracket]` reference.
+In [multi-line signatures](/guide/overriding-with-tags#describing-parameters-and-returns), trailing `--` comments document parameters without `@param` (when both exist, `@param` overrides field by field). `@external` applies across the entire site wherever `Name` appears in a signature or `[Name]` reference.
 
 ## Type names written in tags
 
-A type you name in a tag (`@prop x Widget`, `@return Widget`, a `.field Widget` line) links to what it names in the module where you wrote the tag: a type that module declares, or a class or module it requires. Any standard require syntax is supported: a module accessed through a table field links just as reliably as one bound to a local variable:
+Type names inside tags (`@prop x Widget`, `@return Widget`, `.field Widget`) resolve within the containing module's scope: types declared in that module, or classes and modules it requires (whether bound to a local or assigned to a table field):
 
 ```luau
 local _K = {
@@ -74,10 +72,8 @@ local _K = {
 }
 ```
 
-A name the module never reaches stays unlinked rather than being matched against an unrelated module that happens to spell it the same way. Point one somewhere anyway with `@external`, or qualify it through a require-local (`Util.Logger`).
+Names that the module neither declares nor requires stay unlinked unless declared with `@external` or qualified through a required module (`Util.Logger`).
 
 ## Tags that do nothing
 
-`@__index` is accepted and ignored, since implementation tables are [discovered automatically](/guide/how-it-works#what-the-extractor-understands). It exists for Moonwave compatibility.
-
-Unknown `@words` (credits, email addresses) stay in your prose untouched.
+`@__index` is accepted and ignored for Moonwave compatibility, since implementation tables are [discovered automatically](/guide/how-it-works#what-the-extractor-understands). Unknown `@words` (such as handles or email addresses) remain in prose untouched.

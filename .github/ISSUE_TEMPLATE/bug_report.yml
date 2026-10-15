@@ -5,9 +5,9 @@ body:
   - type: markdown
     attributes:
       value: |
-        Most extractor bugs come down to one Luau construct the symbolic
+        Most extractor bugs come down to a single Luau construct that the symbolic
         evaluator reads differently than you do, so the smallest source snippet
-        that reproduces it is worth more than anything else here.
+        that reproduces the issue is worth more than anything else here.
 
   - type: textarea
     id: what-happened
@@ -33,8 +33,8 @@ body:
     attributes:
       label: Output of `luaudocs build --emit-only`
       description: |
-        Run it in the affected project and paste the full output: it prints
-        every diagnostic without running VitePress.
+        Run this command in the affected project and paste the full output: it
+        prints every diagnostic without running VitePress.
       render: shell
     validations:
       required: false
@@ -45,9 +45,10 @@ body:
       label: Versions
       description: |
         Output of `luaudocs --version` and `node --version`, plus your OS.
-        luaudocs installs the Lute it pins, so leave that line empty unless you
-        set LUAUDOCS_LUTE: extraction is tied to the Lute version, so a Lute of
-        your own matters even when the bug looks like a rendering problem.
+        LuauDocs installs the Lute binary it pins, so leave the last line empty
+        unless you set LUAUDOCS_LUTE: extraction is tied to the Lute version, so
+        a custom Lute binary matters even when the bug looks like a rendering
+        problem.
       placeholder: |
         luaudocs:
         node:

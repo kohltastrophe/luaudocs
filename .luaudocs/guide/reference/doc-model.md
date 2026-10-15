@@ -6,17 +6,12 @@ sidebar_position: 5
 
 # Doc Model
 
-LuauDocs is built in two distinct stages connected by a JSON document. The extractor reads your Luau and produces a **doc model**: every module, member, type, and signature it found, with cross-references already resolved. The renderer turns that model into a site.
+LuauDocs is built in two stages connected by a JSON **doc model**: the extractor reads your Luau source and emits every module, member, type, resolved signature reference, and diagnostic, and the renderer turns that JSON into a site.
 
-The site is one thing you can do with it. `--model` hands you the same document, so you can do something else:
+Export the doc model for your own tooling with `--model` (and add `--emit-only` to skip the VitePress build):
 
 ```bash
 luaudocs build --model api.json
-```
-
-That builds your site as usual and writes the model as well. When the model is all you are after, `--emit-only` skips the VitePress render:
-
-```bash
 luaudocs build --emit-only --model api.json
 ```
 
@@ -32,9 +27,9 @@ luaudocs build --emit-only --model api.json
 }
 ```
 
-`externals` maps every name an [`@external`](/guide/reference/tags#data) tag declared to the URL it points at. It is the one thing signatures do not resolve for you (see below), and it is absent entirely when no module declares one.
+`externals` maps external type or module names to either a URL string (from [`@external`](/guide/reference/tags#data)) or `{ url?, alias, path, name? }` (for modules and types reached through a [runtime alias](/guide/configuration)), and is omitted when empty. Runtime module re-exports record the require string as `targetModule` (with optional `url`), and re-exports carry optional `realm` and `within` fields.
 
-Each module carries its `id`, `name`, `classes`, `members`, `types`, `reexports`, its `instancePath`, the `source` it came from, and its `doc` when the module has one. A passthrough (`return require(X)`) also carries `aliasOf` naming X, and gets no page of its own. Here is one real function entry, from this site's [example library](/api/Flux#state-1):
+Each module contains `id`, `name`, `classes`, `members`, `types`, `reexports`, `instancePath`, `source`, optional `doc`, and optional `aliasOf` (for passthrough `return require(X)` modules, which get no page of their own). Here is the function entry for [`Flux.state`](/api/Flux#state-1):
 
 ```json
 {
@@ -61,33 +56,29 @@ Each module carries its `id`, `name`, `classes`, `members`, `types`, `reexports`
 }
 ```
 
-`params`, `returns`, and `errors` are always present on a function, empty arrays included, so the pieces of a signature are available separately from the rendered form in `segs`.
+Functions always include `params`, `returns`, and `errors` arrays alongside `segs`:
 
-Two aspects of the model eliminate redundant processing in downstream tools:
+- **Segmented signatures (`segs`):** lists strings and `{ text, id }` reference objects after `callee`. Join the strings and `text` fields for plain text, or turn `id`s into links.
+- **Stable model-wide IDs:** `examples/Flux/State.luau#type.State` uniquely identifies one declaration across the entire model.
 
-- **Signatures come apart into segments.** `segs` spells the whole signature after the callee, as a list of strings and references. Concatenate the `text` values for a plain signature, or keep the `id`s and render them as links. Every type mention that resolves to a declaration in your project carries the id of that declaration.
-- **Ids are stable and model-wide.** `examples/Flux/State.luau#type.State` names exactly one declaration, so a reference is a lookup rather than a search.
-
-The full field list lives in the header comment of [`extractor/model/init.luau`](https://github.com/kohltastrophe/luaudocs/blob/main/extractor/model/init.luau), which is the copy that gets updated when the shape does.
+The complete schema is documented in [`extractor/model/init.luau`](https://github.com/kohltastrophe/luaudocs/blob/main/extractor/model/init.luau) and [`src/docmodel.ts`](https://github.com/kohltastrophe/luaudocs/blob/main/src/docmodel.ts).
 
 ::: info What the model leaves for you
-Prose references (`[State:Connect]` in the `doc` above) are stored as written. Resolving them against ids is the renderer's job, and yours if you want them linked. Type references in signatures are resolved as far as your project goes, as shown: a segment with no `id` is a name your project does not declare, and linking it is a lookup in `externals` and then in the Roblox names.
+Prose references (`[State:Connect]` in `doc`) remain as written; the renderer resolves them against symbol IDs, `externals`, and Roblox types. Signature segments without an `id` are external or Roblox type names.
 :::
 
 ## The version, and what it promises
 
-`schemaVersion` is `1`, and stays `1` while LuauDocs is on `0.x`: a minor release may add, rename, or remove fields in place, without a compatibility layer, and the changelog says when one does. So the version cannot tell you the shape moved under you; the LuauDocs version you pin does. Check it anyway, so a future bump fails loudly rather than misreading:
+`schemaVersion` is `1` and evolves in place while LuauDocs is on `0.x` (schema updates are noted in `CHANGELOG.md`). Pin the LuauDocs version in tools that consume `docmodel.json` and check `schemaVersion`:
 
 ```js
 const model = JSON.parse(await readFile("api.json", "utf8"));
 if (model.schemaVersion !== 1) throw new Error(`unsupported doc model v${model.schemaVersion}`);
 ```
 
-Pin the LuauDocs version alongside anything you build on this, the same way you would pin a compiler you parse the output of.
-
 ## Important implementation details
 
-- **The model is the one your pages were rendered from**, so [`[source] include` and `exclude`](/guide/configuration) have already been applied. Per-member visibility has not: hiding a private member is the renderer's job, so one carries `"visibility": "private"` and stays in the file whatever [`[api] includePrivate`](/guide/configuration) says. Filter on that field unless you want the internals your site leaves out.
-- **It is written whenever extraction finishes**, the builds that fail on their own diagnostics included: errors live in `diagnostics` alongside everything that did extract. Check `diagnostics` for `"severity": "error"` before trusting the module list to be complete. Every code is listed under [Diagnostics](/guide/reference/diagnostics). A failure that stops extraction outright (Lute missing, an unreadable entry point) writes no file at all, so treat the file's absence as its own error.
-- **Output is deterministic**: object keys are sorted, and the same source produces the same bytes. It diffs cleanly, so committing one and watching it change is a reasonable way to catch API drift in review.
-- **The path is yours.** LuauDocs writes exactly the file you name and never sweeps it, unlike everything under `api/` and `.vitepress/`.
+- **Module filtering is applied; member visibility is not.** [`[source] include` and `exclude`](/guide/configuration) filter the module list, whereas private members remain in the JSON with `"visibility": "private"` regardless of [`[api] includePrivate`](/guide/configuration).
+- **Written whenever extraction finishes**, even when diagnostics contain errors: check `diagnostics` for `"severity": "error"` before assuming the model is complete ([Diagnostics](/guide/reference/diagnostics)). Fatal startup failures (such as an unreadable entry point) write no file.
+- **Deterministic output:** object keys are sorted alphabetically so committed models diff cleanly.
+- **User-owned target path:** LuauDocs writes the exact `--model <file>` path you specify and never deletes it during directory cleanup.
