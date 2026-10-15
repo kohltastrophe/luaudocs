@@ -2,43 +2,44 @@
 //
 // Signature link decorations: the emitter writes plain ```luau fences whose
 // info string carries `luaudocs-links=[[start,end,"/api/Page#anchor"],...]`
-// (offsets into the fence body, end-exclusive). This Shiki transformer reads
-// that token off the fence meta and turns each span into a native Shiki
-// decoration wrapping the identifier in an <a>. Highlighting, themes, the
-// copy button and dual-theme CSS all stay VitePress's own; the emitted
-// markdown stays plain Luau for llms-full.txt.
+// (0-based byte offsets into the fence body, end-exclusive). This Shiki
+// transformer reads that token from the fence meta and turns each span into a
+// native Shiki decoration wrapping the identifier in an `<a>`. Highlighting,
+// themes, the copy button, and dual-theme CSS all remain VitePress's own, while
+// the emitted markdown stays plain Luau for `llms-full.txt`.
 //
-// The token cannot reach Shiki as written, so relayLinks/decodeLinks below
-// carry it across VitePress's fence renderer; the generated config installs
-// both.
+// Because VitePress strips `[...]` from fence info strings before calling Shiki,
+// `relayLinks` and `decodeLinks` base64url-encode the payload across VitePress's
+// fence renderer.
 import type MarkdownIt from "markdown-it";
 import type { ShikiTransformer } from "shiki";
 
 export const LINKS_TOKEN = "luaudocs-links=";
 
 /**
- * The payload carries no whitespace, so it runs to the next space (or the end
- * of the string). Every path below reads and reassembles through this.
+ * Splits `text` around `token`, reading the whitespace-free payload up to the
+ * next space (or the end of the string).
  */
 function splitToken(
 	text: string | undefined,
 	token: string,
 ): { before: string; payload: string; after: string } | undefined {
 	const at = text?.indexOf(token) ?? -1;
-	if (text === undefined || at === -1) {
+	if (!text || at === -1) {
 		return undefined;
 	}
-	const before = text.slice(0, at);
 	const tail = text.slice(at + token.length);
 	const end = tail.indexOf(" ");
-	return end === -1
-		? { before, payload: tail, after: "" }
-		: { before, payload: tail.slice(0, end), after: tail.slice(end) };
+	return {
+		before: text.slice(0, at),
+		payload: end === -1 ? tail : tail.slice(0, end),
+		after: end === -1 ? "" : tail.slice(end),
+	};
 }
 
 export function parseLinks(meta: string | undefined): Array<[number, number, string]> | undefined {
 	const split = splitToken(meta, LINKS_TOKEN);
-	if (split === undefined) {
+	if (!split) {
 		return undefined;
 	}
 	try {
@@ -50,13 +51,13 @@ export function parseLinks(meta: string | undefined): Array<[number, number, str
 }
 
 /**
- * The relay's wire form: base64url carries no brackets, no spaces and no
- * braces, so nothing VitePress does to a fence info string can touch it.
+ * Base64url wire token used across VitePress's fence renderer: base64url
+ * contains no brackets, spaces, or braces, so VitePress's `[title]` and
+ * `{line-range}` strippers leave it untouched.
  */
 const B64_TOKEN = "luaudocs-links-b64=";
 
-/** Rewrites the `from` token's payload under `to`, leaving the rest of the
- * string byte for byte. Undefined when the token is absent. */
+/** Replaces the `from` token's payload with `to + recode(payload)`, preserving surrounding text. */
 function retoken(
 	text: string | undefined,
 	from: string,
@@ -68,13 +69,9 @@ function retoken(
 }
 
 /**
- * Re-encodes the links token before VitePress's fence renderer sees it. Must be
- * installed last, so this wrapper is outermost and runs first.
- *
- * VitePress reads `[title]` in a fence's info string as its code-group title
- * and strips /\[.*\]/ before highlighting, which would swallow
- * `luaudocs-links=[[...]]` whole (greedy, first-`[`-to-last-`]`). Re-encoded,
- * neither that strip nor the whitespace collapse nor `{range}` can reach it.
+ * Base64url-encodes `luaudocs-links=` before VitePress's fence renderer runs.
+ * Must be installed last so this wrapper is outermost and runs before VitePress
+ * strips `/\[.*\]/` (code-group titles) from the fence info string.
  */
 export function relayLinks(md: MarkdownIt): void {
 	const fence = md.renderer.rules.fence!;
@@ -90,7 +87,7 @@ export function relayLinks(md: MarkdownIt): void {
 	};
 }
 
-/** Restores relayLinks()' payload; must run before signatureLinks(). */
+/** Decodes `relayLinks`'s base64url payload back to `luaudocs-links=`; must run before `signatureLinks()`. */
 export function decodeLinks(): ShikiTransformer {
 	return {
 		name: "luaudocs:decode-links",
@@ -107,11 +104,10 @@ export function decodeLinks(): ShikiTransformer {
 }
 
 /**
- * `base` is the site base, and it has to be applied here: these anchors are
- * minted inside Shiki's hast, never as markdown link tokens, and VitePress
- * prefixes the base only in its `link_open` rule. Left unbased, every clickable
- * type in every signature 404s on a project-pages deploy, and because raw HTML
- * never enters `env.links` the dead-link check does not see it either.
+ * Wraps linked type spans in `<a class="sig-link">` decorations. `base` is the
+ * VitePress site `base` path and must be prefixed here: these `<a>` elements
+ * are created inside Shiki's HAST rather than as `markdown-it` `link_open`
+ * tokens, so VitePress does not prefix `base` on them automatically.
  */
 export function signatureLinks(base = "/"): ShikiTransformer {
 	const prefix = base.replace(/\/$/, "");
@@ -124,8 +120,8 @@ export function signatureLinks(base = "/"): ShikiTransformer {
 				return;
 			}
 			const decorations = (options.decorations ??= []);
-			// Shiki THROWS on overlapping or out-of-range decorations; sanitize
-			// so a bad span costs one link, never the build
+			// Shiki throws on overlapping or out-of-range decorations; skip
+			// invalid spans so a bad offset drops one link rather than failing the build.
 			let cursor = 0;
 			for (const entry of links.sort((a, b) => a[0] - b[0])) {
 				if (!Array.isArray(entry)) {

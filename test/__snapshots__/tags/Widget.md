@@ -271,7 +271,7 @@ Writes the widget to storage.
 ### `describe` <a class="source-link ignore-header" href="https://github.com/example/tagged/blob/main/src/extra.luau#L22-L25" target="_blank" rel="noopener noreferrer" aria-label="View source"></a>
 
 ```luau luaudocs-links=[[24,30,"/api/Widget"]]
-Widget.describe(widget: Widget)
+Widget.describe(widget: Widget): string
 ```
 
 **Parameters**

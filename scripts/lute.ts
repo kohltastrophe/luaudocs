@@ -1,8 +1,7 @@
 /**
- * Runs the pinned Lute with whatever arguments follow, installing it on first
- * use exactly as a build would. This is how the extractor specs and any ad-hoc
- * `lute run` reach the same binary `src/extract.ts` spawns, so a contributor
- * never has a second Lute to keep in sync:
+ * Runs the pinned Lute binary with the given arguments, downloading it on first
+ * use just like `luaudocs build`. Ensures extractor tests and ad-hoc `lute run`
+ * commands use the exact same binary that `src/extract.ts` spawns:
  *
  *   bun run lute -- run extractor/main.luau -- --root <dir> --entry src --pretty
  */

@@ -1,11 +1,7 @@
 /**
- * Anchor round-trip through the REAL VitePress renderer, in stock configuration.
- *
- * The emitter writes no explicit `{#id}`: VitePress mints every heading id, and
- * `mintAnchors` predicts what it will mint. That prediction fails *silently* in
- * production, since VitePress strips `[?#].*$` from a link before its dead-link
- * check. Hence the two sweeps below: every anchor the emitter recorded must
- * exist on its rendered page, and every fragment it wrote must resolve.
+ * Anchor round-trip through the real VitePress markdown renderer.
+ * Every anchor recorded by `mintAnchors` must exist on its rendered page, and
+ * every emitted `#fragment` link must resolve to a minted heading ID.
  */
 import { createMarkdownRenderer } from "vitepress";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -20,36 +16,30 @@ const results = new Map(
 	captures.map((fixture) => [fixture, emitDocsFromJson(readFixture(fixture), testConfig())]),
 );
 
-// vitepress wants a srcDir on disk. Nothing is written to it, but it is removed
-// with the suite rather than left behind in the system temp dir.
 const tempDir = makeTempDirFactory("luaudocs-anchors-");
 
-// no `anchor.slugify` override: the point is to drive the stock configuration
-// a generated site has
 let render: (content: string, path: string) => string;
 beforeAll(async () => {
 	const md = await createMarkdownRenderer(tempDir(), {}, "/");
-	// the one core rule the generated site adds to its renderer
 	md.core.ruler.before("block", "luaudocs_docusaurus", (state) => {
 		state.src = rewriteMarkup(state.src);
 		return true;
 	});
-	render = (content, path) => {
-		// frontmatter is handled outside markdown-it in a real build
-		const body = stripFrontmatter(content);
-		return md.render(body, { path, relativePath: path.slice(1), cleanUrls: true });
-	};
+	render = (content, path) =>
+		md.render(stripFrontmatter(content), {
+			path,
+			relativePath: path.slice(1),
+			cleanUrls: true,
+		});
 });
 
-/** Every heading id the renderer minted, in document order. */
 const mintedIds = (html: string): string[] =>
 	[...html.matchAll(/<h[1-6][^>]*\sid="([^"]*)"/g)].map((match) => match[1]!);
 
 describe.each(captures)("minted anchors: %s", (fixture) => {
 	const result = results.get(fixture)!;
-
-	/** slug -> the ids VitePress actually minted on that page. */
 	let minted: Map<string, Set<string>>;
+
 	beforeAll(() => {
 		minted = new Map(
 			result.pageModels.map((page) => [
@@ -63,48 +53,37 @@ describe.each(captures)("minted anchors: %s", (fixture) => {
 		);
 	});
 
-	it("records only anchors the renderer mints", () => {
-		let checked = 0;
+	it("records only anchors the renderer mints and emits only resolving fragments", () => {
+		let checkedAnchors = 0;
 		for (const page of result.pageModels) {
 			for (const [id, anchor] of Object.entries(page.anchors)) {
-				expect(minted.get(page.slug), page.slug).toBeDefined();
-				expect(minted.get(page.slug)!, `${page.slug}: ${id} -> #${anchor}`).toContain(
+				expect(minted.get(page.slug), `${page.slug}: ${id} -> #${anchor}`).toContain(
 					anchor,
 				);
-				checked += 1;
+				checkedAnchors += 1;
 			}
 		}
-		// the sweep is worthless if the fixture stopped recording anchors: an
-		// empty anchors map on every page is the silent regression itself
-		expect(checked).toBeGreaterThan(0);
-	});
+		expect(checkedAnchors).toBeGreaterThan(0);
 
-	it("emits no fragment that does not resolve", () => {
-		let checked = 0;
+		let checkedLinks = 0;
 		const documents: Array<[string, string]> = [...result.pages];
 		if (result.apiIndex !== undefined) {
 			documents.push(["index.md", result.apiIndex]);
 		}
 		for (const [file, markdown] of documents) {
 			for (const [, slug, fragment] of markdown.matchAll(/\/api\/([\w.-]+)#([\w.-]+)/g)) {
-				const targets = minted.get(slug!);
-				expect(targets, `${file} links to unknown page /api/${slug}`).toBeDefined();
-				expect(targets!, `${file} -> /api/${slug}#${fragment}`).toContain(fragment!);
-				checked += 1;
+				expect(minted.get(slug!), `${file} -> /api/${slug}#${fragment}`).toContain(
+					fragment!,
+				);
+				checkedLinks += 1;
 			}
 		}
-		// the sweep is worthless if the fixture stopped producing cross-page links
-		expect(checked).toBeGreaterThan(0);
+		expect(checkedLinks).toBeGreaterThan(0);
 	});
 });
 
-describe("render-order uniquifying", () => {
-	it("uniquifies a case collision in render order, types first", () => {
-		// Sample has both a `State` re-export prop and a `state()` function, and
-		// both an `Action` type and an `action()` function. Anchors are
-		// case-insensitive, so one of each pair takes the `-1` suffix, and
-		// render order decides which: `## Types` precedes the member lists, and
-		// props precede functions.
+describe("anchor collision and prediction rules", () => {
+	it("uniquifies case collisions in render order (types before props before functions)", () => {
 		const sample = results
 			.get("docmodel-sample.json")!
 			.pageModels.find((page) => page.slug === "Sample")!;
@@ -115,10 +94,8 @@ describe("render-order uniquifying", () => {
 		expect(anchorOf("#reexport.State")).toBe("state");
 		expect(anchorOf("#fn.Sample.state")).toBe("state-1");
 	});
-});
 
-describe("collisions with headings the page mints itself", () => {
-	const miniModel = (doc: string, fnName: string) =>
+	const miniModel = (doc: string, fnName = "Connect") =>
 		modelJson([
 			{
 				id: "src/init.luau",
@@ -146,60 +123,89 @@ describe("collisions with headings the page mints itself", () => {
 			},
 		]);
 
-	const anchorFor = (
-		emitted: ReturnType<typeof emitDocsFromJson>,
-		fnName: string,
-	): string | undefined => emitted.pageModels[0]!.anchors[`src/init.luau#fn.Mini.${fnName}`];
+	const memberId = (html: string): string | undefined =>
+		/<h3 id="([^"]*)"[^>]*><code[^>]*>Connect<\/code>/.exec(html)?.[1];
 
-	it("yields to a heading written in the module's own prose", () => {
-		// the prose `## Connect` renders before the member lists, so it takes
-		// `#connect` and the member is pushed to `#connect-1`
-		const collide = emitDocsFromJson(
-			miniModel("Intro.\n\n## Connect\n\nProse.", "Connect"),
+	it.each([
+		["ATX heading in prose", "## Connect\n\nProse.", "connect-1"],
+		["setext === heading in prose", "Connect\n========\n\nProse.", "connect-1"],
+		["setext --- heading in prose", "Connect\n--------\n\nProse.", "connect-1"],
+		["blockquote ATX heading", "> ## Connect\n>\n> Quoted prose.", "connect-1"],
+		["quoted setext heading", "> Connect\n> ---", "connect-1"],
+		["thematic break", "---\n\nProse.", "connect"],
+		["list item above thematic break", "- Connect\n---\n\nProse.", "connect"],
+		["lazy quoted line over thematic break", "> Connect\n---", "connect"],
+		["heading ending in inline html", "## Connect <br>", "connect-1"],
+		[
+			"heading carrying a component badge",
+			'## Connect <Badge type="tip" text="new" />',
+			"connect-1",
+		],
+		["heading ending in an emoji shortcode", "## Connect :tada:", "connect-1"],
+		[
+			"heading written as a reference link",
+			"## [Connect][c]\n\n[c]: https://example.com",
+			"connect-1",
+		],
+		["heading given the member's explicit id", "## Something {#connect}", "connect-1"],
+		["heading given another explicit id", "## Connect {#other}", "connect"],
+		[
+			"ATX heading after inline html paragraph",
+			"<b>Note</b> something\n## Connect",
+			"connect-1",
+		],
+		["ATX heading after self-closing component", '<Badge text="x" />\n## Connect', "connect-1"],
+		["heading in bullet list item", "- ## Connect", "connect-1"],
+		["heading in ordered list item", "1. ## Connect", "connect-1"],
+		["heading swallowed by inline tag html block", "<b>\n## Connect\n\nx", "connect"],
+		[
+			"heading swallowed by component html block",
+			"<Widget>\n## Connect\n\n</Widget>",
+			"connect",
+		],
+	])("predicts %s", (_case, prose, expected) => {
+		const page = emitDocsFromJson(miniModel(`Intro.\n\n${prose}\n`), testConfig());
+		expect(page.pageModels[0]!.anchors["src/init.luau#fn.Mini.Connect"]).toBe(expected);
+		expect(memberId(render(page.pages.get("Mini.md")!, "/api/Mini.md"))).toBe(expected);
+	});
+
+	it("yields to headings inside a member's doc or deprecation notice", () => {
+		const fn = (name: string, extra: object = {}) => ({
+			id: `src/init.luau#fn.Mini.${name}`,
+			name,
+			kind: "function",
+			visibility: "public",
+			tags: { custom: [] },
+			errors: [],
+			signature: { callee: `Mini.${name}`, segs: ["()"], params: [], returns: [] },
+			source: { file: "src/init.luau", line: 5 },
+			...extra,
+		});
+		const emitted = emitDocsFromJson(
+			modelJson([
+				{
+					id: "src/init.luau",
+					instancePath: ["Mini"],
+					name: "Mini",
+					source: { file: "src/init.luau", line: 1 },
+					members: [
+						fn("alpha", { doc: "Body.\n\n## Details\n\nMore." }),
+						fn("beta", {
+							tags: { custom: [], deprecated: { note: "## Migrate\n\nUse alpha." } },
+						}),
+						fn("details"),
+						fn("migrate"),
+					],
+				},
+			]),
 			testConfig(),
 		);
-		expect(anchorFor(collide, "Connect")).toBe("connect-1");
-		expect(mintedIds(render(collide.pages.get("Mini.md")!, "/api/Mini.md"))).toContain(
-			"connect-1",
+		const anchors = emitted.pageModels[0]!.anchors;
+		const ids = mintedIds(render(emitted.pages.get("Mini.md")!, "/api/Mini.md"));
+		expect(anchors["src/init.luau#fn.Mini.details"]).toBe("details-1");
+		expect(anchors["src/init.luau#fn.Mini.migrate"]).toBe("migrate-1");
+		expect(ids).toEqual(
+			expect.arrayContaining(["details", "details-1", "migrate", "migrate-1"]),
 		);
-	});
-
-	// markdown-it-anchor keys off `heading_open`, not the `#` spelling, so these
-	// mint ids too. Each assertion is two-sided: the member must be pushed to
-	// `-1`, AND the renderer must really have minted that id.
-	it("yields to a setext heading in the module's own prose", () => {
-		for (const underline of ["========", "--------"]) {
-			const collide = emitDocsFromJson(
-				miniModel(`Intro.\n\nConnect\n${underline}\n\nProse.`, "Connect"),
-				testConfig(),
-			);
-			expect(anchorFor(collide, "Connect"), underline).toBe("connect-1");
-			expect(mintedIds(render(collide.pages.get("Mini.md")!, "/api/Mini.md"))).toContain(
-				"connect-1",
-			);
-		}
-	});
-
-	it("yields to a heading nested in a blockquote", () => {
-		const collide = emitDocsFromJson(
-			miniModel("Intro.\n\n> ## Connect\n>\n> Quoted prose.", "Connect"),
-			testConfig(),
-		);
-		expect(anchorFor(collide, "Connect")).toBe("connect-1");
-		expect(mintedIds(render(collide.pages.get("Mini.md")!, "/api/Mini.md"))).toContain(
-			"connect-1",
-		);
-	});
-
-	// the over-prediction side: `---` that is a thematic break or a list marker
-	// mints nothing, so the member must keep the unsuffixed anchor
-	it("does not yield to a thematic break or a list above one", () => {
-		for (const doc of ["Intro.\n\n---\n\nProse.", "Intro.\n\n- Connect\n---\n\nProse."]) {
-			const page = emitDocsFromJson(miniModel(doc, "Connect"), testConfig());
-			expect(anchorFor(page, "Connect"), doc).toBe("connect");
-			expect(mintedIds(render(page.pages.get("Mini.md")!, "/api/Mini.md"))).toContain(
-				"connect",
-			);
-		}
 	});
 });

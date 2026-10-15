@@ -22,7 +22,7 @@ features:
   - title: Signatures in real Luau
     details: Every parameter, field, and return is typed, and every type links to its own entry.
   - title: Search everything
-    details: Full-text search of the whole site; press / anywhere to open it.
+    details: Full-text search across the whole site; press / anywhere to open the search bar.
   - title: Docs your AI can read
     details: llms.txt and llms-full.txt ship with the site, ready to drop into a model's context.
 ---

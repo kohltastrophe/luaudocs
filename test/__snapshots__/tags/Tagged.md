@@ -70,14 +70,14 @@ badge and the optional type both come off that one expression, untagged.
 Tagged.Caps: Limits
 ```
 
-The old spelling of [Tagged.Limits]. One table under two names: the first
+The old spelling of [`Tagged.Limits`](/api/Tagged#limits). One table under two names: the first
 became the section, so this one is typed as a link to it.
 
 <!-- #endregion caps -->
 
 <!-- #region widget -->
 
-### `Widget` <a href="/api/Widget" class="badge-link ignore-header"><Badge type="info" text="Module" /></a> <a class="source-link ignore-header" href="https://github.com/example/tagged/blob/main/src/Widget.luau#L1" target="_blank" rel="noopener noreferrer" aria-label="View source"></a>
+### `Widget` [<Badge type="info" text="Module" />](/api/Widget){.badge-link .ignore-header} <a class="source-link ignore-header" href="https://github.com/example/tagged/blob/main/src/Widget.luau#L1" target="_blank" rel="noopener noreferrer" aria-label="View source"></a>
 
 ```luau luaudocs-links=[[15,21,"/api/Widget"]]
 Tagged.Widget: Widget
@@ -95,8 +95,8 @@ Tagged.Widget: Widget
 
 ### `create` <Badge type="info" text="constructor" /> <a class="source-link ignore-header" href="https://github.com/example/tagged/blob/main/src/init.luau#L18-L20" target="_blank" rel="noopener noreferrer" aria-label="View source"></a>
 
-```luau luaudocs-links=[[29,42,"/api/Widget#widget-1"]]
-Tagged.create(name: string): Widget.Widget
+```luau luaudocs-links=[[29,35,"/api/Widget#widget-1"]]
+Tagged.create(name: string): Widget
 ```
 
 Creates a widget.

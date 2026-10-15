@@ -1,19 +1,20 @@
 /**
- * The generated site around the emitted pages: everything under
- * <docs>/.vitepress/, the docs-dir package.json that anchors the vitepress
- * install, the generated changelog page, a landing page while the user has
- * none, and a docs-dir .gitignore when none exists. Also owns guide-page
- * discovery, which llms.txt shares.
+ * Generates the VitePress site scaffolding around the emitted API pages:
+ * everything under `<docs>/.vitepress/`, the `<docs>/package.json` that anchors
+ * the VitePress install, the generated changelog page, a default landing page
+ * when the user has not written one, and `<docs>/.gitignore` when missing. Also
+ * owns guide-page discovery, which `llms.txt` shares.
  *
- * The config is ONE baked string with luaudocs.toml's values inlined: no
- * runtime merge, no site-meta module. Users customize through luaudocs.toml and
- * the optional custom.css beside their index.md.
+ * `.vitepress/config.mts` is baked as a single string with `luaudocs.toml`
+ * values inlined: no runtime config merge and no separate site-meta module.
+ * Users customize through `luaudocs.toml` and an optional `custom.css` beside
+ * their `index.md`.
  *
- * Only value-dependent output is baked here. Everything with behavior of its
- * own lives under templates/runtime/ and is synced verbatim.
+ * Only config-dependent modules are baked here. Runtime plugins and styles with
+ * standalone behavior live in `templates/runtime/` and are synced verbatim.
  */
 import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
-import { basename, join, relative } from "node:path";
+import { basename, join } from "node:path";
 import pkg from "../package.json";
 import { filesUnder, writeIfChanged, syncDir, SITE_DEPENDENCIES, type BuildContext } from "./build";
 import { repoFileUrl, type LuauDocsConfig, type NavItem } from "./config";
@@ -38,7 +39,6 @@ import {
 	generatedFrontmatter,
 	GENERATED_MARK,
 	isGeneratedFile,
-	toPosix,
 } from "./pages";
 import type { TrailSegment } from "../templates/runtime/markup";
 import { LANGUAGES } from "../templates/runtime/inline-highlight";
@@ -47,47 +47,51 @@ import { LANGUAGES } from "../templates/runtime/inline-highlight";
  * ------------------------------------------------------------- guide discovery
  */
 
-/** A sidebar node: a group carries `items`, a leaf carries `page`. */
+/** A guide sidebar node: a folder group carries `items`, while a leaf carries `page`. */
 export interface GuideItem {
 	text: string;
 	link?: string;
 	items?: GuideItem[];
 	order: number;
-	/** a group's configured initial state, and whether it may toggle at all;
-	 * either left unset takes the default for where the group sits */
+	/** A group's configured initial state and whether it can be toggled; when
+	 * unset, defaults depend on whether the group is a top-level section or nested. */
 	collapsed?: boolean;
 	collapsible?: boolean;
 	page?: DocPage;
-	/** a leaf's source path under the guide dir: the key its trail is baked under */
+	/** A leaf's relative path under `guide/`, used as the key in the baked trail map. */
 	file?: string;
 }
 
-/** One markdown page, as llms.txt lists it. */
+/** One markdown page as indexed by `llms.txt`. */
 export interface DocPage {
 	title: string;
-	/** Site-relative and extensionless: "/guide/getting-started". */
+	/** Site-relative and extensionless, e.g., `"/guide/getting-started"`. */
 	link: string;
-	/** The raw markdown, kept so llms-full.txt never re-reads these files. */
+	/** Absolute source file path on disk (linked by the repo-root `llms.txt`). */
+	file: string;
+	/** Raw markdown source, retained so `llms-full.txt` never re-reads disk. */
 	text: string;
-	/** Frontmatter `description`, else the page's first prose sentence. */
+	/** Frontmatter `description`, or the page's first prose sentence. */
 	description?: string;
 }
 
-/** The site landing page, more often a VitePress hero than a real page. */
+/** The site landing page (`index.md`), which may be a VitePress `layout: home` hero or a prose page. */
 export interface HomePage {
-	/** `hero.tagline`: the one summary a hero page carries. */
+	/** `hero.tagline` when `index.md` uses `layout: home`. */
 	tagline?: string;
-	/** Absent for a hero page: frontmatter cards, with no prose to index. */
+	/** Present only when `index.md` is a prose page rather than a `layout: home` hero. */
 	page?: DocPage;
+	/** `true` when the build generated `index.md` (so a fresh checkout may not have it on disk). */
+	generated: boolean;
 }
 
-/** "getting-started" -> "Getting Started": the no-frontmatter fallback. */
+/** Converts `"getting-started"` to `"Getting Started"` when frontmatter and headings are absent. */
 function humanize(name: string): string {
 	return name.replace(/[-_]+/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
-/** The first `# ` heading outside fenced code, so an opening example's
- * `# install` comment line is not read as the page title. */
+/** Finds the first `# ` heading outside fenced code so a `# install` shell
+ * comment in an opening fence is never mistaken for the page title. */
 function firstHeading(text: string): string | undefined {
 	for (const segment of outsideFences(text)) {
 		const heading = segment.match(/^#\s+(.+)$/m)?.[1]?.trim();
@@ -99,13 +103,13 @@ function firstHeading(text: string): string | undefined {
 }
 
 /**
- * The description takes frontmatter verbatim, since a hand-written summary is
- * already short, and only trims a derived paragraph to its first sentence.
+ * Builds a `DocPage` metadata entry. Frontmatter `description` is used verbatim,
+ * while a fallback summary is trimmed to the first prose sentence.
  */
 function docPage(text: string, file: string, link: string): DocPage {
 	const block = frontmatter(text);
-	// frontmatter comes off first: a `#` YAML comment there (the generated
-	// landing page's marker line) would otherwise read as the first heading
+	// Strip frontmatter before scanning for `# ` headings so YAML comments
+	// (such as the generated-file marker) are not mistaken for an H1.
 	const heading = firstHeading(stripFrontmatter(text));
 	const name = basename(file, ".md");
 	return {
@@ -114,45 +118,41 @@ function docPage(text: string, file: string, link: string): DocPage {
 			heading ??
 			(name === "index" ? "Overview" : humanize(name)),
 		link,
+		file,
 		text,
 		description: field(block, "description") ?? summarize(text),
 	};
 }
 
-/** A docs-dir markdown path as the route it serves at: index.md collapses to
- * its directory, and .md drops. */
+/** Converts a docs-relative markdown path to its served route (`index.md` -> directory, `.md` stripped). */
 function pageRoute(rel: string): string {
 	return rel.replace(/(^|\/)index\.md$/, "$1").replace(/\.md$/, "");
 }
 
-/** Declaring no position sorts last, where ties fall back to the label. */
+/** Pages without an explicit position sort last, breaking ties by title. */
 const UNORDERED = Number.POSITIVE_INFINITY;
 
-/** An index page leads its folder, ahead of any position a sibling declares. */
+/** An `index.md` page leads its folder ahead of any sibling position. */
 const LEADS = Number.NEGATIVE_INFINITY;
 
-/** The sidecar a folder's group settings live in, as docusaurus (and so
- * moonwave) spelled it. */
+/** Docusaurus / Moonwave folder metadata sidecar filenames. */
 export const CATEGORY_FILES = ["_category_.json", "_category_.yml", "_category_.yaml"];
 
-/** The keys read out of one, for the moonwave converter to report the rest. */
+/** Supported keys read from a `_category_` sidecar (any others are reported during Moonwave migration). */
 export const CATEGORY_KEYS = ["label", "position", "collapsed", "collapsible"] as const;
 type CategoryKey = (typeof CATEGORY_KEYS)[number];
 
 /**
- * A sidecar's top-level keys. The YAML spelling is read as the flat map it is,
- * each key through the frontmatter reader, so a nested value (a docusaurus
- * category `link`) is a key with nothing to read. A file that does not parse
- * is a typo in the user's own configuration, so it fails with its name rather
- * than ordering the sidebar by accident.
+ * Parses top-level keys from a `_category_` sidecar file. YAML sidecars are
+ * read as flat key-value maps through the frontmatter reader (so nested objects
+ * like a Docusaurus category `link` yield `undefined`). Malformed JSON throws
+ * with the file path rather than silently misordering the sidebar.
  */
 export function parseCategory(file: string, text: string): Record<string, unknown> {
 	if (!file.endsWith(".json")) {
-		const record: Record<string, unknown> = {};
-		for (const [, key] of text.matchAll(/^([A-Za-z_][\w-]*):/gm)) {
-			record[key!] = field(text, key!);
-		}
-		return record;
+		return Object.fromEntries(
+			[...text.matchAll(/^([A-Za-z_][\w-]*):/gm)].map(([, key]) => [key!, field(text, key!)]),
+		);
 	}
 	let data: unknown;
 	try {
@@ -167,27 +167,26 @@ export function parseCategory(file: string, text: string): Record<string, unknow
 }
 
 /**
- * The position a source declares: any number docusaurus accepts, so a
- * migrated `2.5` still slots between 2 and 3. Anything else sorts as if
- * unset: `Number("high")` is NaN, which would misplace the item among the
- * ones that did declare a position.
+ * Parses a numeric sidebar position (including decimals like `2.5` from
+ * Docusaurus). Non-numeric values return `UNORDERED` instead of `NaN`, which
+ * would break array sorting.
  */
 function declaredOrder(declared: string | undefined): number {
 	return /^-?\d+(\.\d+)?$/.test(declared ?? "") ? Number(declared) : UNORDERED;
 }
 
-/** A YAML boolean as YAML reads it: docusaurus accepted `True` in these files. */
+/** Case-insensitive boolean parser (Docusaurus YAML sidecars accept `True`/`False`). */
 function flag(value: string | undefined): boolean | undefined {
 	const lower = value?.toLowerCase();
 	return lower === "true" ? true : lower === "false" ? false : undefined;
 }
 
-/** One guide page, with the ordering key frontmatter can override. */
+/** Reads a single guide page and its ordering key. */
 function guideEntry(abs: string, rel: string): GuideItem {
 	const text = readFileSync(abs, "utf8");
 	const page = docPage(text, abs, "/guide/" + pageRoute(rel));
-	// an index page is the landing page of the folder it sits in, so it leads
-	// that group; its own position places the folder, not the page
+	// A folder's `index.md` always leads the group; its own `sidebar_position`
+	// positions the folder among sibling folders/pages, not the index within the folder.
 	const order =
 		basename(abs) === "index.md"
 			? LEADS
@@ -196,21 +195,20 @@ function guideEntry(abs: string, rel: string): GuideItem {
 }
 
 /**
- * A subdirectory's group entry, configured by the `_category_` sidecar beside
- * its pages or by the index.md that *is* the folder, the sidecar winning key
- * by key. `label` is the sidecar's alone: an index page's title names that
- * page, which leads the group, rather than naming the group.
+ * Builds a subdirectory's sidebar group, configured by its `_category_` sidecar
+ * or its `index.md` frontmatter (with the sidecar winning key by key). Only the
+ * sidecar can set the group's `label`, because `index.md`'s title names the
+ * overview page inside the group rather than the folder itself.
  */
 function folderEntry(dir: string, name: string, items: GuideItem[]): GuideItem {
 	const file = CATEGORY_FILES.map((base) => join(dir, base)).find((path) => existsSync(path));
 	const sidecar = file === undefined ? {} : parseCategory(file, readFileSync(file, "utf8"));
 	const scalar = (key: CategoryKey): string | undefined => {
 		const value = sidecar[key];
-		// a structured value (a docusaurus category `link`) means nothing
-		// here, and `typeof null` covers the null case with it
+		// Ignore object/null values (such as a Docusaurus category `link` table).
 		return value !== undefined && typeof value !== "object" ? String(value) : undefined;
 	};
-	// the index page's frontmatter, from the walk that already read it
+	// Reuse the `index.md` frontmatter already loaded during the directory walk.
 	const index = items.find((item) => item.file?.endsWith("/index.md"));
 	const own = index?.page === undefined ? "" : frontmatter(index.page.text);
 	const read = (key: CategoryKey, ownKey: string = key): string | undefined =>
@@ -225,17 +223,15 @@ function folderEntry(dir: string, name: string, items: GuideItem[]): GuideItem {
 }
 
 /**
- * What the guide walk and the VitePress build both leave out: a folder or page
- * whose name starts with an underscore, the convention docusaurus (and so
- * moonwave) reads for partials and drafts. The build must skip them too, or
- * an unlisted page would still be a route and a search hit.
+ * Glob patterns excluded from both the guide sidebar walk and VitePress's own
+ * page routing/search indexing: any file or folder starting with `_` (the
+ * Docusaurus/Moonwave convention for partials and drafts).
  */
 const GUIDE_EXCLUDE = ["guide/**/_*.md", "guide/**/_*/**"];
 
 /**
- * Guide pages sorted by frontmatter order then label; subdirectories nest.
- * Each folder sorts its own children, so a position is only ever read against
- * its siblings and a subdirectory numbers from 1 like the pages beside it.
+ * Recursively collects guide pages and folders, sorted at each level by
+ * declared order and then by title.
  */
 function guideItems(dir: string, prefix: string): GuideItem[] {
 	const items: GuideItem[] = [];
@@ -257,13 +253,13 @@ function guideItems(dir: string, prefix: string): GuideItem[] {
 	return items;
 }
 
-/** The guide tree under `docsDir`, in the order the sidebar renders it. */
+/** Returns the guide tree under `docsDir` in sidebar display order. */
 export function collectGuides(docsDir: string): GuideItem[] {
 	const guideDir = join(docsDir, "guide");
 	return existsSync(guideDir) ? guideItems(guideDir, "") : [];
 }
 
-/** The tree's leaves, depth-first: sidebar order is reading order. */
+/** Flattens a guide tree depth-first into reading order. */
 export function flattenGuides(items: GuideItem[]): DocPage[] {
 	return items.flatMap((item) =>
 		item.items ? flattenGuides(item.items) : item.page ? [item.page] : [],
@@ -271,22 +267,22 @@ export function flattenGuides(items: GuideItem[]): DocPage[] {
 }
 
 /**
- * Where a "Guide" navbar or hero entry lands: the tree's first page. The one
- * derivation, shared by the build and `init`'s moonwave conversion.
+ * Returns the route of the first guide page (used by the "Guide" navbar link,
+ * hero button, and Moonwave migration).
  */
 export function firstGuidePage(guides: GuideItem[]): string | undefined {
 	return flattenGuides(guides)[0]?.link;
 }
 
-/** A page outside the guide tree (the generated changelog), or undefined. */
+/** Reads a standalone doc page outside `guide/` (such as `changelog.md`), if present. */
 export function readDocPage(file: string, link: string): DocPage | undefined {
 	return existsSync(file) ? docPage(readFileSync(file, "utf8"), file, link) : undefined;
 }
 
 /**
- * A `layout: home` page is frontmatter cards with no prose body worth indexing,
- * but its tagline is the site summary when luaudocs.toml sets no description.
- * Any other index.md is an ordinary page, listed at the site root.
+ * Reads `<docs>/index.md`. A `layout: home` page provides its `hero.tagline`
+ * (used as the fallback summary in `llms.txt`), whereas a prose `index.md` is
+ * indexed as a full `DocPage` at `/`.
  */
 export function readHomePage(docsDir: string): HomePage | undefined {
 	const file = join(docsDir, "index.md");
@@ -295,11 +291,12 @@ export function readHomePage(docsDir: string): HomePage | undefined {
 	}
 	const text = readFileSync(file, "utf8");
 	const block = frontmatter(text);
+	const generated = isGeneratedFile(text);
 	if (field(block, "layout") === "home") {
-		// `tagline` is unique to the hero; `text` also names every action button
-		return { tagline: field(block, "tagline", "[ \\t]+") };
+		// Match `tagline` at two-space indentation under `hero:`.
+		return { tagline: field(block, "tagline", "[ \\t]+"), generated };
 	}
-	return { page: docPage(text, file, "/") };
+	return { page: docPage(text, file, "/"), generated };
 }
 
 /*
@@ -308,15 +305,15 @@ export function readHomePage(docsDir: string): HomePage | undefined {
 
 const GENERATED_NOTE = "// Generated by luaudocs; regenerated by every build. Do not edit.";
 
-/** A value spliced into the baked config, re-indented to its nesting depth. */
+/** Serializes a value as tab-indented JSON at `depth` for splicing into generated TS. */
 function inlined(value: unknown, depth: number): string {
 	return JSON.stringify(value, null, "\t").replace(/\n/g, `\n${"\t".repeat(depth)}`);
 }
 
 /**
- * The navbar row a site with no [[site.nav]] gets. Exported for the moonwave
- * converter, which must bake it ahead of converted navbar items: they appended
- * to this row in moonwave, while [[site.nav]] replaces it.
+ * Builds the default navbar items when `[[site.nav]]` is not set. Also used by
+ * the Moonwave converter, which prepends these default links before any custom
+ * Moonwave navbar items.
  */
 export function derivedNav(
 	guideLink: string | undefined,
@@ -324,9 +321,8 @@ export function derivedNav(
 	hasChangelog: boolean,
 ): NavItem[] {
 	return [
-		// Guide and API each link one page of a section, so they carry the
-		// pattern that keeps them lit across the rest of it; the changelog is a
-		// single page, and its own link already marks it.
+		// Guide and API link to the first page of a multi-page section, so they
+		// set `activeMatch` to stay highlighted across the whole section.
 		...(guideLink ? [{ text: "Guide", link: guideLink, activeMatch: "^/guide/" }] : []),
 		...(hasApi ? [{ text: "API", link: "/api/", activeMatch: "^/api/" }] : []),
 		...(hasChangelog ? [{ text: "Changelog", link: "/changelog" }] : []),
@@ -334,10 +330,10 @@ export function derivedNav(
 }
 
 /**
- * A group's baked `collapsed` key. VitePress reads a group carrying none as
- * one that never collapses, which is what `collapsible: false` asks for and
- * what a section heading the sidebar (`top`) gets unless it declares either
- * key; a nested group nothing configures is collapsible, and open.
+ * Computes the VitePress `collapsed` property for a guide folder group. In
+ * VitePress, omitting `collapsed` makes a group non-collapsible; top-level
+ * section headings default to non-collapsible unless `collapsible` or `collapsed`
+ * is explicitly set, whereas nested groups default to collapsible and open (`collapsed: false`).
  */
 function collapsedKey(item: GuideItem, top: boolean): { collapsed?: boolean } {
 	const collapsible = item.collapsible ?? (!top || item.collapsed !== undefined);
@@ -345,10 +341,9 @@ function collapsedKey(item: GuideItem, top: boolean): { collapsed?: boolean } {
 }
 
 /**
- * The guide sidebar: only text/link/items reach the site config. The pages
- * sit under one "Guide" section, unless `guide/` holds nothing but folders:
- * then each folder heads a section of its own, since a lone "Guide" heading
- * over a column of groups would say nothing the navbar entry does not.
+ * Converts `GuideItem` nodes into VitePress sidebar entries. Pages sit under a
+ * single top-level `"Guide"` section unless `guide/` contains only folders, in
+ * which case each folder becomes its own top-level section.
  */
 function guideSidebarItems(guides: GuideItem[]): SidebarItem[] {
 	const strip = (items: GuideItem[], top: boolean): SidebarItem[] =>
@@ -370,13 +365,12 @@ function guideSidebarItems(guides: GuideItem[]): SidebarItem[] {
 const HOME: TrailSegment = { text: "Home", link: "/" };
 
 /**
- * What sits above each page, keyed by the docs-relative markdown file VitePress
- * renders it from: the lookup the render-time rule does per page.
+ * Builds the breadcrumb trail above each page, keyed by the docs-relative
+ * markdown path VitePress renders it from.
  *
- * Two trees meet here: the API's comes from the emitter (the access path), a
- * guide's is its folders. Both hang off Home, so only the landing page is left
- * without one. A page never appears in its own trail, which is what drops a
- * folder's segment from the index page that *is* that folder.
+ * Combines guide folder trails and API access-path trails under `Home` (leaving
+ * only the landing page without a trail). A folder's `index.md` drops its own
+ * folder segment so a page never links to itself in its breadcrumb trail.
  */
 export function pageTrails(
 	guides: GuideItem[],
@@ -387,8 +381,7 @@ export function pageTrails(
 	const walk = (items: GuideItem[], above: TrailSegment[]) => {
 		for (const item of items) {
 			if (item.items !== undefined) {
-				// a folder links to its own index.md when it has one, and is
-				// plain text when it does not
+				// Link a folder segment to its `index.md` when present, or leave it as plain text.
 				const index = item.items.find((child) => child.file?.endsWith("/index.md"));
 				walk(item.items, [...above, { text: item.text, link: index?.link }]);
 			} else if (item.file !== undefined) {
@@ -399,8 +392,8 @@ export function pageTrails(
 		}
 	};
 	walk(guides, [HOME]);
-	// the API index is in the emitter's map with an empty trail: it is the API's
-	// own root, so only Home ends up above it
+	// The API index has an empty trail in the emitter's map, so prepending HOME
+	// leaves `[Home]` above `api/index.md`.
 	for (const [file, trail] of apiTrails ?? []) {
 		trails[`${API_DIR}/${file}`] = [HOME, ...trail];
 	}
@@ -410,24 +403,52 @@ export function pageTrails(
 	return trails;
 }
 
-/** The baked trail map the render-time rule reads, one entry per page. */
-function trailsModule(trails: Record<string, TrailSegment[]>): string {
+/**
+ * Filename of the generated module holding the API half of the navigation
+ * (sidebar and breadcrumb trails). Kept separate from the guide navigation so
+ * a build with extraction errors can preserve the last good API navigation on
+ * disk while still rebaking guide navigation changes.
+ */
+const API_NAV = "api-nav.ts";
+
+/** Renders `api-nav.ts` from the last successful extraction. */
+function apiNavModule(
+	apiSidebar: SidebarItem[],
+	apiTrails: Record<string, TrailSegment[]>,
+): string {
 	return [
 		GENERATED_NOTE,
+		'import type { DefaultTheme } from "vitepress";',
 		'import type { PageTrails } from "./markup.ts";',
 		"",
-		`export const pageTrails: PageTrails = ${inlined(trails, 0)};`,
+		`export const apiSidebar: DefaultTheme.SidebarItem[] = ${inlined(apiSidebar, 0)};`,
+		"",
+		`export const apiTrails: PageTrails = ${inlined(apiTrails, 0)};`,
 		"",
 	].join("\n");
 }
 
-/** The baked sidebar data module the config imports both sidebars from. */
-function sidebarModule(apiSidebar: SidebarItem[], guideSidebar: SidebarItem[]): string {
+/** Renders `trails.ts`, merging the guide trails with `apiTrails` from `api-nav.ts`. */
+function trailsModule(guideTrails: Record<string, TrailSegment[]>): string {
+	return [
+		GENERATED_NOTE,
+		'import type { PageTrails } from "./markup.ts";',
+		`import { apiTrails } from "./${API_NAV}";`,
+		"",
+		`const guideTrails: PageTrails = ${inlined(guideTrails, 0)};`,
+		"",
+		"export const pageTrails: PageTrails = { ...guideTrails, ...apiTrails };",
+		"",
+	].join("\n");
+}
+
+/** Renders `sidebar.ts`, exporting `guideSidebar` alongside `apiSidebar` from `api-nav.ts`. */
+function sidebarModule(guideSidebar: SidebarItem[]): string {
 	return [
 		GENERATED_NOTE,
 		'import type { DefaultTheme } from "vitepress";',
 		"",
-		`export const apiSidebar: DefaultTheme.SidebarItem[] = ${inlined(apiSidebar, 0)};`,
+		`export { apiSidebar } from "./${API_NAV}";`,
 		"",
 		`export const guideSidebar: DefaultTheme.SidebarItem[] = ${inlined(guideSidebar, 0)};`,
 		"",
@@ -435,9 +456,9 @@ function sidebarModule(apiSidebar: SidebarItem[], guideSidebar: SidebarItem[]): 
 }
 
 /**
- * `[docs] url`'s path as the site base ("/repo/" for a project-pages deploy),
- * or undefined when the site sits at a domain root. Shared with the README
- * rewrite, which mints site-absolute targets VitePress will not prefix.
+ * Extracts the pathname from `[docs] url` as the VitePress `base` (e.g.,
+ * `"/repo/"` for a GitHub Pages project deploy), or `undefined` when deployed
+ * at a domain root. Also used when rewriting raw HTML links in `README.md`.
  */
 function siteBase(config: LuauDocsConfig): string | undefined {
 	if (!config.docs.url) {
@@ -448,17 +469,15 @@ function siteBase(config: LuauDocsConfig): string | undefined {
 }
 
 /**
- * A site-absolute path with the base prefixed, for the slots nothing else
- * prefixes: head tags, and a README's raw HTML hrefs.
+ * Prefixes a site-absolute path with `base` for places VitePress does not
+ * prefix automatically (`<head>` tags and raw HTML `href` attributes in `README.md`).
  */
 function withBase(base: string | undefined, path: string): string {
 	return `${base ?? "/"}${path.replace(/^\//, "")}`;
 }
 
 /**
- * The whole .vitepress/config.mts, luaudocs.toml's values inlined. Nothing is
- * computed per serve and nothing merges a user config: the baked string IS the
- * config.
+ * Renders `.vitepress/config.mts` with all `luaudocs.toml` values inlined.
  */
 function renderConfigMts(
 	config: LuauDocsConfig,
@@ -470,11 +489,10 @@ function renderConfigMts(
 	const onGitHub = repo !== undefined && repo.url.startsWith("https://github.com/");
 	const docsUrl = config.docs.url;
 
-	// `[docs] url`'s path: a project-pages deploy needs it as the site base
+	// Use the pathname of `[docs] url` as VitePress `base` for subpath deploys.
 	const base = siteBase(config);
-	// public/ assets referenced from head tags must carry the base themselves,
-	// and og:image must be absolute for crawlers, so it resolves against
-	// [docs] url (which config validation stores with no trailing slash)
+	// `<head>` asset links must include `base` explicitly, and `og:image` must
+	// be a full URL for social crawlers when `[docs] url` is set.
 	const absolute = (path: string) =>
 		docsUrl ? new URL(path.replace(/^\//, ""), `${docsUrl}/`).href : withBase(base, path);
 
@@ -496,8 +514,7 @@ function renderConfigMts(
 		head.push(["meta", { property: "og:image", content: absolute(config.site.ogImage) }]);
 		head.push(["meta", { name: "twitter:card", content: "summary_large_image" }]);
 	}
-	// [[site.head]] verbatim, after the derived tags: analytics and site
-	// verification, which the two customization files cannot express
+	// Append `[[site.head]]` entries verbatim after derived `<meta>` tags.
 	for (const entry of config.site.head ?? []) {
 		const attrs = entry.attrs ?? {};
 		head.push(
@@ -505,7 +522,7 @@ function renderConfigMts(
 		);
 	}
 
-	// [[site.nav]] verbatim, or Guide/API/Changelog derived from what the site has
+	// Use `[[site.nav]]` verbatim when set, or derive Guide/API/Changelog from the project.
 	const nav: NavItem[] = config.site.nav ?? derivedNav(guideLink, hasApi, changelog);
 
 	const lines: string[] = [
@@ -521,36 +538,35 @@ function renderConfigMts(
 		`\thead: ${inlined(head, 1)},`,
 		"\tmarkdown: {",
 		'\t\tdefaultHighlightLang: "luau",',
-		"\t\t// pre-loaded for the synchronous inline highlighter, off the list that",
-		"\t\t// also gates which `{lang}` inline annotations are honored",
+		"\t\t// Pre-loaded for the synchronous inline highlighter, from the list that",
+		"\t\t// also gates which `{lang}` inline annotations are honored.",
 		`\t\tlanguages: [${LANGUAGES.map((lang) => JSON.stringify(lang)).join(", ")}],`,
-		// the base is passed in: a signature link is raw HTML in Shiki's hast,
-		// the one link slot VitePress does not prefix
+		// Pass `base` explicitly: signature links are injected as raw HTML in Shiki's
+		// HAST, which VitePress does not prefix with `base`.
 		`\t\tcodeTransformers: [decodeLinks(), signatureLinks(${JSON.stringify(base ?? "/")})],`,
 		"\t\tshikiSetup(shiki) {",
 		"\t\t\thighlighter = shiki;",
 		"\t\t},",
 		"\t\tconfig(md) {",
-		"\t\t\t// the markup rewrites and the page trail, over the raw page source",
-		"\t\t\t// before parsing, so `<Frame>`, `<Tabs>` and `:::note` work in guide",
-		"\t\t\t// pages and doc comments alike; fenced examples showing the syntax",
-		"\t\t\t// are left alone",
+		"\t\t\t// Run markup rewrites (`<Frame>`, `<Tabs>`, `:::note`) and prepend",
+		"\t\t\t// page trails on the raw markdown source before block parsing;",
+		"\t\t\t// fenced code blocks showing that syntax are left untouched.",
 		"\t\t\tinstallMarkupRule(md, pageTrails);",
 		"\t\t\tinlineHighlightPlugin(md, () => highlighter);",
-		"\t\t\t// inline whitespace Vue's compiler would otherwise drop",
+		"\t\t\t// Preserve inline whitespace that Vue's template compiler would otherwise drop.",
 		"\t\t\twhitespacePlugin(md);",
-		"\t\t\t// tab and title-bar icons, keyed off the `data-title` every tab",
-		"\t\t\t// strip carries; installed before the relay so a signature fence's",
-		"\t\t\t// link payload is already encoded, not read as a `[title]`",
+		"\t\t\t// Tab and title-bar icons, keyed off `data-title`; installed before",
+		"\t\t\t// `relayLinks` so `luaudocs-links=[...]` is already base64-encoded",
+		"\t\t\t// when `groupIconMdPlugin` scans fence info strings for `[title]`.",
 		"\t\t\tmd.use(groupIconMdPlugin);",
-		"\t\t\t// installed last, so the links relay is the outermost fence renderer",
+		"\t\t\t// Installed last so `relayLinks` wraps the outermost fence renderer.",
 		"\t\t\trelayLinks(md);",
 		"\t\t},",
 		"\t},",
 		"\tthemeConfig: {",
 		"\t\toutline: { level: [2, 3] },",
 		'\t\tsearch: { provider: "local" },',
-		// `false` is a value here (logo-only navbar), so the test is presence
+		// `false` is a valid value here (hides the navbar title next to a logo), so test `!== undefined`.
 		...(config.site.siteTitle !== undefined
 			? [`\t\tsiteTitle: ${JSON.stringify(config.site.siteTitle)},`]
 			: []),
@@ -562,7 +578,7 @@ function renderConfigMts(
 			? [
 					"\t\teditLink: {",
 					`\t\t\tpattern: ${JSON.stringify(
-						`${repo.url}/edit/${repo.branch}/${toPosix(config.docs.dir)}/:path`,
+						`${repo.url}/edit/${repo.branch}/${config.docs.dir}/:path`,
 					)},`,
 					'\t\t\ttext: "Edit this page on GitHub",',
 					"\t\t},",
@@ -605,13 +621,13 @@ function renderConfigMts(
 	].join("\n");
 }
 
-/** The theme entry: the default theme plus the styles the pages depend on. */
+/** Renders `.vitepress/theme/index.ts`, wiring in default styles, tab icons, and optional `custom.css`. */
 function renderThemeEntry(hasCustomCss: boolean): string {
 	return [
 		GENERATED_NOTE,
 		'import DefaultTheme from "vitepress/theme";',
-		// the icon rules the group-icons vite plugin mints for the titles this
-		// site actually uses; without this import the tab strips render bare
+		// Virtual stylesheet emitted by `vitepress-plugin-group-icons` for the
+		// tab and fence titles used on this site.
 		'import "virtual:group-icons.css";',
 		'import "../generated/luaudocs.css";',
 		...(hasCustomCss ? ['import "../../custom.css";'] : []),
@@ -621,7 +637,7 @@ function renderThemeEntry(hasCustomCss: boolean): string {
 	].join("\n");
 }
 
-/** Title -> package-name-safe slug for the generated docs package. */
+/** Converts the project title into a package-name-safe slug for `<docs>/package.json`. */
 function projectSlug(title: string): string {
 	return (
 		title
@@ -632,11 +648,10 @@ function projectSlug(title: string): string {
 }
 
 /**
- * Sits at the docs root rather than inside .vitepress/: compiled markdown
- * pages import vue, and bare imports resolve only *upward*. Ranges come from
- * the tool's own devDependencies, where vitepress is pinned exactly (a caret
- * would pull the next alpha into every fresh install). Shiki appears nowhere:
- * the runtime modules import only its types.
+ * Generates `<docs>/package.json` at the docs root (rather than inside
+ * `.vitepress/`) because compiled markdown pages import `vue` and bare module
+ * imports resolve only *upward*. Dependency versions come from LuauDocs's own
+ * `package.json`, where `vitepress` is pinned to an exact version.
  */
 function docsPackageJson(title: string): string {
 	return `${JSON.stringify(
@@ -659,14 +674,9 @@ function docsPackageJson(title: string): string {
  */
 
 /**
- * The directory listing is the manifest (through the same walk the packaged
- * template trees use, so it is sorted and reaches subdirectories), and a module
- * added there ships without a second list to update. Read once: the dev watcher
- * re-syncs the runtime on every rebuild.
- *
- * Bytes, not text: the directory holds a font as well as source, and a utf8
- * round-trip would corrupt it. Text survives one, so there is no extension
- * list to keep in step with the directory.
+ * Reads and caches all files under `templates/runtime/` as raw `Buffer`s so
+ * binary assets (`FiraCode-VF.woff2`) and source files alike copy byte-for-byte
+ * without maintaining a separate manifest or file-extension list.
  */
 let templateCache: Map<string, Buffer> | undefined;
 function runtimeTemplates(): Map<string, Buffer> {
@@ -681,23 +691,21 @@ const MISSING_README_WARNING =
 	"warning: [docs] includeReadme is enabled but README.md was not found";
 
 /**
- * The build's README copy, under .vitepress/. Three sites read this path: the
- * sync writes it, the landing page @includes it, and the warning below looks
- * for that include in a user-owned index.md.
+ * Path (under `.vitepress/`) of the build's rewritten `README.md` copy,
+ * referenced by the sync step, the generated landing page's `@include`, and the
+ * warning when a user-owned `index.md` still includes it after `includeReadme` is turned off.
  */
 const README_COPY = "generated/readme.md";
 
-/** moonwave's README hide markers, honored by `[docs] includeReadme`. */
+/** Moonwave's README hide markers, honored when `[docs] includeReadme` is enabled. */
 const HIDE_BEFORE = "<!--moonwave-hide-before-this-line-->";
 const HIDE_AFTER = "<!--moonwave-hide-after-this-line-->";
 
 /**
- * A target a forge resolves against the repository root, split into its
- * normalized path and untouched `#`/`?` suffix so a caller can respell one and
- * keep the other. Anything that resolves without help is undefined: scheme'd
- * URLs, protocol-relative and site-absolute paths, bare anchors and queries. A
- * path climbing above the root is deliberately NOT one of them, or it would
- * ship unrewritten and unreported.
+ * Splits a repository-relative link target into its normalized path and
+ * untouched `#`/`?` suffix. Returns `undefined` for URLs with a scheme,
+ * site-absolute paths, and bare `#`/`?` references. Paths that climb above the
+ * repository root (`..`) still return a match so the caller can warn about them.
  */
 function repoRelativeTarget(target: string): { path: string; suffix: string } | undefined {
 	if (/^(?:[a-z][a-z0-9+.-]*:|\/|[#?])/i.test(target)) {
@@ -710,10 +718,10 @@ function repoRelativeTarget(target: string): { path: string; suffix: string } | 
 }
 
 /**
- * README.md trimmed to the markers, for the landing page's @include, with its
- * link targets respelled for the site. `unresolved` lists the targets nothing
- * could be pointed at, for the caller to warn about: left as written they fail
- * VitePress's dead-link check, which names no cause.
+ * Reads `README.md`, trims it to any Moonwave hide markers, and rewrites
+ * repository-relative links and image targets so they resolve on the docs site.
+ * Any relative targets that neither the docs site nor `[repo]` can serve are
+ * returned in `unresolved` so the caller can emit a warning.
  */
 function readmeInclude(context: BuildContext): { text: string; unresolved: string[] } | undefined {
 	const readmePath = join(context.root, "README.md");
@@ -731,29 +739,24 @@ function readmeInclude(context: BuildContext): { text: string; unresolved: strin
 	}
 	const trimmed = `${content.trim()}\n`;
 	const repo = context.config.repo;
-	// `[docs] dir` as the prefix a repository-relative target matches against;
-	// "" when the docs dir IS the root, so every such target sits inside it
-	const dir = toPosix(relative(context.root, context.docsDir));
-	const docsPrefix = dir === "" ? "" : `${dir}/`;
-	// a raw HTML href is the one slot nothing else bases: VitePress bases a
-	// markdown link itself, and Vite resolves an image or `src` as an asset
-	// import, which a target already carrying the base fails
+	// `[docs] dir` with a trailing slash for matching repository-relative paths.
+	const docsPrefix = `${context.config.docs.dir}/`;
+	// Raw HTML `href` attributes are the only slot VitePress does not prefix
+	// with `base` (markdown links are prefixed by VitePress, and images/`src`
+	// attributes are resolved by Vite as asset imports).
 	const base = siteBase(context.config);
 	const rooted = (path: string, slot: TargetSlot) =>
 		slot === "href" ? withBase(base, path) : path;
 	const unresolved = new Set<string>();
-	// each target respells to whatever serves the same content on the site: a
-	// .moonwave/static/ asset from the public/ copy, a docs-dir file from its
-	// own page or asset URL, any other repository file straight from [repo]
+	// Rewrite each repository-relative target to the matching site route,
+	// `public/` asset, or `[repo]` GitHub/GitLab URL.
 	const convert = (target: string, slot: TargetSlot): string => {
 		const rel = repoRelativeTarget(target);
 		if (rel === undefined) {
 			return target;
 		}
-		// the conversion copies .moonwave/static/ into public/, so a target
-		// reaching into it IS a docs-dir public/ asset and routes as one below
-		// -- but only where that copy actually happened, since plain `init` on
-		// a moonwave repo leaves public/ without it
+		// `luaudocs init` copies `.moonwave/static/` into `<docs>/public/`, so
+		// rewrite `.moonwave/static/...` paths to `public/...` when that file exists.
 		const fromStatic = moonwaveStaticTarget(rel.path);
 		const path =
 			fromStatic !== undefined &&
@@ -768,10 +771,9 @@ function readmeInclude(context: BuildContext): { text: string; unresolved: strin
 			if (below.endsWith(".md")) {
 				return rooted(`/${pageRoute(below)}${rel.suffix}`, slot);
 			}
-			// anything else in the docs dir is not served; fall through to [repo]
+			// Non-markdown files outside `public/` are not served by the docs site; fall through to `[repo]`.
 		}
-		// `..` climbs out of what either side serves; a forge's blob page is
-		// HTML, not the bytes an inline slot needs
+		// Paths without `..` segments resolve against `[repo]` (using raw URLs for images and `src` attributes).
 		if (repo !== undefined && !rel.path.split("/").includes("..")) {
 			const inline = slot === "image" || slot === "src";
 			return `${repoFileUrl(repo, rel.path, inline)}${rel.suffix}`;
@@ -779,10 +781,10 @@ function readmeInclude(context: BuildContext): { text: string; unresolved: strin
 		unresolved.add(target);
 		return target;
 	};
-	// whole-document: the mapping below hands rewriteTargets one stretch of
-	// prose at a time, and a definition sits nowhere near its uses
+	// Collect reference-style image labels across the whole README before
+	// rewriting individual prose segments.
 	const imageLabels = imageReferenceLabels(trimmed);
-	// code that shows such a path is a mention, and stays verbatim
+	// Leave fenced code blocks and inline code spans untouched.
 	const text = mapOutsideFences(trimmed, (segment) =>
 		mapOutsideCodeSpans(segment, (prose) => rewriteTargets(prose, convert, imageLabels)),
 	);
@@ -798,8 +800,7 @@ const INDEX_MARKER = [
 	"# delete this comment) to take over the landing page.",
 ];
 
-/** The hero's action buttons: Get Started onto the first guide page, and the
- * API reference, which takes the accent theme when it stands alone. */
+/** Builds the hero action buttons (`Get Started` for the first guide page, plus `API Reference`). */
 export function heroActions(
 	guideLink: string | undefined,
 	hasApi: boolean,
@@ -813,28 +814,25 @@ export function heroActions(
 }
 
 /**
- * One VitePress home-layout page, shared by the generated landing below and
- * the moonwave homepage conversion, so the two heroes cannot drift.
+ * Renders a VitePress `layout: home` landing page, shared by the generated
+ * fallback landing page and Moonwave homepage conversion.
  */
 export function homeLayoutPage(options: {
-	/** Frontmatter comment lines (the generated marker); without them the page
-	 * is user-owned from the start. */
+	/** Frontmatter comment lines (the generated marker); omit for user-owned pages. */
 	marker?: string[];
 	title: string;
 	tagline?: string;
 	image?: string;
 	actions: Array<{ theme: string; text: string; link: string }>;
 	features?: Array<{ title: string; details?: string; iconSrc?: string }>;
-	/** Appends the README through the build's generated copy, which
-	 * `[docs] includeReadme` keeps fresh. */
+	/** Appends `<!--@include: ./.vitepress/generated/readme.md-->` below the frontmatter. */
 	includeReadme?: boolean;
 }): string {
 	const lines = [
 		"---",
 		...(options.marker ?? []),
-		// a marked page is rewritten by every build, so VitePress's edit-link and
-		// last-updated affordances would send readers to a file their edits
-		// cannot survive in. A page with no marker is the user's: it keeps both.
+		// Generated landing pages are overwritten on every build, so suppress
+		// "Edit this page" and "Last updated" on marked files.
 		...(options.marker !== undefined ? ["editLink: false", "lastUpdated: false"] : []),
 		"layout: home",
 		"",
@@ -869,11 +867,9 @@ export function homeLayoutPage(options: {
 }
 
 /**
- * The landing page the build supplies while the user has none: README.md
- * (hide markers honored) when the project has one, a hero derived the same
- * way the navbar is otherwise. Content depends only on the config, the
- * guides, and the README, never on the model, so error builds rewrite it
- * like any other.
+ * Renders the default landing page when the user has not supplied their own
+ * `index.md`: uses `README.md` (with Moonwave hide markers applied) when
+ * present, or falls back to a `layout: home` hero.
  */
 function generatedIndex(
 	context: BuildContext,
@@ -902,11 +898,9 @@ function generatedIndex(
 }
 
 /**
- * A docs dir with no .gitignore gets one listing what the build regenerates,
- * so a config-less project's first local run cannot land generated trees in
- * git history. Created only when missing: once it exists the file is the
- * user's, and `init` swaps a still-marked copy for the editable template. It
- * ignores itself too, so a wholly generated docs dir leaves git untouched.
+ * Creates `<docs>/.gitignore` when none exists so a zero-config build does not
+ * leave generated files untracked in `git status`. Never overwrites an existing
+ * `.gitignore` (except when `luaudocs init` upgrades a still-marked copy).
  */
 function syncGitignore(docsDir: string, suppliesIndex: boolean): void {
 	const path = join(docsDir, ".gitignore");
@@ -939,14 +933,26 @@ const MISSING_CHANGELOG_WARNING =
 	"warning: [docs] changelog is enabled but CHANGELOG.md was not found";
 
 /**
- * How a previous build's copy is recognized when the feature turns off, so a
- * hand-written changelog.md is never deleted.
+ * Frontmatter header for the generated `changelog.md`, carrying `GENERATED_MARK`
+ * so `isGeneratedFile` can distinguish it from a hand-written `changelog.md`.
  */
-const CHANGELOG_HEADER = generatedFrontmatter("Changelog");
+const CHANGELOG_HEADER = generatedFrontmatter("Changelog").replace(
+	/^---\n/,
+	`---\n${GENERATED_MARK}; copied from CHANGELOG.md by every build.\n`,
+);
+
+/** Legacy header from builds prior to `GENERATED_MARK`, still recognized as generated. */
+const UNMARKED_CHANGELOG_HEADER = generatedFrontmatter("Changelog");
+
+function isGeneratedChangelog(text: string): boolean {
+	return (
+		isGeneratedFile(text) || text.replace(/\r\n/g, "\n").startsWith(UNMARKED_CHANGELOG_HEADER)
+	);
+}
 
 /**
- * `[docs] changelog`, defaulting to on when CHANGELOG.md exists. One predicate
- * for the page sync and the nav entry both.
+ * Checks whether the changelog page is enabled (`[docs] changelog` defaults to
+ * `true` when `CHANGELOG.md` exists at the project root).
  */
 function changelogEnabled(context: BuildContext): { enabled: boolean; hasSource: boolean } {
 	const hasSource = existsSync(join(context.root, "CHANGELOG.md"));
@@ -962,17 +968,17 @@ function syncChangelog(context: BuildContext, enabled: boolean, hasSource: boole
 		);
 		return [];
 	}
-	// disabled, or the source is gone: remove only a copy this tool wrote
-	if (existsSync(target) && readFileSync(target, "utf8").startsWith(CHANGELOG_HEADER)) {
+	// When disabled or `CHANGELOG.md` is removed, delete `changelog.md` only if LuauDocs generated it.
+	if (existsSync(target) && isGeneratedChangelog(readFileSync(target, "utf8"))) {
 		rmSync(target);
 	}
 	return context.config.docs.changelog === true && !hasSource ? [MISSING_CHANGELOG_WARNING] : [];
 }
 
 /**
- * Files inside .vitepress/ that belong to VitePress itself, exempt from the
- * tool-owned sweep: its build output (dist/), its dev cache (cache/), and the
- * transient bundled-config files vite writes while loading config.mts.
+ * Files inside `.vitepress/` owned by VitePress itself and preserved across
+ * directory syncs: build output (`dist/`), dev cache (`cache/`), and Vite's
+ * temporary bundled config files (`.timestamp-*`).
  */
 function isVitepressOwn(rel: string): boolean {
 	return (
@@ -987,20 +993,19 @@ function isVitepressOwn(rel: string): boolean {
 export interface SiteSyncOptions {
 	guides: GuideItem[];
 	/**
-	 * The emitted API sidebar. `undefined` keeps the baked module as it is
-	 * (error builds; init before the first build), falling back to an empty
-	 * one so the config always resolves.
+	 * The emitted API sidebar. Pass `undefined` on error builds or during `init`
+	 * to preserve any existing `api-nav.ts` on disk (falling back to an empty list).
 	 */
 	apiSidebar: SidebarItem[] | undefined;
-	/** The emitted API trails, arriving with `apiSidebar` and kept the same way. */
+	/** The emitted API trails, paired with `apiSidebar`. */
 	apiTrails?: Map<string, TrailSegment[]>;
-	/** Error builds delete nothing and skip the changelog rewrite. */
+	/** When `true`, preserves existing generated files and skips the changelog sync. */
 	hasErrors?: boolean;
 }
 
 /**
- * Everything the site needs around the emitted pages, in one call. Returns
- * warnings for the caller to report rather than printing them.
+ * Syncs all generated site scaffolding around the emitted API pages and returns
+ * any configuration or README link warnings.
  */
 export function syncSite(context: BuildContext, options: SiteSyncOptions): string[] {
 	const { config, docsDir } = context;
@@ -1008,22 +1013,18 @@ export function syncSite(context: BuildContext, options: SiteSyncOptions): strin
 	const guideSidebar = guideSidebarItems(options.guides);
 	const guideLink = firstGuidePage(options.guides);
 	const changelog = changelogEnabled(context);
-	// the API nav entry and hero button follow the emitted pages, not [source]
-	// entries, which can be non-empty while nothing produced a page. A build
-	// without a fresh emit (errors; init) trusts what is on disk.
+	// Include the API navbar link and hero button only when API pages exist.
+	// On error builds or `init` (`apiSidebar === undefined`), check `api/` on disk.
 	const hasApi =
 		options.apiSidebar !== undefined
 			? options.apiSidebar.length > 0
 			: existsSync(context.apiDir);
-	// the landing page, supplied only while the user has none: theirs the
-	// moment the marker line is gone. Read before the .vitepress sync so the
-	// readme-copy decision below can see what a user-owned page still includes.
+	// Supply `index.md` only while the user has not created or unmarked their own.
 	const indexPath = join(docsDir, "index.md");
 	const existingIndex = existsSync(indexPath) ? readFileSync(indexPath, "utf8") : undefined;
 	const suppliesIndex = existingIndex === undefined || isGeneratedFile(existingIndex);
-	// read once for the includeReadme copy and the landing page both, and only
-	// when one of those two renders it: a project using neither has no links to
-	// fix and nothing to warn about
+	// Read `README.md` at most once, and only when `includeReadme` or the
+	// generated landing page needs it.
 	const readme = config.docs.includeReadme || suppliesIndex ? readmeInclude(context) : undefined;
 
 	const files = new Map<string, string | Uint8Array>();
@@ -1032,36 +1033,30 @@ export function syncSite(context: BuildContext, options: SiteSyncOptions): strin
 	for (const [name, content] of runtimeTemplates()) {
 		files.set(`generated/${name}`, content);
 	}
-	// an error build keeps the previous navigation wholesale: the pages stay on
-	// disk, and navigation shrinking to the broken model would orphan them
-	const navData = (name: string, bake: () => string): string => {
-		if (options.apiSidebar !== undefined) {
-			return bake();
-		}
-		const previous = join(docsDir, ".vitepress", "generated", name);
-		return existsSync(previous) ? readFileSync(previous, "utf8") : bake();
-	};
+	// On error builds, keep the previous `api-nav.ts` so existing API pages on
+	// disk stay listed in the sidebar; always rebake the guide navigation.
+	const previousApiNav = join(docsDir, ".vitepress", "generated", API_NAV);
 	files.set(
-		"generated/sidebar.ts",
-		navData("sidebar.ts", () => sidebarModule(options.apiSidebar ?? [], guideSidebar)),
+		`generated/${API_NAV}`,
+		options.apiSidebar === undefined && existsSync(previousApiNav)
+			? readFileSync(previousApiNav, "utf8")
+			: apiNavModule(options.apiSidebar ?? [], pageTrails([], options.apiTrails, false)),
 	);
+	files.set("generated/sidebar.ts", sidebarModule(guideSidebar));
 	files.set(
 		"generated/trails.ts",
-		navData("trails.ts", () =>
-			trailsModule(pageTrails(options.guides, options.apiTrails, changelog.enabled)),
-		),
+		trailsModule(pageTrails(options.guides, undefined, changelog.enabled)),
 	);
 	if (config.docs.includeReadme) {
-		// the landing page pulls the README in through a VitePress @include of
-		// this generated copy, so it refreshes every build
+		// Write `.vitepress/generated/readme.md` for `index.md` to `@include`.
 		if (readme !== undefined) {
 			files.set(README_COPY, readme.text);
 		} else {
 			warnings.push(MISSING_README_WARNING);
 		}
 	} else if (!suppliesIndex && existingIndex!.includes(README_COPY)) {
-		// the sweep is about to delete a file the user's landing page still
-		// @includes, and VitePress's "Include file not found" names no cause
+		// Warn before `syncDir` removes `generated/readme.md` if a user-owned
+		// `index.md` still `@include`s it.
 		warnings.push(
 			`warning: index.md includes .vitepress/${README_COPY}, which only ` +
 				"[docs] includeReadme = true keeps; re-enable it or drop the include",
@@ -1070,8 +1065,6 @@ export function syncSite(context: BuildContext, options: SiteSyncOptions): strin
 	if (readme !== undefined && readme.unresolved.length > 0) {
 		warnings.push(
 			`warning: README.md links ${readme.unresolved.join(", ")}, which the generated ` +
-				// with no [repo] the fix is to set one; with one already set the
-				// target is outside the repository, and naming [repo] would misdirect
 				(config.repo === undefined
 					? "site does not serve; set [repo] to point them at the repository"
 					: "site does not serve and [repo] cannot reach"),

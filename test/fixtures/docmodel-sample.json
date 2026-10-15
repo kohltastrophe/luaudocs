@@ -150,7 +150,7 @@
 							"<T>"
 						]
 					},
-					"source": { "endLine": 67, "file": "src/init.luau", "line": 58 },
+					"source": { "endLine": 66, "file": "src/init.luau", "line": 58 },
 					"tags": { "custom": [] },
 					"visibility": "public"
 				},
@@ -194,7 +194,7 @@
 							">): T"
 						]
 					},
-					"source": { "endLine": 75, "file": "src/init.luau", "line": 70 },
+					"source": { "endLine": 74, "file": "src/init.luau", "line": 69 },
 					"tags": { "custom": [] },
 					"visibility": "public"
 				},
@@ -237,7 +237,7 @@
 							{ "text": "string" }
 						]
 					},
-					"source": { "endLine": 84, "file": "src/init.luau", "line": 78 },
+					"source": { "endLine": 83, "file": "src/init.luau", "line": 77 },
 					"tags": { "custom": [] },
 					"visibility": "public"
 				}

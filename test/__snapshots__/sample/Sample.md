@@ -50,7 +50,7 @@ A symbol marking cleanup entries passed to [`Sample.edit`](/api/Sample#edit)
 
 <!-- #region color -->
 
-### `Color` <a href="/api/Color" class="badge-link ignore-header"><Badge type="info" text="Module" /></a> <a class="source-link ignore-header" href="https://github.com/example/Sample/blob/main/src/Color.luau#L1" target="_blank" rel="noopener noreferrer" aria-label="View source"></a>
+### `Color` [<Badge type="info" text="Module" />](/api/Color){.badge-link .ignore-header} <a class="source-link ignore-header" href="https://github.com/example/Sample/blob/main/src/Color.luau#L1" target="_blank" rel="noopener noreferrer" aria-label="View source"></a>
 
 ```luau luaudocs-links=[[14,19,"/api/Color"]]
 Sample.Color: Color
@@ -60,7 +60,7 @@ Sample.Color: Color
 
 <!-- #region interpolate -->
 
-### `Interpolate` <a href="/api/Interpolate" class="badge-link ignore-header"><Badge type="info" text="Module" /></a> <a class="source-link ignore-header" href="https://github.com/example/Sample/blob/main/src/Interpolate.luau#L1" target="_blank" rel="noopener noreferrer" aria-label="View source"></a>
+### `Interpolate` [<Badge type="info" text="Module" />](/api/Interpolate){.badge-link .ignore-header} <a class="source-link ignore-header" href="https://github.com/example/Sample/blob/main/src/Interpolate.luau#L1" target="_blank" rel="noopener noreferrer" aria-label="View source"></a>
 
 ```luau luaudocs-links=[[20,31,"/api/Interpolate"]]
 Sample.Interpolate: Interpolate
@@ -70,7 +70,7 @@ Sample.Interpolate: Interpolate
 
 <!-- #region query -->
 
-### `Query` <a href="/api/Query" class="badge-link ignore-header"><Badge type="info" text="Module" /></a> <a class="source-link ignore-header" href="https://github.com/example/Sample/blob/main/src/Query.luau#L1" target="_blank" rel="noopener noreferrer" aria-label="View source"></a>
+### `Query` [<Badge type="info" text="Module" />](/api/Query){.badge-link .ignore-header} <a class="source-link ignore-header" href="https://github.com/example/Sample/blob/main/src/Query.luau#L1" target="_blank" rel="noopener noreferrer" aria-label="View source"></a>
 
 ```luau luaudocs-links=[[14,19,"/api/Query"]]
 Sample.Query: Query
@@ -82,7 +82,7 @@ Sample.Query: Query
 
 <!-- #region state -->
 
-### `State` <a href="/api/State" class="badge-link ignore-header"><Badge type="info" text="Module" /></a> <a class="source-link ignore-header" href="https://github.com/example/Sample/blob/main/src/State.luau#L1" target="_blank" rel="noopener noreferrer" aria-label="View source"></a>
+### `State` [<Badge type="info" text="Module" />](/api/State){.badge-link .ignore-header} <a class="source-link ignore-header" href="https://github.com/example/Sample/blob/main/src/State.luau#L1" target="_blank" rel="noopener noreferrer" aria-label="View source"></a>
 
 ```luau luaudocs-links=[[14,19,"/api/State"]]
 Sample.State: State
@@ -92,7 +92,7 @@ Sample.State: State
 
 <!-- #region type -->
 
-### `Type` <a href="/api/Type" class="badge-link ignore-header"><Badge type="info" text="Module" /></a> <a class="source-link ignore-header" href="https://github.com/example/Sample/blob/main/src/Type.luau#L1" target="_blank" rel="noopener noreferrer" aria-label="View source"></a>
+### `Type` [<Badge type="info" text="Module" />](/api/Type){.badge-link .ignore-header} <a class="source-link ignore-header" href="https://github.com/example/Sample/blob/main/src/Type.luau#L1" target="_blank" rel="noopener noreferrer" aria-label="View source"></a>
 
 ```luau luaudocs-links=[[13,17,"/api/Type"]]
 Sample.Type: Type
@@ -102,7 +102,7 @@ Sample.Type: Type
 
 <!-- #region linear -->
 
-### `Linear` <a href="/api/Color#linear" class="badge-link ignore-header"><Badge type="info" text="from Color" /></a> <a class="source-link ignore-header" href="https://github.com/example/Sample/blob/main/src/Color.luau#L27" target="_blank" rel="noopener noreferrer" aria-label="View source"></a>
+### `Linear` [<Badge type="info" text="from Color" />](/api/Color#linear){.badge-link .ignore-header} <a class="source-link ignore-header" href="https://github.com/example/Sample/blob/main/src/Color.luau#L27" target="_blank" rel="noopener noreferrer" aria-label="View source"></a>
 
 ```luau luaudocs-links=[[15,21,"/api/Color#linear"]]
 Sample.Linear: Linear
@@ -156,7 +156,7 @@ Creates a computed state that tracks its dependencies automatically
 
 <!-- #region state-1 -->
 
-### `state` <a class="source-link ignore-header" href="https://github.com/example/Sample/blob/main/src/init.luau#L58-L67" target="_blank" rel="noopener noreferrer" aria-label="View source"></a>
+### `state` <a class="source-link ignore-header" href="https://github.com/example/Sample/blob/main/src/init.luau#L58-L66" target="_blank" rel="noopener noreferrer" aria-label="View source"></a>
 
 ```luau luaudocs-links=[[35,46,"/api/State#state-1"]]
 Sample.state<T>(initialValue: T?): State.State<T>
@@ -168,7 +168,7 @@ Creates a new state holding an initial value
 
 <!-- #region edit -->
 
-### `edit` <a class="source-link ignore-header" href="https://github.com/example/Sample/blob/main/src/init.luau#L70-L75" target="_blank" rel="noopener noreferrer" aria-label="View source"></a>
+### `edit` <a class="source-link ignore-header" href="https://github.com/example/Sample/blob/main/src/init.luau#L69-L74" target="_blank" rel="noopener noreferrer" aria-label="View source"></a>
 
 ```luau luaudocs-links=[[38,47,"/api/Type#dict"]]
 Sample.edit<T>(target: T, properties: Type.Dict<any>): T
@@ -180,7 +180,7 @@ Applies a table of properties to an existing target
 
 <!-- #region new -->
 
-### `new` <a class="source-link ignore-header" href="https://github.com/example/Sample/blob/main/src/init.luau#L78-L84" target="_blank" rel="noopener noreferrer" aria-label="View source"></a>
+### `new` <a class="source-link ignore-header" href="https://github.com/example/Sample/blob/main/src/init.luau#L77-L83" target="_blank" rel="noopener noreferrer" aria-label="View source"></a>
 
 ```luau luaudocs-links=[[32,41,"/api/Type#dict"]]
 Sample.new(className: string): (Type.Dict<any>) -> string
@@ -192,7 +192,7 @@ Creates a target of the given class and applies a table of properties to it
 
 <!-- #region isstate -->
 
-### `isState` <a href="/api/State#isstate" class="badge-link ignore-header"><Badge type="info" text="from State" /></a> <a class="source-link ignore-header" href="https://github.com/example/Sample/blob/main/src/State.luau#L7-L9" target="_blank" rel="noopener noreferrer" aria-label="View source"></a>
+### `isState` [<Badge type="info" text="from State" />](/api/State#isstate){.badge-link .ignore-header} <a class="source-link ignore-header" href="https://github.com/example/Sample/blob/main/src/State.luau#L7-L9" target="_blank" rel="noopener noreferrer" aria-label="View source"></a>
 
 ```luau
 Sample.isState(object: any): boolean
@@ -204,7 +204,7 @@ Checks whether an object is a state
 
 <!-- #region raw -->
 
-### `raw` <a href="/api/State#raw" class="badge-link ignore-header"><Badge type="info" text="from State" /></a> <a class="source-link ignore-header" href="https://github.com/example/Sample/blob/main/src/State.luau#L12-L14" target="_blank" rel="noopener noreferrer" aria-label="View source"></a>
+### `raw` [<Badge type="info" text="from State" />](/api/State#raw){.badge-link .ignore-header} <a class="source-link ignore-header" href="https://github.com/example/Sample/blob/main/src/State.luau#L12-L14" target="_blank" rel="noopener noreferrer" aria-label="View source"></a>
 
 ```luau
 Sample.raw<T>(object: T): any
@@ -216,7 +216,7 @@ Gets the raw value of a state, or the input itself when it is not a state
 
 <!-- #region fromgamma -->
 
-### `fromGamma` <a href="/api/Color#fromgamma" class="badge-link ignore-header"><Badge type="info" text="from Color" /></a> <a class="source-link ignore-header" href="https://github.com/example/Sample/blob/main/src/Color.luau#L4-L6" target="_blank" rel="noopener noreferrer" aria-label="View source"></a>
+### `fromGamma` [<Badge type="info" text="from Color" />](/api/Color#fromgamma){.badge-link .ignore-header} <a class="source-link ignore-header" href="https://github.com/example/Sample/blob/main/src/Color.luau#L4-L6" target="_blank" rel="noopener noreferrer" aria-label="View source"></a>
 
 ```luau
 Sample.fromGamma(channel: number): number
