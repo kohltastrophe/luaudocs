@@ -1,13 +1,12 @@
 /**
- * Owns the Lute the extractor runs on: the pinned version, the platform asset
- * table, the download, and the cache it lands in. Nothing else in the codebase
- * decides which Lute runs.
+ * Owns the Lute binary that runs the extractor: the pinned version, the
+ * platform asset table, the download, and the per-user cache directory.
  *
- * Extraction behavior is tied to the Lute version, so this pins one exactly the
- * way `src/site.ts` pins VitePress, and downloads it rather than asking every
- * project to install a toolchain manager and declare the same pin. The cache is
- * keyed by version and lives outside the package, so `npx luaudocs` and an
- * upgrade of luaudocs itself both reuse what is already there.
+ * Because extraction output depends on the Lute parser version, LuauDocs pins
+ * an exact Lute release (just as `src/site.ts` pins VitePress) and downloads it
+ * automatically rather than requiring every consumer to configure a toolchain
+ * manager. The cache is keyed by version outside the package directory, so
+ * `npx luaudocs` runs and LuauDocs upgrades reuse an existing download.
  */
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
@@ -17,16 +16,17 @@ import { inflateRawSync } from "node:zlib";
 import pc from "picocolors";
 
 /**
- * Bumping this is a deliberate release: rerun `bun run regen:docmodels` and
- * read the diff, since the extractor's output is whatever this Lute parses.
- * The checksums come from the release assets' own `digest` field.
+ * Bumping `LUTE_VERSION` is a deliberate release step: re-run
+ * `bun run regen:docmodels` and inspect the diff, because extractor output
+ * follows what this Lute version parses. Checksums come from each release
+ * asset's `digest` field.
  */
 export const LUTE_VERSION = "1.0.0";
 
 /**
- * `${process.platform}-${process.arch}` to the release asset. Anything absent
- * (Intel macOS, musl, BSD) has no prebuilt binary to fetch and falls back to
- * whatever `lute` the PATH offers.
+ * Maps `${process.platform}-${process.arch}` to its release archive and SHA-256
+ * digest. Platforms absent from this table (Intel macOS, musl Linux, BSD) have
+ * no prebuilt binary and fall back to `lute` on `PATH`.
  */
 const ASSETS: Record<string, { zip: string; sha256: string }> = {
 	"linux-x64": {
@@ -48,16 +48,16 @@ const ASSETS: Record<string, { zip: string; sha256: string }> = {
 };
 
 export interface Lute {
-	/** argv[0] for the spawn: an absolute path, or `lute` off the PATH. */
+	/** `argv[0]` for spawning Lute: an absolute path, or `"lute"` on `PATH`. */
 	command: string;
-	/** What to tell the user when that spawn fails to start at all. */
+	/** Diagnostic hint shown when spawning `command` fails outright. */
 	hint: string;
 }
 
 const OVERRIDE = "LUAUDOCS_LUTE";
 
-/** The per-user cache root, following each platform's own convention. */
-function cacheHome(): string {
+/** Returns the per-user cache root following each platform's convention. */
+export function cacheHome(): string {
 	if (process.platform === "win32") {
 		return process.env.LOCALAPPDATA || join(homedir(), "AppData", "Local");
 	}
@@ -76,11 +76,11 @@ function binaryName(): string {
 }
 
 /**
- * Resolves the Lute to spawn, downloading the pinned build on first use.
+ * Resolves the Lute binary to spawn, downloading the pinned release on first use.
  *
- * The order is fixed: an explicit `LUAUDOCS_LUTE` always wins, then the cached
- * pin, then the PATH. The PATH is deliberately last: a `lute` there is some
- * other version by definition, since the pin is never installed to it.
+ * Resolution order: `LUAUDOCS_LUTE` environment override first, then the cached
+ * pinned binary for supported platforms, and finally `lute` on `PATH` for
+ * platforms without a prebuilt binary.
  */
 export async function resolveLute(): Promise<Lute> {
 	const override = process.env[OVERRIDE];
@@ -109,7 +109,7 @@ export async function resolveLute(): Promise<Lute> {
 
 	const binary = join(installDir(), binaryName());
 	if (!existsSync(binary)) {
-		await install(asset, binary);
+		await install(asset);
 	}
 	return {
 		command: binary,
@@ -122,20 +122,20 @@ export async function resolveLute(): Promise<Lute> {
 }
 
 /**
- * Fetches, verifies, and unpacks the release zip. Unpacking happens in a
- * sibling directory that is renamed into place, so a half-written binary is
- * never at the path `resolveLute` probes, and two builds racing each other
- * leave one good install rather than a torn one.
+ * Downloads, verifies, and unpacks the release archive. Unpacks into a
+ * PID-suffixed sibling directory and renames it into place so a half-written
+ * binary never sits at the path `resolveLute` checks, and concurrent builds
+ * racing to install converge cleanly on one working binary.
  */
-async function install(asset: { zip: string; sha256: string }, binary: string): Promise<void> {
+async function install(asset: { zip: string; sha256: string }): Promise<void> {
 	const url = `https://github.com/luau-lang/lute/releases/download/v${LUTE_VERSION}/${asset.zip}`;
-	console.log(pc.cyan(`installing Lute ${LUTE_VERSION} (${asset.zip}) into ${installDir()}`));
+	// Log to stderr so `bun run lute -- run ... | jq` keeps stdout clean for JSON even on first install.
+	console.error(pc.cyan(`installing Lute ${LUTE_VERSION} (${asset.zip}) into ${installDir()}`));
 
 	let zip: Buffer;
 	try {
-		// no default timeout in node's fetch, and this is the one unbounded
-		// network call on the critical path: a proxy that accepts the handshake
-		// and never answers would otherwise hang the build to CI's job limit
+		// Node's `fetch` has no default timeout; bound the download so a stalled
+		// connection fails instead of hanging until CI's job timeout.
 		const response = await fetch(url, { signal: AbortSignal.timeout(120_000) });
 		if (!response.ok) {
 			throw new Error(`${response.status} ${response.statusText}`);
@@ -151,12 +151,7 @@ async function install(asset: { zip: string; sha256: string }, binary: string): 
 		);
 	}
 
-	const digest = createHash("sha256").update(zip).digest("hex");
-	if (digest !== asset.sha256) {
-		throw new Error(
-			`checksum mismatch for ${asset.zip}: expected ${asset.sha256}, got ${digest}`,
-		);
-	}
+	verifyChecksum(zip, asset);
 
 	const staging = `${installDir()}.tmp-${process.pid}`;
 	rmSync(staging, { recursive: true, force: true });
@@ -165,15 +160,39 @@ async function install(asset: { zip: string; sha256: string }, binary: string): 
 		const staged = join(staging, binaryName());
 		writeFileSync(staged, unzipSingleFile(zip));
 		chmodSync(staged, 0o755);
-		// a leftover install directory that lost its binary (an antivirus
-		// quarantine, a half-removed install) would fail the rename forever:
-		// ENOTEMPTY here, EPERM on Windows, and nothing self-heals
-		rmSync(installDir(), { recursive: true, force: true });
-		renameSync(staging, installDir());
-	} catch (error) {
+		commitInstall(staging, installDir(), binaryName());
+	} finally {
 		rmSync(staging, { recursive: true, force: true });
-		// the loser of a race finds the winner's install already in place, which
-		// is the outcome it wanted; anything else is a real failure
+	}
+}
+
+/**
+ * Atomically renames `staging` to `target`. If another concurrent process won
+ * the race and placed `binaryFile` at `target`, returns immediately without
+ * disturbing the winner's install. Only removes an existing `target` directory
+ * when `binaryFile` is missing inside it (for example, after an interrupted
+ * removal or antivirus quarantine).
+ */
+export function commitInstall(staging: string, target: string, binaryFile: string): void {
+	const binary = join(target, binaryFile);
+	try {
+		renameSync(staging, target);
+		return;
+	} catch (error) {
+		if (existsSync(binary)) {
+			return;
+		}
+		if (!existsSync(target)) {
+			throw error;
+		}
+	}
+	// An existing `target` directory missing its binary would fail `renameSync`
+	// permanently (`ENOTEMPTY` on POSIX, `EPERM` on Windows); clear it and retry.
+	rmSync(target, { recursive: true, force: true });
+	try {
+		renameSync(staging, target);
+	} catch (error) {
+		// Another process won the race between `rmSync` and `renameSync`.
 		if (!existsSync(binary)) {
 			throw error;
 		}
@@ -181,13 +200,24 @@ async function install(asset: { zip: string; sha256: string }, binary: string): 
 }
 
 /**
- * Extracts the single file a Lute release zip holds. The bytes are
- * checksum-verified before this runs, so any archive this small reader cannot
- * handle is a bad pin, and throws.
+ * Verifies the downloaded archive against its pinned SHA-256 digest before
+ * unpacking or executing any bytes.
  */
-function unzipSingleFile(zip: Buffer): Buffer {
-	// end of central directory record, scanned from the back because a trailing
-	// archive comment (never present here) would sit after its fixed 22 bytes
+export function verifyChecksum(zip: Buffer, asset: { zip: string; sha256: string }): void {
+	const digest = createHash("sha256").update(zip).digest("hex");
+	if (digest !== asset.sha256) {
+		throw new Error(
+			`checksum mismatch for ${asset.zip}: expected ${asset.sha256}, got ${digest}`,
+		);
+	}
+}
+
+/**
+ * Extracts the single binary entry from a Lute release `.zip` archive. Runs
+ * only after `verifyChecksum`, so any unexpected archive structure throws.
+ */
+export function unzipSingleFile(zip: Buffer): Buffer {
+	// Scan backward for the End of Central Directory (EOCD) signature (`PK\x05\x06`).
 	const eocd = zip.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
 	if (eocd === -1) {
 		throw new Error("not a zip archive");
@@ -203,8 +233,7 @@ function unzipSingleFile(zip: Buffer): Buffer {
 	const uncompressedSize = zip.readUInt32LE(central + 24);
 	const local = zip.readUInt32LE(central + 42);
 
-	// the local header repeats the name and extra fields at its own lengths,
-	// which are the ones the file data actually sits behind
+	// Advance past the 30-byte local file header plus its variable-length filename and extra fields.
 	const data = local + 30 + zip.readUInt16LE(local + 26) + zip.readUInt16LE(local + 28);
 	const body = zip.subarray(data, data + compressedSize);
 	const file = method === 0 ? body : method === 8 ? inflateRawSync(body) : undefined;
