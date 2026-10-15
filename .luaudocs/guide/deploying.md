@@ -42,10 +42,10 @@ jobs:
             ~/.npm
             ~/.cache/luaudocs
             .luaudocs/node_modules
-          key: ${{ runner.os }}-luaudocs-0.2.0
+          key: ${{ runner.os }}-luaudocs-0.3.0
       - id: pages
         uses: actions/configure-pages@v6
-      - run: npx luaudocs@0.2.0 build --url "${{ steps.pages.outputs.base_url }}" # [!code highlight]
+      - run: npx luaudocs@0.3.0 build --url "${{ steps.pages.outputs.base_url }}" # [!code highlight]
       - uses: actions/upload-pages-artifact@v5
         with: { path: ".luaudocs/.vitepress/dist" }
       - id: deployment
@@ -72,7 +72,7 @@ Cloudflare Pages builds directly from your Git repository without a workflow fil
 | Setting                | Value                       |
 | :--------------------- | :-------------------------- |
 | Framework preset       | None                        |
-| Build command          | `npx luaudocs@0.2.0 build` |
+| Build command          | `npx luaudocs@0.3.0 build` |
 | Build output directory | `.luaudocs/.vitepress/dist` |
 | Environment variable   | `NODE_VERSION` = `22`       |
 
