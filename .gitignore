@@ -20,3 +20,6 @@ extractor/generated/
 .idea/
 .DS_Store
 Thumbs.db
+
+# plexer's local graph cache: regenerable, not committed (run `plexer build`).
+/plexer/

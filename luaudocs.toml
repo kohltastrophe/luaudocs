@@ -1,9 +1,8 @@
 title = "LuauDocs"
 description = "Documentation generator for Luau."
 
-# luaudocs dogfoods itself: the only Luau it documents is examples/Flux, a demo
-# library whose generated pages the guides embed inline. Nothing in it is
-# tagged beyond the two members the tag guide points at.
+# Document examples/Flux as the live example API reference. The guides embed
+# real entries generated from this build.
 [source]
 entries = ["examples/Flux"]
 
@@ -28,3 +27,5 @@ favicon = "/logo.svg"
 
 [docs]
 url = "https://luaudocs.kohl.gg"
+# Publish model.json so external sites can link into Flux's types.
+model = true

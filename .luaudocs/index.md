@@ -3,8 +3,8 @@ layout: home
 
 hero:
   name: "LuauDocs"
-  text: "Stop writing docs.<br/>Start generating them."
-  tagline: "Point it at a Luau library and get a cross-linked API reference: no tags, no config, nothing to install but Node."
+  text: "Documentation from your Luau code"
+  tagline: "Generate a cross-linked API reference, guides, and llms.txt directly from your Luau source code and types."
   image:
     src: /logo.svg
     alt: LuauDocs
@@ -22,27 +22,27 @@ hero:
 features:
   - icon: 🪄
     title: No tags required
-    details: LuauDocs works out what your module returns; an untagged library gets a full API reference.
+    details: Traces what your modules return to build a full API reference without doc tags.
     link: /guide/how-it-works
     linkText: How it works
   - icon: 🔗
     title: Signatures from your code
-    details: Every signature comes from the Luau annotations in your code, with each type linked to its page.
+    details: Reads signatures directly from your Luau annotations and links every type to its definition.
     link: /guide/how-it-works#types-get-their-own-entries
     linkText: Type pages
   - icon: 🌙
-    title: Moonwave-compatible
-    details: All 24 Moonwave tags keep working as overrides, and one command migrates your site.
+    title: Moonwave compatible
+    details: Supports all 24 Moonwave tags as overrides and migrates your existing site with one command.
     link: /guide/migrating-from-moonwave
     linkText: From Moonwave
   - icon: 🔌
-    title: Built to be built on
-    details: Export the full API as JSON for custom tooling, with llms.txt generated automatically for AI assistants.
+    title: JSON model and llms.txt
+    details: Exports your full API as JSON for custom tooling and generates llms.txt for coding agents.
     link: /guide/reference/doc-model
     linkText: The doc model
 ---
 
-## No tags. No config.
+## Source to site
 
 ```luau [examples/Flux/init.luau]
 --[[
@@ -61,6 +61,6 @@ end
 
 </Frame>
 
-Nothing in that frame is hand-written. The signature comes from the Luau annotations, `State.State` links to [the type's own page](/api/State#state-1), and the `[State:Connect]` reference resolves into [a link](/api/State#connect). This is real generated markdown, embedded directly into this page from [`examples/Flux`](https://github.com/kohltastrophe/luaudocs/tree/main/examples/Flux).
+The frame above embeds the generated markdown from [`examples/Flux`](https://github.com/kohltastrophe/luaudocs/tree/main/examples/Flux). LuauDocs reads the signature from the Luau annotations, links `State.State` to [its type entry](/api/State#state-1), and resolves `[State:Connect]` to [its method entry](/api/State#connect).
 
-[Browse the whole example reference](/api/) · [Get started](/guide/getting-started)
+[Browse the example reference](/api/) · [Get started](/guide/getting-started)

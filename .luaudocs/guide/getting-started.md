@@ -1,18 +1,18 @@
 ---
 title: Getting Started
-description: Install LuauDocs and take a Luau library from zero to a browsable documentation site.
+description: Install LuauDocs and build a browsable documentation site for your Luau library.
 sidebar_position: 1
 ---
 
 # Getting Started
 
-LuauDocs reads a Luau library and builds a documentation site from it: the exports are discovered for you, the signatures come from the annotations already in your code, and the result is a [VitePress](https://vitepress.dev) site with search, dark mode, and cross-linked types. There is nothing to tag and no configuration required upfront.
+LuauDocs builds a [VitePress](https://vitepress.dev) documentation site from your Luau library. It discovers exports from what your modules return and reads signatures from your type annotations. You get full-text search, dark mode, and cross-linked types without adding doc tags or writing upfront config.
 
 ## Requirements
 
-[Node.js](https://nodejs.org/en/download) 22.12 or newer.
+You need [Node.js](https://nodejs.org/en/download) 22.12 or newer.
 
-Reading Luau sources also needs [Lute](https://github.com/luau-lang/lute), but you do not have to install it: the first extraction downloads and caches a pinned build for you. (On a machine with no internet access, [point `LUAUDOCS_LUTE` at your own copy](/guide/reference/troubleshooting#could-not-download-lute) instead.)
+LuauDocs uses [Lute](https://github.com/luau-lang/lute) to parse and evaluate your Luau source files. It downloads and caches a pinned Lute binary automatically on first run. For offline environments, [point `LUAUDOCS_LUTE` at a local binary](/guide/reference/troubleshooting#could-not-download-lute).
 
 ## Install
 
@@ -35,15 +35,15 @@ npm i -g github:kohltastrophe/luaudocs
 cd my-luau-library && luaudocs dev
 ```
 
-That is the whole setup. `dev` prints a localhost URL, and your API reference is already on it.
+`dev` starts a local server and prints a localhost URL for your API reference.
 
-You have no `luaudocs.toml`, so LuauDocs uses defaults: the site title comes from the folder name, and it reads modules from `src/` and `lib/` (if your sources live elsewhere, specify them with [`[source] entries`](/guide/configuration)). Without an existing `.luaudocs/` directory, the build creates one and generates the entire site inside it. It is safe to commit as-is: an auto-generated `.gitignore` covers all build artifacts, leaving [the rest for you to author](/guide/configuration#which-files-are-yours).
+If you don't have a `luaudocs.toml` file, LuauDocs uses sensible defaults. It takes the site title from your folder name and reads modules from `src/` and `lib/`. You can configure other paths under [`[source] entries`](/guide/configuration). If `.luaudocs/` doesn't exist yet, the build creates it with a `.gitignore` for build artifacts so only [your own files are ready to commit](/guide/configuration#which-files-are-yours).
 
-Leave `dev` running while you work. Edit a doc comment and the page updates in place.
+Leave `dev` running while you edit doc comments to see live updates in place.
 
-## What you just got
+## What you get
 
-Here is a real library: this site ships [`examples/Flux`](https://github.com/kohltastrophe/luaudocs/tree/main/examples/Flux) and documents it with the same commands you just ran:
+This site documents [`examples/Flux`](https://github.com/kohltastrophe/luaudocs/tree/main/examples/Flux) using those defaults:
 
 ```luau [examples/Flux/init.luau]
 local State = require("@self/State")
@@ -70,7 +70,7 @@ end
 return Flux
 ```
 
-That module's page is below, embedded from the markdown LuauDocs emitted for it:
+Here is the generated page for that module, embedded directly from the emitted markdown:
 
 <Frame label="Generated reference" link="/api/Flux">
 
@@ -80,36 +80,31 @@ That module's page is below, embedded from the markdown LuauDocs emitted for it:
 
 </Frame>
 
-Here is how LuauDocs processed the file:
+From `return Flux` alone, LuauDocs infers:
 
-- **The two required modules became pages**, badged <Badge type="info" text="Module" /> and linked. They sit under **Flux** in the sidebar, matching the access paths callers use (`Flux.State` and `Flux.Util`).
-- **`isState` is documented under the name callers use**, badged <Badge type="info" text="from State" /> so readers know where it is defined.
-- **The signatures are your annotations**, with `State.State` linking to the page documenting that type.
-- **`[State:Connect]` resolves into a link**, because a module in the project declares it.
+- **Required modules become pages.** They carry a <Badge type="info" text="Module" /> badge and nest under **Flux** in the sidebar to match caller access paths (`Flux.State` and `Flux.Util`).
+- **`isState` is documented under its exposed name.** It gets a <Badge type="info" text="from State" /> badge that links to its definition.
+- **Signatures come from your annotations.** `State.State` links directly to its type entry.
+- **`[State:Connect]` resolves to a link** because a project module declares it.
 
-You wrote no tags and no config. LuauDocs inferred everything from what `return Flux` evaluates to, and [How It Works](/guide/how-it-works) explains how; read it once and nothing about your sidebar will look mysterious.
-
-::: tip
-The whole example is browsable under [Example API](/api/), nested exactly as it is reached: `Flux` → `Util` → [`Queue`](/api/Queue). Every framed block in these guides is embedded from it, and its label links to the entry it came from.
-:::
+Browse the full example library under [Example API](/api/), where modules nest by access path (`Flux` → `Util` → [`Queue`](/api/Queue)). See [How It Works](/guide/how-it-works) for the rules behind surface discovery and sidebar layout.
 
 ## Commands
 
-Three commands, and every one of them takes an optional project directory (default `.`):
+Each command takes an optional project directory (defaults to `.`):
 
-- `luaudocs dev` watches your sources and serves the live preview you just used.
-- `luaudocs build` writes the static site, ready to publish. See [Deploying](/guide/deploying).
-- `luaudocs init` scaffolds a `luaudocs.toml` and the pages you own, for when you want to shape the site. See [Configuration](/guide/configuration).
+- `luaudocs dev`: watches sources and serves a live preview.
+- `luaudocs build`: builds the static site for publishing. See [Deploying](/guide/deploying).
+- `luaudocs init`: scaffolds `luaudocs.toml` and starter pages. See [Configuration](/guide/configuration).
+- `luaudocs llms`: writes a repository-root `llms.txt` for coding agents. See [Coding Agents](/guide/coding-agents).
 
-`--help` prints the flags, and [Reference: CLI](/guide/reference/cli) documents all of them.
+Pass `--help` or see [Reference: CLI](/guide/reference/cli) for all flags.
 
 ## Next steps
 
-- **[How It Works](/guide/how-it-works)** - why your site contains what it contains.
-- **[Writing Doc Comments](/guide/writing-doc-comments)** - the prose layer on top.
-- **[Configuration](/guide/configuration)** - `luaudocs.toml`, the files `init` writes, and styling.
-- **[Deploying](/guide/deploying)** - GitHub Pages from one workflow file, or Cloudflare Pages with none.
-
-::: tip Already using Moonwave?
-`luaudocs init --from-moonwave` converts your config and hand-written pages and copies your assets, and all 24 Moonwave tags keep working as-is. See [Migrating from Moonwave](/guide/migrating-from-moonwave).
-:::
+- **[How It Works](/guide/how-it-works):** how public surface discovery shapes your site.
+- **[Writing Doc Comments](/guide/writing-doc-comments):** prose and automatic cross-references.
+- **[Configuration](/guide/configuration):** `luaudocs.toml`, file ownership, and styling.
+- **[Deploying](/guide/deploying):** GitHub Pages and Cloudflare Pages setup.
+- **[Coding Agents](/guide/coding-agents):** generating `llms.txt` indexes for coding agents.
+- **[Migrating from Moonwave](/guide/migrating-from-moonwave):** run `luaudocs init --from-moonwave` to convert your config, guides, and static assets while keeping all 24 Moonwave tags.

@@ -80,6 +80,9 @@ jobs:
       - name: End-to-end (init -> build on the sample fixture)
         run: bun run test:e2e
 
+      - name: This repository's llms.txt matches its sources
+        run: node dist/cli.js llms --check
+
       # Drives the CLI out of an extracted `npm pack` tarball with production
       # deps only: e2e runs against dist inside the repo checkout, which masks
       # packaging gaps. Linux only: packaging is platform-independent.

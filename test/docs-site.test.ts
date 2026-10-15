@@ -11,9 +11,13 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import pkg from "../package.json";
 import { packageRoot } from "../src/extract";
+import { LOCAL_LLMS_FILE } from "../src/llms";
+import { isGeneratedFile } from "../src/pages";
 
 const root = packageRoot();
 const deployingPage = join(root, ".luaudocs", "guide", "deploying.md");
+const agentsPage = join(root, ".luaudocs", "guide", "coding-agents.md");
+const rootLlms = join(root, LOCAL_LLMS_FILE);
 
 /** What `init` substitutes into `templates/project/**` for a project shaped
  * like this one: this repository's docs dir and branch, and the two pins the
@@ -60,15 +64,27 @@ describe("the site quotes its sources verbatim", () => {
 	});
 
 	// the Cloudflare build command pins the version too, but in a table rather
-	// than a copy of any file, so the check above never sees it go stale
-	it("pins the current version everywhere it pins one", () => {
-		const page = readFileSync(deployingPage, "utf8");
-		const pins = [...page.matchAll(/npx luaudocs@([^\s`]+)/g)].map((match) => match[1]);
-		expect(
-			pins.length,
-			"deploying.md should pin in the workflow and on Cloudflare",
-		).toBeGreaterThan(1);
-
+	// than a copy of any file, so the check above never sees it go stale; so do
+	// the agent notes, and the root llms.txt itself, which a release has to
+	// regenerate (CI's `llms --check` holds the rest of that file)
+	it.each([
+		["deploying.md, in the workflow and on Cloudflare", deployingPage, 2],
+		["coding-agents.md, in the agent notes and the CI step", agentsPage, 3],
+		["the root llms.txt, in its regeneration command", rootLlms, 1],
+	])("pins the current version in %s", (_where, file, least) => {
+		const text = readFileSync(file, "utf8");
+		const pins = [...text.matchAll(/npx luaudocs@([^\s`]+)/g)].map((match) => match[1]);
+		expect(pins.length).toBeGreaterThanOrEqual(least);
 		expect(pins).toEqual(pins.map(() => pkg.version));
+	});
+
+	// the guide shows the file the command wrote for this repository; a pasted
+	// copy would be exactly the drift this suite exists to catch
+	it("shows the llms.txt `luaudocs llms` actually writes", () => {
+		const page = readFileSync(agentsPage, "utf8");
+		expect(page).toMatch(/^<<< \.\.\/\.\.\/llms\.txt\{md\}$/m);
+		const llms = readFileSync(rootLlms, "utf8");
+		expect(isGeneratedFile(llms), "the root llms.txt lost its generated marker").toBe(true);
+		expect(llms).toContain("\n## Flux.Util.Queue\n");
 	});
 });

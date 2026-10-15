@@ -63,6 +63,9 @@ jobs:
       - name: End-to-end (init -> build on the sample fixture)
         run: bun run test:e2e
 
+      - name: This repository's llms.txt matches its sources
+        run: node dist/cli.js llms --check
+
       # Same guard as CI: drive the CLI out of an extracted tarball with
       # production deps only, so a packaging gap fails before publish, not after.
       - name: Packed tarball smoke test
@@ -99,8 +102,9 @@ jobs:
 
       # --ignore-scripts: publish the dist/ and src/generated/ the steps above
       # tested, not a fresh prepare rebuild nothing exercised.
-      # Both steps below are idempotent, so a failure in either can be re-run:
-      # npm rejects a republish outright, and gh fails on an existing tag.
+      # Both steps below are idempotent, so a failed run can simply be re-run:
+      # a version already on the registry skips the publish, and an existing
+      # release is edited rather than created again.
       - name: Publish to npm
         run: |
           set -euo pipefail

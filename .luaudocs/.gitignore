@@ -4,6 +4,7 @@ api/
 changelog.md
 public/llms.txt
 public/llms-full.txt
+public/docmodel.json
 package.json
 
 # the generated package.json's install
