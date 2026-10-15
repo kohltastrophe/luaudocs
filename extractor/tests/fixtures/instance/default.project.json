@@ -2,7 +2,7 @@
 	"name": "Inst",
 	"tree": {
 		"$path": "src",
-		"Ext": { "$path": "ext" },
+		"Ext": { "$path": "ext/init.luau" },
 		"Pkg": { "$path": "pkg" },
 		"Wire": { "$path": "wire/wire.project.json" }
 	}

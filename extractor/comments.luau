@@ -1,16 +1,16 @@
 --- Doc-comment model: segments the flat comment index into blocks, decides
---- which are doc-eligible, and answers "which block documents the statement
---- starting at line N" via pure line math.
+--- which blocks are doc-eligible, and answers "which block documents the
+--- statement starting at line N" via pure line math.
 ---
---- Rules (moonwave-compatible, plus `--[[ ]]`):
+--- Rules (Moonwave-compatible, plus `--[[ ]]`):
 ---   * `--- text` line runs are doc comments; `----`+ dividers, `--!` hot
----     comments, `--#` directives and plain `--` chatter are not
----   * both `--[=[ ]=]` and `--[[ ]]` blocks count (moonwave accepts only the
----     former; attachment still requires sitting directly above a statement)
+---     comments, `--#` directives, and plain `--` comments are not
+---   * both `--[=[ ]=]` and `--[[ ]]` blocks count (Moonwave accepts only
+---     `--[=[ ]=]`; attachment still requires sitting directly above a statement)
 ---   * a doc block documents a statement iff it ends on the line directly
 ---     above the statement's effective start (attributes included)
----   * unclaimed doc blocks "float"; ones with placing tags create members
----     explicitly (model stage), the rest are ignored
+---   * unclaimed doc blocks "float"; blocks with placing tags create members
+---     explicitly in the model stage, and the rest are ignored
 
 local parseMod = require("./parse")
 local util = require("./util")
@@ -18,7 +18,7 @@ local util = require("./util")
 type Span = parseMod.Span
 type Parsed = parseMod.Parsed
 
---- Line -> the trailing comment on it (the first, when a line somehow has two).
+--- Maps a source line number to the first trailing comment on that line.
 export type TrailingIndex = { [number]: parseMod.Comment }
 
 export type DocBlock = {
@@ -31,9 +31,8 @@ export type DocBlock = {
 
 local comments = {}
 
---- `--- doc` lines only; a `----`+ divider is the one lookalike. Everything
---- else (`--!` hot comments, `--#` directives, plain `--` chatter) is equally
---- non-doc, so adjacent non-doc lines join into one inert run.
+--- Matches `--- doc` lines only; `----`+ dividers, `--!` hot comments, `--#`
+--- directives, and plain `--` comments are non-doc and merge into inert runs.
 local function isDocLine(text: string): boolean
 	return text:match("^%-%-%-") ~= nil and text:match("^%-%-%-%-") == nil
 end
@@ -43,8 +42,8 @@ local function docLineContent(text: string): string
 	return stripped
 end
 
---- The second return counts leading physical lines dropped, so callers can map
---- content indexes back to source lines.
+--- Extracts a block comment's lines and returns the count of leading blank
+--- lines dropped so callers can map content indices back to source lines.
 local function blockContent(text: string): ({ string }, number)
 	local eq, rest = text:match("^%-%-%[(=*)%[(.*)$")
 	if rest == nil then
@@ -53,23 +52,40 @@ local function blockContent(text: string): ({ string }, number)
 	local closing = "]" .. eq .. "]"
 	if rest:sub(-#closing) == closing then
 		rest = rest:sub(1, #rest - #closing)
-		-- a `--` abutting the bracket belongs to a `--]]`-style closer, not to
-		-- the content; content really ending in `--` is separated by whitespace
+		-- A `--` abutting the closing bracket belongs to a `--]]`-style closer,
+		-- not to the content; content ending in `--` is separated by whitespace.
 		if rest:sub(-2) == "--" then
 			rest = rest:sub(1, -3)
 		end
 	end
 	local lines = util.splitLines(rest)
-	-- leading blanks are dropped so dedent sees the body
+	-- Text on the opener line (`--[=[ Summary.`) sits after the opening bracket
+	-- rather than at the body's indentation. If included in `dedent`, its zero
+	-- leading indent would prevent the body from dedenting (turning an indented
+	-- `@param` into an indented code block), so set it aside trimmed first.
+	local opener: string? = nil
+	if util.trim(lines[1]) ~= "" then
+		opener = util.trim(table.remove(lines, 1) :: string)
+	end
+	-- Drop leading blank lines so `dedent` measures only the body.
 	local dropped = 0
-	while #lines > 0 and util.trim(lines[1]) == "" do
+	while opener == nil and #lines > 0 and util.trim(lines[1]) == "" do
 		table.remove(lines, 1)
 		dropped += 1
 	end
-	return util.trimEmptyLines(util.dedent(lines)), dropped
+	local content = util.dedent(lines)
+	if opener ~= nil then
+		table.insert(content, 1, opener)
+	end
+	content = util.trimEmptyLines(content)
+	-- Trim delimiter padding before a closer on the last line (`x ]]`).
+	if #content > 0 then
+		content[#content] = (content[#content]:gsub("%s+$", ""))
+	end
+	return content, dropped
 end
 
---- Segments all non-trailing comments into blocks (source order).
+--- Segments all non-trailing comments into blocks in source order.
 function comments.segment(parsed: Parsed): { DocBlock }
 	local blocks: { DocBlock } = {}
 	local run: DocBlock? = nil
@@ -88,14 +104,13 @@ function comments.segment(parsed: Parsed): { DocBlock }
 		end
 		if c.kind == "block" then
 			flush()
-			local eq = c.text:match("^%-%-%[(=*)%[")
-			-- code after the closer (`--[[ x ]] local a = 1`) makes this an
-			-- inline comment: attaching it would document the NEXT statement.
-			-- A trailing comment (`--[[ x ]] -- todo`) is not code.
+			-- Code after the closer (`--[[ x ]] local a = 1`) makes this an
+			-- inline comment; attaching it would wrongly document the statement
+			-- on the next line. A trailing comment (`--[[ x ]] -- todo`) is not code.
 			local closerLine = parsed.lines[c.span.endLine]
 			local after = if closerLine ~= nil then closerLine:sub(c.span.endColumn) else ""
 			local codeFollows = after:match("%S") ~= nil and after:match("^%s*%-%-") == nil
-			local isDoc = eq ~= nil and not codeFollows
+			local isDoc = not codeFollows
 			local content: { string }, droppedLeading = {}, 0
 			if isDoc then
 				content, droppedLeading = blockContent(c.text)
@@ -133,8 +148,7 @@ function comments.segment(parsed: Parsed): { DocBlock }
 	return blocks
 end
 
---- The line directly below each doc block -> the block: a statement starting
---- there is what the block documents.
+--- Maps the line directly below each doc block (`endLine + 1`) to the block itself.
 function comments.claimIndex(blocks: { DocBlock }): { [number]: DocBlock }
 	local index = {}
 	for _, block in blocks do
@@ -145,9 +159,9 @@ function comments.claimIndex(blocks: { DocBlock }): { [number]: DocBlock }
 	return index
 end
 
---- Claims and returns the doc block directly above `startLine`, if any. A block
---- claims once: a later claimant (a table field sharing the statement's line)
---- gets nil rather than duplicating the prose onto a second owner.
+--- Claims and returns the doc block directly above `startLine`, if any. Each
+--- block can be claimed only once so a table field on the same line as its
+--- enclosing statement cannot duplicate the statement's doc block.
 function comments.claim(index: { [number]: DocBlock }, startLine: number): DocBlock?
 	local block = index[startLine]
 	if block ~= nil and not block.claimed then
@@ -157,7 +171,7 @@ function comments.claim(index: { [number]: DocBlock }, startLine: number): DocBl
 	return nil
 end
 
---- Source line -> trailing comment, the mirror of claimIndex.
+--- Maps each source line to its first trailing comment.
 function comments.trailingIndex(parsed: Parsed): TrailingIndex
 	local index: TrailingIndex = {}
 	for _, c in parsed.comments do
@@ -168,8 +182,8 @@ function comments.trailingIndex(parsed: Parsed): TrailingIndex
 	return index
 end
 
---- Only a description fallback for table fields / table-type fields: a trailing
---- comment never documents a statement.
+--- Returns the trailing comment text on `line` as a fallback description for
+--- table fields and table-type fields; trailing comments never document statements.
 function comments.trailingText(index: TrailingIndex, line: number): string?
 	local c = index[line]
 	if c == nil then
@@ -180,16 +194,17 @@ function comments.trailingText(index: TrailingIndex, line: number): string?
 		return util.trim(text)
 	end
 	local content = blockContent(c.text)
-	-- empty means a whitespace-only `--[[ ]]` trailer: no description
+	-- Empty content means a whitespace-only `--[[ ]]` trailer.
 	if #content == 0 then
 		return nil
 	end
 	return util.trim(table.concat(content, " "))
 end
 
---- The module doc: the first unclaimed doc block ending before the first
---- statement. (A block attached to the statement that *defines the returned
---- module table* also doubles as module doc; the model stage decides that.)
+--- Returns the leading module doc block: the first unclaimed doc block ending
+--- before the first statement. (A doc block attached to the statement that
+--- defines the returned module table also acts as the module doc; the model
+--- stage handles that case.)
 function comments.moduleDoc(blocks: { DocBlock }, firstStatLine: number?): DocBlock?
 	for _, block in blocks do
 		if firstStatLine ~= nil and block.span.beginLine >= firstStatLine then

@@ -97,6 +97,13 @@ return function()
 	)
 	-- `tags = { custom = {} }` is the most repeated shape in the captures
 	t.eq(emit.encode({ custom = {} }, true), '{ "custom": [] }', "an empty table needs no line, so it inlines too")
+	-- a record holding nothing but its scratch marker encodes as `{}`, which
+	-- needs no line either (a bare @deprecated beside the custom list)
+	t.eq(
+		emit.encode({ tags = { custom = {}, deprecated = emit.record({}) } }, true),
+		'{\n\t"tags": { "custom": [], "deprecated": {} }\n}',
+		"an empty record is a leaf too"
+	)
 	-- compact is the wire format between the two runtimes; it must not move
 	t.eq(
 		emit.encode({ file = "a.luau", line = 3 }, false),

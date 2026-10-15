@@ -1,9 +1,7 @@
---- Require resolution: string requires (current Luau semantics) and Roblox
---- instance-style requires (script.Parent chains, WaitForChild/FindFirstChild)
---- mapped onto the filesystem, plus the project context that mapping reads:
---- .luaurc alias chains and rojo *.project.json instance trees (including
---- nested project mounts). One module because turning a require expression
---- into a file is what the alias chains and rojo tree exist to answer.
+--- Require resolution: string requires (standard Luau semantics) and Roblox
+--- instance-style requires (`script.Parent` chains, `WaitForChild`, and
+--- `FindFirstChild`) mapped onto the filesystem, together with `.luaurc` alias
+--- chains and Rojo `*.project.json` instance trees (including nested project mounts).
 
 local fs = require("@std/fs")
 local json = require("@std/json")
@@ -22,43 +20,56 @@ export type Project = {
 	rojoByPath: { [string]: RojoNode }, -- normalized abs fsPath -> node
 	luaurcCache: { [string]: { [string]: string }? },
 	luaurcBroken: { [string]: boolean }, -- dirs whose .luaurc failed to parse
+	aliases: { [string]: string | boolean }, -- runtime-provided aliases (lowercased) -> docs base URL, or true
 }
 
-export type Resolution = { ok: true, absPath: string } | { ok: false, reason: string, detail: string }
+--- A runtime module referenced through a runtime alias (`@lute/...`, `@lune/...`).
+--- `spelling` is the require string as written, `alias` and `path` are its two
+--- halves (`lute`, `net/client`), and `url` is its documentation page when the
+--- alias has a base URL configured.
+export type External = { spelling: string, alias: string, path: string, url: string? }
+
+export type Resolution =
+	{ ok: true, absPath: string }
+	| { ok: false, reason: string, detail: string, external: External? }
 
 local requires = {}
 
 local isDir, isFile, isInitFile, stem = util.isDir, util.isFile, util.isInitFile, util.stem
 local readFileSafe = util.readFileSafe
 
---- Strips // line comments (string-aware) so .luaurc parses as JSON.
-local function stripJsonComments(text: string): string
-	local out = {}
+--- Rewrites `.luaurc` text into strict JSON. Luau parses `.luaurc` with its own
+--- lexer (`Config.cpp`), which accepts `--` line and block comments, `//` line
+--- comments, and trailing commas before closing brackets. Strip all three outside
+--- string literals.
+local function luaurcToJson(text: string): string
+	local out: { string } = {}
 	local i = 1
-	local inString = false
 	local n = #text
 	while i <= n do
 		local c = text:sub(i, i)
-		if inString then
-			table.insert(out, c)
-			if c == "\\" then
-				table.insert(out, text:sub(i + 1, i + 1))
-				i += 1
-			elseif c == '"' then
-				inString = false
-			end
-		elseif c == '"' then
-			inString = true
-			table.insert(out, c)
+		if c == '"' then
+			local j = util.closingQuote(text, i)
+			table.insert(out, text:sub(i, j))
+			i = j + 1
+		elseif c == "-" and text:sub(i + 1, i + 1) == "-" then
+			i = util.commentEnd(text, i)
 		elseif c == "/" and text:sub(i + 1, i + 1) == "/" then
-			while i <= n and text:sub(i, i) ~= "\n" do
-				i += 1
-			end
-			table.insert(out, "\n")
+			i = text:find("\n", i, true) or (n + 1)
 		else
+			if c == "}" or c == "]" then
+				-- Remove a trailing comma from the last non-blank token emitted.
+				local k = #out
+				while k > 0 and out[k]:match("^%s*$") ~= nil do
+					k -= 1
+				end
+				if k > 0 and out[k] == "," then
+					out[k] = ""
+				end
+			end
 			table.insert(out, c)
+			i += 1
 		end
-		i += 1
 	end
 	return table.concat(out)
 end
@@ -88,8 +99,8 @@ local function buildRojoNode(
 		local abs = util.normPath(util.joinPath(baseDir, specPath))
 		node.fsPath = abs
 		byPath[abs] = node
-		-- nested project mount: a directory holding default.project.json, or a
-		-- `$path` naming a *.project.json file
+		-- Nested project mount: a directory containing `default.project.json`,
+		-- or a `$path` pointing directly to a `*.project.json` file.
 		if depth < MAX_NESTED_PROJECTS and fs.exists(abs) then
 			local isDirMount = util.isDir(abs)
 			local nestedFile = if isDirMount
@@ -114,8 +125,8 @@ local function buildRojoNode(
 			end
 		end
 	end
-	-- sorted, not hash order: JSON parsing loses declared order, so two children
-	-- sharing one $path would otherwise race for byPath (last wins)
+	-- Sort child keys rather than iterating in hash order so two children
+	-- sharing one `$path` resolve deterministically in `byPath`.
 	local childKeys = {}
 	for key, value in spec do
 		if type(key) == "string" and key:sub(1, 1) ~= "$" and type(value) == "table" then
@@ -131,9 +142,13 @@ local function buildRojoNode(
 	return node
 end
 
---- The second return errors only when an *explicitly* passed project file is
---- unusable; the implicit default.project.json probe stays best-effort.
-function requires.load(root: string, opts: { projectFile: string? }?): (Project, string?)
+--- Loads project configuration. Returns an error string only when an explicitly
+--- passed `projectFile` is unreadable or invalid; the implicit
+--- `default.project.json` probe is best-effort.
+function requires.load(
+	root: string,
+	opts: { projectFile: string?, aliases: { [string]: string | boolean }? }?
+): (Project, string?)
 	local options = opts or {}
 	local explicit = options.projectFile ~= nil
 	local self: Project = {
@@ -142,6 +157,7 @@ function requires.load(root: string, opts: { projectFile: string? }?): (Project,
 		rojoByPath = {},
 		luaurcCache = {},
 		luaurcBroken = {},
+		aliases = options.aliases or {},
 	}
 
 	local projectFile = options.projectFile
@@ -173,10 +189,11 @@ function requires.load(root: string, opts: { projectFile: string? }?): (Project,
 	return self, nil
 end
 
---- Merged .luaurc aliases for a file: root down to the file's directory, nearer
---- files overriding. Targets are absolute; names are lowercased because Luau
---- resolves them case-insensitively. The second return lists chain directories
---- whose .luaurc failed to parse, so an alias miss can name the broken file.
+--- Merges `.luaurc` aliases from `project.root` down to `fileAbs`'s directory,
+--- with nearer `.luaurc` files overriding outer ones. Alias targets are
+--- resolved to absolute paths and keys are lowercased (Luau resolves aliases
+--- case-insensitively). The second return lists directories whose `.luaurc`
+--- failed to parse so an unresolved alias diagnostic can name the broken file.
 local function aliasesFor(self: Project, fileAbs: string): ({ [string]: string }, { string })
 	local dir = util.dirname(util.normPath(fileAbs))
 	local chain = {}
@@ -200,7 +217,7 @@ local function aliasesFor(self: Project, fileAbs: string): ({ [string]: string }
 		if cached == nil then
 			local text = readFileSafe(util.joinPath(d, ".luaurc"))
 			if text ~= nil then
-				local data = parseJson(stripJsonComments(text))
+				local data = parseJson(luaurcToJson(text))
 				if data == nil then
 					self.luaurcBroken[d] = true
 				end
@@ -236,11 +253,11 @@ function requires.rojoNodeAt(self: Project, absPath: string): RojoNode?
 end
 
 local function isModuleFile(p: string): boolean
-	return p:match("%.luau$") ~= nil or p:match("%.lua$") ~= nil
+	return p:match("%.luau?$") ~= nil
 end
 
---- The extension probe, and the one place `.luau` beating `.lua` is spelled:
---- callers hand over the extensionless path.
+--- Probes `base .. ".luau"` then `base .. ".lua"`, centralizing the `.luau`
+--- over `.lua` extension precedence.
 local function luauOrLua(base: string): string?
 	for _, candidate in { base .. ".luau", base .. ".lua" } do
 		if isFile(candidate) then
@@ -255,7 +272,7 @@ local function findInitFile(dir: string): string?
 end
 requires.findInitFile = findInitFile
 
---- One stat answers both the file and directory questions about `p`.
+--- Resolves `p` to a module file via a single `pathType` check plus extension/init probes.
 local function findModuleFile(p: string): string?
 	local kind = util.pathType(p)
 	if kind == "file" and isModuleFile(p) then
@@ -271,10 +288,26 @@ local function findModuleFile(p: string): string?
 	return nil
 end
 
+local resolveInstancePath -- forward
+
+--- Converts a relative require path (`./x`, `../x`, or `@self/x`) into instance-path
+--- segments (`"Parent"` and child names) for Rojo `$path` mount fallback.
+local function relativeRojoSegs(rel: string, fromSelf: boolean): { string }
+	local segs: { string } = if fromSelf then {} else { "Parent" }
+	for part in rel:gmatch("[^/]+") do
+		if part == ".." then
+			table.insert(segs, "Parent")
+		elseif part ~= "." then
+			table.insert(segs, part)
+		end
+	end
+	return segs
+end
+
 --- String require semantics:
----   * plain file foo.luau: `./x` is a sibling of foo.luau, and `@self/x`
----     reaches into the component directory named after it (`foo/x`)
----   * init.luau: the module node IS its directory, so `./x` is a sibling of
+---   * plain file `foo.luau`: `./x` is a sibling of `foo.luau`, and `@self/x`
+---     reaches into the child directory named after it (`foo/x`)
+---   * `init.luau`: the module node IS its directory, so `./x` is a sibling of
 ---     that directory and `@self/x` reaches inside it
 function requires.resolveString(project: Project, fromFileAbs: string, text: string): Resolution
 	local fromInit = isInitFile(fromFileAbs)
@@ -282,25 +315,48 @@ function requires.resolveString(project: Project, fromFileAbs: string, text: str
 	local baseDir = if fromInit then util.dirname(fileDir) else fileDir
 
 	local target: string? = nil
+	local rojoSegs: { string }? = nil
 	if text:sub(1, 2) == "./" then
 		target = util.joinPath(baseDir, text:sub(3))
+		rojoSegs = relativeRojoSegs(text:sub(3), false)
 	elseif text:sub(1, 3) == "../" then
 		target = util.joinPath(baseDir, text)
+		rojoSegs = relativeRojoSegs(text, false)
 	elseif text:sub(1, 1) == "@" then
-		-- dots are legal in alias names, so the class must accept them or
-		-- `@my.pkg/mod` splits at the first dot
+		-- Dots are legal in alias names, so the character class must include `.`
+		-- or `@my.pkg/mod` would fail to match.
 		local alias, rest = text:match("^@([%w_%-%.]+)/?(.*)$")
 		if alias == nil then
 			return { ok = false, reason = "require-unresolved", detail = "malformed alias " .. text }
 		end
-		-- Luau alias resolution is case-insensitive, so both @self and .luaurc
-		-- lookups compare lowercased (aliasesFor stores keys lowered)
+		-- Luau alias resolution is case-insensitive, so both `@self` and `.luaurc`
+		-- lookups compare lowercased keys.
 		if alias:lower() == "self" then
 			local selfDir = if fromInit then fileDir else util.joinPath(fileDir, stem(fromFileAbs))
 			target = if rest ~= "" then util.joinPath(selfDir, rest) else selfDir
+			rojoSegs = relativeRojoSegs(rest, true)
 		else
 			local aliases, broken = aliasesFor(project, fromFileAbs)
 			local aliasTarget = aliases[alias:lower()]
+			local isHiddenPkg = aliasTarget ~= nil and util.relPath(project.root, aliasTarget):match("^%.[^/\\]") ~= nil
+			-- A `.luaurc` alias into project source overrides runtime aliases so
+			-- projects that shadow `@std` locally resolve to their own files;
+			-- aliases into dot-directories (`.sert/`, `.pesde/`) are external packages.
+			local runtime = if aliasTarget == nil or isHiddenPkg
+				then (project.aliases[alias:lower()] or isHiddenPkg)
+				else false
+			if runtime then
+				local url: string? = nil
+				if type(runtime) == "string" then
+					url = if rest ~= "" then runtime .. "/" .. rest else runtime
+				end
+				return {
+					ok = false,
+					reason = "require-external",
+					detail = "runtime module " .. text,
+					external = { spelling = text, alias = alias:lower(), path = rest, url = url },
+				}
+			end
 			if aliasTarget == nil then
 				local detail = "unknown alias @" .. alias
 				if #broken > 0 then
@@ -315,6 +371,12 @@ function requires.resolveString(project: Project, fromFileAbs: string, text: str
 	end
 
 	local resolved = findModuleFile(util.normPath(target :: string))
+	if resolved == nil and project.rojoRoot ~= nil and rojoSegs ~= nil then
+		local viaRojo = resolveInstancePath(project, fromFileAbs, rojoSegs)
+		if viaRojo.ok then
+			return viaRojo
+		end
+	end
 	if resolved == nil then
 		return { ok = false, reason = "require-unresolved", detail = "no module at " .. tostring(target) }
 	end
@@ -322,15 +384,28 @@ function requires.resolveString(project: Project, fromFileAbs: string, text: str
 end
 
 --- Virtual node for instance-path navigation: an fs location plus an optional
---- rojo tree node (mounts, renamed children, nested projects).
+--- Rojo tree node (mounts, renamed children, and nested projects).
 type VNode = { fsPath: string?, rojo: RojoNode?, isFile: boolean }
 
-local function vnodeForFile(project: Project, fileAbs: string): VNode
-	if isInitFile(fileAbs) then
-		local dir = util.dirname(fileAbs)
-		return { fsPath = dir, rojo = requires.rojoNodeAt(project, dir), isFile = false }
+--- Returns the Rojo node for `fileAbs`: either a direct mount of the file itself
+--- or, for `init.luau`, the node mounted at its parent directory. Direct file
+--- mounts take priority over directory mounts.
+local function rojoNodeFor(project: Project, fileAbs: string): RojoNode?
+	local node = requires.rojoNodeAt(project, fileAbs)
+	if node == nil and isInitFile(fileAbs) then
+		node = requires.rojoNodeAt(project, util.dirname(fileAbs))
 	end
-	return { fsPath = util.normPath(fileAbs), rojo = requires.rojoNodeAt(project, fileAbs), isFile = true }
+	return node
+end
+
+--- Starting `VNode` for `script` in `fileAbs`. An `init.luau` file navigates as
+--- its parent directory regardless of whether Rojo mounted the file or the directory.
+local function vnodeForFile(project: Project, fileAbs: string): VNode
+	local rojo = rojoNodeFor(project, fileAbs)
+	if isInitFile(fileAbs) then
+		return { fsPath = util.dirname(fileAbs), rojo = rojo, isFile = false }
+	end
+	return { fsPath = util.normPath(fileAbs), rojo = rojo, isFile = true }
 end
 
 local function vnodeFromRojo(node: RojoNode): VNode
@@ -368,7 +443,7 @@ local function childOf(project: Project, v: VNode, name: string): VNode?
 		return nil
 	end
 	if v.isFile then
-		-- children of a file node live in a sibling directory named after it
+		-- Children of a file module live in a sibling directory with the same stem.
 		base = util.joinPath(util.dirname(base :: string), stem(base :: string))
 	end
 	local candidate = luauOrLua(util.joinPath(base :: string, name))
@@ -393,17 +468,6 @@ local function vnodeModuleFile(v: VNode): string?
 	return findModuleFile(v.fsPath :: string)
 end
 
---- The rojo node a file becomes: its own, or (for `init.luau`) the one mounted
---- at its directory. In that order: a `$path` naming the init file itself is a
---- direct mount and outranks the directory it happens to sit in.
-local function rojoNodeFor(project: Project, fileAbs: string): RojoNode?
-	local node = requires.rojoNodeAt(project, fileAbs)
-	if node == nil and isInitFile(fileAbs) then
-		node = requires.rojoNodeAt(project, util.dirname(fileAbs))
-	end
-	return node
-end
-
 --- Display name of a file as an instance.
 function requires.instanceName(project: Project, fileAbs: string): string
 	local node = rojoNodeFor(project, fileAbs)
@@ -416,15 +480,15 @@ function requires.instanceName(project: Project, fileAbs: string): string
 	return stem(fileAbs)
 end
 
---- Rojo declares only mount points, so this climbs to the nearest mounted
---- ancestor and appends the folder names crossed on the way down. nil when the
---- climb reaches the filesystem root without meeting rojo; the caller falls
---- back to the folder layout.
+--- Computes the Rojo instance path for `fileAbs` by climbing to the nearest
+--- mounted Rojo ancestor and appending the folder names crossed on the way down.
+--- Returns `nil` when the climb reaches the filesystem root without hitting a
+--- Rojo mount, letting the caller fall back to folder layout.
 function requires.instancePath(project: Project, fileAbs: string): { string }?
 	local node = rojoNodeFor(project, fileAbs)
 	local below: { string } = {}
 	if node == nil then
-		-- `dir/init.luau` *is* `dir`, so climb from the directory either way
+		-- `dir/init.luau` represents `dir`, so start climbing from the directory.
 		local current = if isInitFile(fileAbs) then util.dirname(fileAbs) else util.normPath(fileAbs)
 		while node == nil do
 			table.insert(below, 1, stem(current))
@@ -449,7 +513,7 @@ function requires.instancePath(project: Project, fileAbs: string): { string }?
 	return path
 end
 
-local function resolveInstancePath(project: Project, fromFileAbs: string, segs: { string }): Resolution
+resolveInstancePath = function(project: Project, fromFileAbs: string, segs: { string }): Resolution
 	local v: VNode? = vnodeForFile(project, fromFileAbs)
 	for _, seg in segs do
 		if v == nil then
