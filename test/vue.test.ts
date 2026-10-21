@@ -10,8 +10,10 @@ import { compileTemplate } from "vue/compiler-sfc";
 import { beforeAll, describe, expect, it } from "vitest";
 import { emitDocsFromJson } from "../src/render";
 import { stripFrontmatter } from "../src/markdown";
+import { codeIcons } from "../templates/runtime/icons";
 import { inlineHighlightPlugin } from "../templates/runtime/inline-highlight";
 import { installMarkupRule } from "../templates/runtime/markup";
+import { rewriteSearchIndexCache, searchIndexCachePlugin } from "../templates/runtime/search-cache";
 import { relayLinks } from "../templates/runtime/signature-links";
 import { whitespacePlugin } from "../templates/runtime/whitespace";
 import { makeTempDirFactory, modelJson, testConfig } from "./helpers";
@@ -26,7 +28,7 @@ let render: (content: string) => Promise<{ html: string; links: string[] }>;
 // renderer per process and hands it back on every later call.
 beforeAll(async () => {
 	const md = await createMarkdownRenderer(tempDir(), {}, "/repo/");
-	installMarkupRule(md, {});
+	installMarkupRule(md, {}, "/repo/");
 	// no highlighter: the fallback path is the one every unannotated span takes
 	inlineHighlightPlugin(md, () => undefined);
 	whitespacePlugin(md);
@@ -145,11 +147,34 @@ describe("links under a site base", () => {
 		expect(links).toContain("/api/Util");
 	});
 
-	it("bases a frame's caption link", async () => {
+	it("bases a frame's caption link and framed badge links", async () => {
 		const { html, links } = await render(
-			'<Frame label="Generated reference" link="/api/Mini#util">\n\nBody.\n\n</Frame>\n',
+			'<Frame label="Generated reference" link="/api/Mini#util">\n\n' +
+				'### `Util` [<Badge type="info" text="Module" />](/api/Util){.badge-link .ignore-header}\n\n' +
+				"Body.\n\n</Frame>\n",
 		);
 		expect(html).toContain('<a href="/repo/api/Mini#util">Generated reference');
+		expect(html).toContain(
+			'<h3><code v-pre>Util</code> <a href="/repo/api/Util" class="badge-link ignore-header">',
+		);
 		expect(links).toContain("/api/Mini#util");
+	});
+
+	it("rewrites dev search-index version stamps and exposes custom code icons", () => {
+		const plugin = searchIndexCachePlugin();
+		expect(plugin.name).toBe("luaudocs:search-index-cache");
+		expect(
+			rewriteSearchIndexCache('import "/@localSearchIndexroot?v=1";', "@localSearchIndex"),
+		).toBe('import "/@localSearchIndexroot?rev=1";');
+		expect(
+			rewriteSearchIndexCache('import "/@localSearchIndexroot?v=2";', "/@localSearchIndex"),
+		).toBe('import "/@localSearchIndexroot?rev=2";');
+		expect(
+			rewriteSearchIndexCache('import "/@localSearchIndexroot?v=1";', "/other/module.ts"),
+		).toBeUndefined();
+		expect(codeIcons[".luau"]).toBe("vscode-icons:file-type-luau");
+		expect(codeIcons[".lua"]).toBe("vscode-icons:file-type-lua");
+		expect(codeIcons.github.light).toContain("<svg");
+		expect(codeIcons.github.dark).toContain("<svg");
 	});
 });

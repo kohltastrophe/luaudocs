@@ -14,16 +14,18 @@
 // unaffected because the built search index chunk is content-hashed.
 import type { Plugin } from "vite";
 
+export function rewriteSearchIndexCache(code: string, id: string): string | undefined {
+	// Transform the root search-index entry module that imports the per-locale payloads.
+	if (id !== "@localSearchIndex" && id !== "/@localSearchIndex") {
+		return undefined;
+	}
+	return code.replace(/(@localSearchIndex\w*\?)v=/g, "$1rev=");
+}
+
 export function searchIndexCachePlugin(): Plugin {
 	return {
 		name: "luaudocs:search-index-cache",
 		apply: "serve",
-		transform(code, id) {
-			// Transform the root search-index entry module that imports the per-locale payloads.
-			if (id !== "@localSearchIndex" && id !== "/@localSearchIndex") {
-				return undefined;
-			}
-			return code.replace(/(@localSearchIndex\w*\?)v=/g, "$1rev=");
-		},
+		transform: rewriteSearchIndexCache,
 	};
 }

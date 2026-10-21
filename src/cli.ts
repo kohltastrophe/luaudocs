@@ -100,7 +100,7 @@ async function build(args: string[]): Promise<void> {
 		} catch (error) {
 			// VitePress ran and rejected the site (a dead link or template error).
 			// Treat this as a build failure (exit 1) rather than a usage or
-			// environment error; VitePress already printed the cause.
+			// environment error, as VitePress already printed the cause.
 			console.error(pc.red(`error: ${(error as Error).message}`));
 			process.exitCode = 1;
 		}

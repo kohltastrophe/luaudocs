@@ -95,6 +95,18 @@ describe("anchor collision and prediction rules", () => {
 		expect(anchorOf("#fn.Sample.state")).toBe("state-1");
 	});
 
+	const fn = (name: string, extra: object = {}) => ({
+		id: `src/init.luau#fn.Mini.${name}`,
+		name,
+		kind: "function",
+		visibility: "public",
+		tags: { custom: [] },
+		errors: [],
+		signature: { callee: `Mini.${name}`, segs: ["()"], params: [], returns: [] },
+		source: { file: "src/init.luau", line: 5 },
+		...extra,
+	});
+
 	const miniModel = (doc: string, fnName = "Connect") =>
 		modelJson([
 			{
@@ -103,23 +115,7 @@ describe("anchor collision and prediction rules", () => {
 				name: "Mini",
 				doc,
 				source: { file: "src/init.luau", line: 1 },
-				members: [
-					{
-						id: `src/init.luau#fn.Mini.${fnName}`,
-						name: fnName,
-						kind: "function",
-						visibility: "public",
-						tags: { custom: [] },
-						errors: [],
-						signature: {
-							callee: `Mini.${fnName}`,
-							segs: ["()"],
-							params: [],
-							returns: [],
-						},
-						source: { file: "src/init.luau", line: 5 },
-					},
-				],
+				members: [fn(fnName)],
 			},
 		]);
 
@@ -163,6 +159,16 @@ describe("anchor collision and prediction rules", () => {
 			"<Widget>\n## Connect\n\n</Widget>",
 			"connect",
 		],
+		[
+			"heading inside <Frame> unlisted by rewriteMarkup",
+			"<Frame>\n\n## Connect\n\n</Frame>",
+			"connect",
+		],
+		[
+			"heading inside <TabItem> opened by rewriteMarkup",
+			'<Tabs>\n<TabItem label="A">\n## Connect\n</TabItem>\n</Tabs>',
+			"connect-1",
+		],
 	])("predicts %s", (_case, prose, expected) => {
 		const page = emitDocsFromJson(miniModel(`Intro.\n\n${prose}\n`), testConfig());
 		expect(page.pageModels[0]!.anchors["src/init.luau#fn.Mini.Connect"]).toBe(expected);
@@ -170,17 +176,6 @@ describe("anchor collision and prediction rules", () => {
 	});
 
 	it("yields to headings inside a member's doc or deprecation notice", () => {
-		const fn = (name: string, extra: object = {}) => ({
-			id: `src/init.luau#fn.Mini.${name}`,
-			name,
-			kind: "function",
-			visibility: "public",
-			tags: { custom: [] },
-			errors: [],
-			signature: { callee: `Mini.${name}`, segs: ["()"], params: [], returns: [] },
-			source: { file: "src/init.luau", line: 5 },
-			...extra,
-		});
 		const emitted = emitDocsFromJson(
 			modelJson([
 				{

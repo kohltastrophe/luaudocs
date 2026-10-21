@@ -5,15 +5,15 @@
 //     `Flux.state(0)`{luau} renders through Shiki like a fenced code block.
 //
 // Reuses VitePress's own Shiki highlighter (captured via `markdown.shikiSetup`
-// in the generated config) so no second Shiki instance is created and inline
-// code shares the fenced examples' light/dark themes. Only `luau` and `lua`
-// annotations are claimed here; any other `{...}` suffix (`{#id}`, `{.class}`,
-// or an unknown language) is left for VitePress's `markdown-it-attrs` plugin.
+// in the generated config) so no second Shiki instance exists and inline code
+// shares the fenced examples' light/dark themes. Claims only `luau` and `lua`
+// annotations here; leaves any other `{...}` suffix (`{#id}`, `{.class}`, or an
+// unknown language) for VitePress's `markdown-it-attrs` plugin.
 //
-// Every inline code span, highlighted or plain, also receives `v-pre`. VitePress
+// Also adds `v-pre` to every inline code span, highlighted or plain. VitePress
 // compiles each markdown page as a Vue template and adds `v-pre` to fenced code
-// blocks, but not inline code spans. Without `v-pre`, `{{` inside inline code
-// is parsed as a Vue interpolation: `{{string}}` renders empty, and a nested
+// blocks, but not inline code spans. Without `v-pre`, Vue parses `{{` inside
+// inline code as an interpolation: `{{string}}` renders empty, and a nested
 // Luau table type like `{{[string]: number}}` fails the build as an invalid Vue
 // expression.
 import type MarkdownIt from "markdown-it";
@@ -60,13 +60,15 @@ export function inlineHighlightPlugin(
 		md.renderer.rules.code_inline ??
 		((tokens, idx) => `<code v-pre>${md.utils.escapeHtml(tokens[idx]?.content ?? "")}</code>`);
 
+	let loadedLangs: Set<string> | undefined;
 	md.renderer.rules.code_inline = (tokens, idx, options, env, self) => {
 		const tok = tokens[idx];
 		if (!tok?.info) return fallback(tokens, idx, options, env, self);
 
 		const hl = getHighlighter();
 		if (!hl) return fallback(tokens, idx, options, env, self);
-		const useLang = hl.getLoadedLanguages().includes(tok.info) ? tok.info : "text";
+		loadedLangs ??= new Set(hl.getLoadedLanguages());
+		const useLang = loadedLangs.has(tok.info) ? tok.info : "text";
 
 		try {
 			const inner = hl.codeToHtml(tok.content, {

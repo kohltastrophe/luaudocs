@@ -1,10 +1,12 @@
 /**
- * Markdown text utilities used by the emitter. The fence splitter and HTML
- * escaper live in `templates/runtime/markup.ts` (which is synced into user
- * sites and cannot import from `src/`) and are re-exported here.
+ * Markdown text utilities used by the emitter. Re-exports the fence splitter
+ * and HTML escaper from `templates/runtime/markup.ts` (which syncs into user
+ * sites and cannot import from `src/`).
  */
-import { splitFences } from "../templates/runtime/markup";
-import { ANNOTATION_PATTERN } from "../templates/runtime/inline-highlight";
+import { rewriteMarkup, splitFences } from "../templates/runtime/markup";
+import { codeIcons } from "../templates/runtime/icons";
+import { ANNOTATION_PATTERN, LANGUAGES } from "../templates/runtime/inline-highlight";
+import { rewriteSearchIndexCache, searchIndexCachePlugin } from "../templates/runtime/search-cache";
 import { LINKS_TOKEN } from "../templates/runtime/signature-links";
 
 export {
@@ -14,7 +16,9 @@ export {
 	linkDestination,
 	REWRITTEN_COMPONENTS,
 	splitFences,
+	type TrailSegment,
 } from "../templates/runtime/markup";
+export { codeIcons, LANGUAGES, LINKS_TOKEN, rewriteSearchIndexCache, searchIndexCachePlugin };
 
 /**
  * VitePress's heading slugifier, vendored from `@mdit-vue/shared` to avoid an
@@ -52,9 +56,9 @@ export interface ProseHeading {
 }
 
 // VitePress uses `@mdit-vue/plugin-component`'s HTML block rule rather than
-// CommonMark's: any tag not on the standard inline list is treated as a Vue
-// component and opens an HTML block just like `<div>` does. Below are its block
-// and inline tag sets (with Vue's built-in `template` and `slot` excluded from inline).
+// CommonMark's, treating any tag not on the standard inline list as a Vue
+// component and opening an HTML block just like `<div>` does. Below are its block
+// and inline tag sets (excluding Vue's built-in `template` and `slot` from inline).
 const HTML_BLOCK_TAGS = new Set(
 	(
 		"address article aside base basefont blockquote body caption center col colgroup dd " +
@@ -89,7 +93,7 @@ const INLINE_HTML = new RegExp(`${OPEN_TAG}|${CLOSE_TAG}|<!--[\\s\\S]*?-->`, "g"
 const TO_BLANK = /^[ \t]*$/;
 
 /**
- * Detects whether `line` opens an HTML block: returns the closing-line regex
+ * Detects whether `line` opens an HTML block. Returns the closing-line regex
  * for a multi-line block, `"line"` for a single-line Vue component (self-closing
  * or closed on the same line, which VitePress treats as inline), or `undefined`.
  * `inParagraph` guards CommonMark type-7 lone tags, which cannot interrupt an
@@ -117,18 +121,18 @@ function htmlBlock(line: string, inParagraph: boolean): RegExp | "line" | undefi
 	return !inParagraph && LONE_TAG.test(text) ? TO_BLANK : undefined;
 }
 
-/** Leading blockquote markers (`> `, `>> `): headings inside blockquotes still mint anchors. */
+/** Leading blockquote markers (`> `, `>> `), inside which headings still mint anchors. */
 const BLOCKQUOTE_MARKERS = /^(?: {0,3}> ?)+/;
 /** Leading list item markers (`- ## Name` is a heading inside a list item). */
 const LIST_MARKERS = /^(?: {0,3}(?:[*+-]|\d{1,9}[.)])[ \t]+)+/;
-/** ATX heading pattern; closing `#` runs require a preceding space so `## C#` keeps `#`. */
+/** ATX heading pattern (closing `#` runs require a preceding space so `## C#` keeps `#`). */
 const ATX_HEADING = /^ {0,3}#{1,6}[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$/;
 /** Setext heading underline (`===` or `---` alone on a line). */
 const SETEXT_UNDERLINE = /^ {0,3}(?:=+|-+)[ \t]*$/;
 /**
  * Block openers that interrupt a paragraph so a following `===` or `---` line
- * cannot turn it into a setext heading: list items, table rows, thematic breaks,
- * and link reference definitions.
+ * cannot turn it into a setext heading (list items, table rows, thematic breaks,
+ * and link reference definitions).
  */
 const NOT_PARAGRAPH =
 	/^ {0,3}(?:[*+-]\s|\d{1,9}[.)]\s|\||([-*_])(?:[ \t]*\1){2,}[ \t]*$|\[[^\]\n]+\]:)/;
@@ -149,14 +153,15 @@ export function proseHeadings(markdown: string | undefined): ProseHeading[] {
 	if (!markdown) {
 		return [];
 	}
+	const rewritten = rewriteMarkup(markdown);
 	const labels = new Set(
-		[...markdown.matchAll(REFERENCE_DEFINITION)].map((match) => foldLabel(match[1]!)),
+		[...rewritten.matchAll(REFERENCE_DEFINITION)].map((match) => foldLabel(match[1]!)),
 	);
 	const headings: ProseHeading[] = [];
 	const push = (raw: string) => headings.push(headingText(raw, labels));
-	for (const part of outsideFences(markdown)) {
+	for (const part of outsideFences(rewritten)) {
 		// Track the entire accumulated paragraph for setext headings, not just
-		// its final line: `markdown-it` represents line breaks as `softbreak`
+		// its final line. `markdown-it` represents line breaks as `softbreak`
 		// tokens with `content: ""`, so a multi-line setext heading slugifies
 		// all of its lines concatenated together without spaces.
 		let paragraph: { text: string; depth: number } | undefined;
@@ -233,7 +238,7 @@ const TRAILING_ATTRS = /(?<!\\)\{([^{}]+)(?<!\\)\}[ \t]*$/;
 
 /**
  * Extracts a heading's text the way VitePress's `getTokensText` joins inline
- * tokens: HTML tags and `:shortcode:` emoji contribute nothing, links contribute
+ * tokens. HTML tags and `:shortcode:` emoji contribute nothing, links contribute
  * their label text, and code spans contribute their unquoted content. A trailing
  * `{#id}` attribute sets the explicit anchor `id`.
  */
@@ -313,7 +318,7 @@ export function outsideCodeSpans(text: string): string[] {
 }
 
 /**
- * Identifies which syntax slot a link target occupies: `image` and `src` render
+ * Identifies which syntax slot a link target occupies. `image` and `src` render
  * inline assets whereas `link` and `href` navigate, and VitePress prefixes the
  * site `base` onto Markdown `link` targets automatically while leaving raw HTML
  * `href` attributes as written.
@@ -471,15 +476,19 @@ export function frontmatterField(block: string, key: string, indent = ""): strin
 	}
 	// Strip quotes from quoted scalars and trailing `#` comments from unquoted
 	// scalars, matching how VitePress's YAML parser reads `title: "Setup" # draft`.
-	const quoted = raw.match(/^"([^"]*)"|^'([^']*)'/);
-	if (quoted) {
-		return quoted[1] ?? quoted[2];
+	const double = raw.match(/^"((?:\\.|[^"\\])*)"/);
+	if (double) {
+		return double[1]!.replace(/\\(["\\])/g, "$1");
+	}
+	const single = raw.match(/^'((?:''|[^'])*)'/);
+	if (single) {
+		return single[1]!.replace(/''/g, "'");
 	}
 	return raw.replace(/(?:^|\s+)#.*$/, "").trim() || undefined;
 }
 
 /**
- * Renders the presentation-only source link pinned to member headings: an empty
+ * Renders the presentation-only source link pinned to member headings as an empty
  * `<a>` whose `</>` glyph comes from CSS. `<Badge>` tags are intentionally kept
  * in `plainMarkdown` because `"Deprecated"`, `"Private"`, and `"Yields"` carry
  * API semantics rather than decorative chrome.

@@ -5,11 +5,11 @@
  *    `luaudocs build` so AI tools can read the published documentation without
  *    scraping HTML. Guides come before API pages because a model can derive the
  *    API surface from source code, whereas prose guides carry usage intent that
- *    only exists in the docs. The changelog is listed under the `## Optional`
- *    section and omitted from `llms-full.txt`. Setting `[docs] llms = false`
- *    opts out and leaves any existing files untouched. If a build produces no
- *    guides, API pages, or changelog, both files are removed so a site that
- *    emptied its docs does not keep serving a stale index.
+ *    only exists in the docs. Lists the changelog under `## Optional` and omits
+ *    it from `llms-full.txt`. Setting `[docs] llms = false` opts out and leaves
+ *    any existing files untouched. If a build produces no guides, API pages, or
+ *    changelog, removes both files so a site that emptied its docs does not keep
+ *    serving a stale index.
  *
  * 2. **Repository checkout (`llms.txt` at the project root)**: written by
  *    `luaudocs llms` for coding agents working in a local clone (typically
@@ -24,17 +24,9 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
-import pkg from "../package.json";
-import {
-	renderProject,
-	syncFile,
-	writeIfChanged,
-	type BuildContext,
-	type RenderedModel,
-} from "./build";
 import type { SourceSpan } from "./docmodel";
 import { docSummary, plainMarkdown, unwrap } from "./markdown";
-import { buildAccessTree, type TreeNode } from "./nav";
+import type { TreeNode } from "./nav";
 import {
 	apiHref,
 	apiPageFile,
@@ -42,7 +34,10 @@ import {
 	GENERATED_COMMENT_MARK,
 	isGeneratedFile,
 	memberAccess,
+	syncFile,
 	toPosix,
+	writeIfChanged,
+	type BuildContext,
 	type PageMember,
 	type PageModel,
 	type PageSection,
@@ -56,8 +51,10 @@ import {
 	MEMBER_HEADINGS,
 	READ_ONLY_LABEL,
 	reexportLabel,
+	renderProject,
 	type BadgeLabel,
 	type EmitResult,
+	type RenderedModel,
 } from "./render";
 import {
 	collectGuides,
@@ -74,8 +71,8 @@ interface Section {
 }
 
 /**
- * Formats an `llms.txt` index shared by both outputs: H1 title, optional
- * blockquote summary, optional intro paragraphs, and one H2 section per entry list.
+ * Formats an `llms.txt` index shared by both outputs (H1 title, optional
+ * blockquote summary, optional intro paragraphs, and one H2 section per entry list).
  */
 function llmsIndex(
 	title: string,
@@ -96,6 +93,36 @@ function llmsIndex(
 	return lines.join("\n").trimEnd() + "\n";
 }
 
+/**
+ * Collects the home page, guide pages (`## Guides`), API sections, and optional
+ * changelog (`## Optional`) in the section order shared by both `llms.txt` outputs.
+ */
+function collectDocSections(options: {
+	docsDir: string;
+	guides: GuideItem[];
+	changelogPath: string;
+	ignoreGeneratedHome?: boolean;
+	href: (page: DocPage) => string;
+	api: Section[];
+}): { summary?: string; guidePages: DocPage[]; sections: Section[] } {
+	const listed = (page: DocPage) =>
+		entry(escapeBrackets(page.title), options.href(page), page.description ?? "");
+	// A `layout: home` hero page contributes its tagline rather than a page entry (`readHomePage`).
+	const found = readHomePage(options.docsDir);
+	const home = options.ignoreGeneratedHome && found?.generated ? undefined : found;
+	const guidePages = [...(home?.page ? [home.page] : []), ...flattenGuides(options.guides)];
+	const sections: Section[] = [];
+	if (guidePages.length > 0) {
+		sections.push({ heading: "Guides", entries: guidePages.map(listed) });
+	}
+	sections.push(...options.api);
+	const changelog = readDocPage(options.changelogPath, "/changelog");
+	if (changelog) {
+		sections.push({ heading: "Optional", entries: [listed(changelog)] });
+	}
+	return { summary: home?.tagline, guidePages, sections };
+}
+
 /*
  * ------------------------------------------------------------------- the site
  */
@@ -111,46 +138,41 @@ export function syncLlms(context: BuildContext, guides: GuideItem[], result: Emi
 		return;
 	}
 	const siteUrl = config.docs.url ?? "";
-	const entry = (page: { title: string; link: string; description?: string }) =>
-		`- [${page.title}](${siteUrl}${page.link})${page.description ? `: ${page.description}` : ""}`;
-	const sections: Section[] = [];
-	const bodies: string[] = [];
-
-	// A `layout: home` hero page contributes its tagline rather than a page entry (`readHomePage`).
-	const home = readHomePage(context.docsDir);
-	const guidePages = [...(home?.page ? [home.page] : []), ...flattenGuides(guides)];
-	if (guidePages.length > 0) {
-		sections.push({ heading: "Guides", entries: guidePages.map(entry) });
-		for (const guide of guidePages) {
-			bodies.push(titled(plainMarkdown(guide.text), guide.title));
-		}
-	}
+	const api: Section[] = [];
+	const apiBodies: string[] = [];
 
 	if (result.pageModels.length > 0) {
 		const entries: string[] = [];
 		for (const page of result.pageModels) {
 			entries.push(
-				entry({
-					title: page.title,
-					link: apiHref(page.slug),
+				entry(
+					escapeBrackets(displayTitle(page)),
+					`${siteUrl}${apiHref(page.slug)}`,
 					// Use the same lead sentence summary as the API overview page.
-					description: docSummary(page.doc) || undefined,
-				}),
+					docSummary(page.doc),
+				),
 			);
 			const rendered = result.pages.get(apiPageFile(page.slug));
 			if (rendered !== undefined) {
-				bodies.push(plainMarkdown(rendered));
+				apiBodies.push(plainMarkdown(rendered));
 			}
 		}
-		sections.push({ heading: "API Reference", entries });
+		api.push({ heading: "API Reference", entries });
 	}
 
-	// Read `changelog.md` from disk rather than checking `changelogEnabled` so a
-	// hand-written `<docs>/changelog.md` (without the generated marker) is indexed too.
-	const changelog = readDocPage(join(context.docsDir, "changelog.md"), "/changelog");
-	if (changelog) {
-		sections.push({ heading: "Optional", entries: [entry(changelog)] });
-	}
+	const { summary, guidePages, sections } = collectDocSections({
+		docsDir: context.docsDir,
+		guides,
+		// Read `changelog.md` from disk rather than checking `changelogEnabled` so a
+		// hand-written `<docs>/changelog.md` (without the generated marker) is indexed too.
+		changelogPath: join(context.docsDir, "changelog.md"),
+		href: (page) => `${siteUrl}${page.link}`,
+		api,
+	});
+	const bodies = [
+		...guidePages.map((guide) => titled(plainMarkdown(guide.text), guide.title)),
+		...apiBodies,
+	];
 
 	const publicDir = join(context.docsDir, "public");
 	// Passing `undefined` removes the file if it exists on disk.
@@ -162,8 +184,7 @@ export function syncLlms(context: BuildContext, guides: GuideItem[], result: Emi
 		write("llms-full.txt", undefined);
 		return;
 	}
-	const summary = config.description ?? home?.tagline;
-	write("llms.txt", llmsIndex(config.title, summary, [], sections));
+	write("llms.txt", llmsIndex(config.title, config.description ?? summary, [], sections));
 	// A changelog-only site has an `llms.txt` index but no page bodies for `llms-full.txt`.
 	write("llms-full.txt", bodies.length > 0 ? bodies.join("\n\n") + "\n" : undefined);
 }
@@ -172,7 +193,6 @@ export function syncLlms(context: BuildContext, guides: GuideItem[], result: Emi
  * --------------------------------------------------------------- the checkout
  */
 
-/** Default output filename for `luaudocs llms` under the project root. */
 export const LOCAL_LLMS_FILE = "llms.txt";
 
 /**
@@ -211,9 +231,9 @@ function summaryText(doc: string | undefined): string {
 /**
  * Formats a badge as a bracketed prefix (`[Yields]`, `[Deprecated since v2: ...]`).
  * Deprecation badges inline their note because `llms.txt` has no separate notice
- * block. Inner brackets (`[Tagged.create]`) are left unescaped: the file defines
- * no link reference definitions, and no badge label is followed by `(`, so
- * Markdown parsers keep them as literal brackets.
+ * block. Leaves inner brackets (`[Tagged.create]`) unescaped because the file
+ * defines no link reference definitions and no badge label is followed by `(`,
+ * so Markdown parsers keep them as literal brackets.
  */
 function labelText(label: BadgeLabel): string {
 	const note = label.note ? unwrap(plainMarkdown(label.note)) : "";
@@ -248,7 +268,7 @@ function typeEntry(ty: PageType, link: Linker): string {
 		head = `type function ${ty.name}${genericsText(ty.generics)}${inlineText(ty.params ?? [])}`;
 	} else {
 		head = `type ${ty.name}${genericsText(ty.generics)}`;
-		// Inline a single-line definition directly in the heading; multi-line
+		// Inline a single-line definition directly in the heading. Multi-line
 		// definitions (or lines containing a `--` field comment) stay behind the source link.
 		const line = ty.definition?.length === 1 ? inlineText(ty.definition[0]!) : undefined;
 		if (line !== undefined && !line.includes("--")) {
@@ -265,12 +285,7 @@ function typeEntry(ty: PageType, link: Linker): string {
 	);
 }
 
-function memberEntry(
-	page: PageModel,
-	section: PageSection,
-	member: PageMember,
-	link: Linker,
-): string {
+function memberEntry(section: PageSection, member: PageMember, link: Linker): string {
 	if (member.kind === "prop") {
 		const type = member.type ? `: ${inlineText(member.type)}` : "";
 		return entry(
@@ -287,15 +302,12 @@ function memberEntry(
 			),
 		);
 	}
-	// Omit the member summary when a callable module's own call member repeats
-	// the module summary (matching the deduplication on rendered API pages).
-	const repeat = member.doc === page.doc && member.signature.callee === page.title;
 	return entry(
 		codeSpan(`${member.signature.callee}${inlineText(member.signature.segs)}`),
 		link.span(member.source),
 		notes(
 			[...badgeLabels(member.tags, member.visibility), reexportText(member.reexport)],
-			repeat ? "" : summaryText(member.doc),
+			summaryText(member.doc),
 		),
 	);
 }
@@ -309,11 +321,11 @@ function constructorText(section: PageSection | undefined, link: Linker): string
 }
 
 /** Lists a section's members, grouped by kind in page heading order. */
-function memberEntries(page: PageModel, section: PageSection, link: Linker): string[] {
+function memberEntries(section: PageSection, link: Linker): string[] {
 	return MEMBER_HEADINGS.flatMap(({ kind }) =>
 		section.members
 			.filter((member) => member.kind === kind)
-			.map((member) => memberEntry(page, section, member, link)),
+			.map((member) => memberEntry(section, member, link)),
 	);
 }
 
@@ -335,7 +347,7 @@ function moduleEntries(page: PageModel, link: Linker): string[] {
 		...page.types.map((ty) => typeEntry(ty, link)),
 	];
 	if (primary) {
-		entries.push(...memberEntries(page, primary, link));
+		entries.push(...memberEntries(primary, link));
 	}
 	for (const section of nested) {
 		entries.push(
@@ -348,7 +360,7 @@ function moduleEntries(page: PageModel, link: Linker): string[] {
 					constructorText(section, link),
 				),
 			),
-			...memberEntries(page, section, link),
+			...memberEntries(section, link),
 		);
 	}
 	return entries;
@@ -358,16 +370,16 @@ function moduleEntries(page: PageModel, link: Linker): string[] {
  * Builds one section per module in depth-first access-tree order (matching the
  * API overview page), each headed by its public access path.
  */
-function apiSections(pages: PageModel[], link: Linker): Section[] {
+function apiSections(accessTree: TreeNode[], link: Linker): Section[] {
 	const sections: Section[] = [];
-	const walk = (node: TreeNode) => {
+	const visitNode = (node: TreeNode) => {
 		sections.push({
 			heading: node.access ?? displayTitle(node.page),
 			entries: moduleEntries(node.page, link),
 		});
-		node.children.forEach(walk);
+		node.children.forEach(visitNode);
 	};
-	buildAccessTree(pages).forEach(walk);
+	accessTree.forEach(visitNode);
 	return sections;
 }
 
@@ -378,11 +390,11 @@ function shellWord(word: string): string {
 
 /**
  * Formats the exact command that regenerates `target` when run from `target`'s
- * parent directory (the project root by default). Pins the CLI version so coding
- * agents reproduce the committed output rather than pulling an incompatible release.
+ * parent directory (the project root by default). Uses `@latest` so `npx` does
+ * not reuse a stale cached version across releases.
  */
 function regenerateCommand(root: string, target: string): string {
-	const words = ["npx", `luaudocs@${pkg.version}`, "llms"];
+	const words = ["npx", "luaudocs@latest", "llms"];
 	const dir = toPosix(relative(dirname(target), root));
 	if (dir !== "") {
 		words.push(shellWord(dir));
@@ -421,26 +433,18 @@ export function renderLocalLlms(
 			`${file(span.file)}#L${span.line}${span.endLine ? `-L${span.endLine}` : ""}`,
 		callees,
 	};
-	const listed = (page: DocPage) =>
-		entry(escapeBrackets(page.title), local(page.file), page.description ?? "");
-
-	// Ignore a build-generated `index.md` because a fresh clone does not have
-	// it, and `luaudocs llms` must produce identical output on a clean checkout.
-	const found = readHomePage(docsDir);
-	const home = found?.generated ? undefined : found;
-	const guidePages = [...(home?.page ? [home.page] : []), ...flattenGuides(guides)];
-	const api = apiSections(result.pageModels, link);
-
-	const sections: Section[] = [];
-	if (guidePages.length > 0) {
-		sections.push({ heading: "Guides", entries: guidePages.map(listed) });
-	}
-	sections.push(...api);
-	// Read the root `CHANGELOG.md` directly (`<docs>/changelog.md` is build-generated).
-	const changelog = readDocPage(join(root, "CHANGELOG.md"), "/changelog");
-	if (changelog) {
-		sections.push({ heading: "Optional", entries: [listed(changelog)] });
-	}
+	const api = apiSections(result.accessTree, link);
+	const { summary, guidePages, sections } = collectDocSections({
+		docsDir,
+		guides,
+		// Read the root `CHANGELOG.md` directly (`<docs>/changelog.md` is build-generated).
+		changelogPath: join(root, "CHANGELOG.md"),
+		// Ignore a build-generated `index.md` because a fresh clone does not have
+		// it, and `luaudocs llms` must produce identical output on a clean checkout.
+		ignoreGeneratedHome: true,
+		href: (page) => local(page.file),
+		api,
+	});
 
 	const covers = [
 		guidePages.length > 0 ? "its guides" : undefined,
@@ -461,14 +465,14 @@ export function renderLocalLlms(
 	];
 	return (
 		`${GENERATED_COMMENT_MARK}: edits here are lost the next time \`luaudocs llms\` runs. -->\n` +
-		llmsIndex(config.title, config.description ?? home?.tagline, info, sections)
+		llmsIndex(config.title, config.description ?? summary, info, sections)
 	);
 }
 
 export interface LocalLlmsOptions {
 	/** Absolute path of the file to write. */
 	target: string;
-	/** Compare only: report a missing or stale file instead of writing it. */
+	/** When true, compares only and reports a missing or stale file instead of writing it. */
 	check?: boolean;
 	/** Pre-rendered model (used by tests), reported the same way as a fresh extraction. */
 	rendered?: RenderedModel;
@@ -479,7 +483,7 @@ export type LocalLlmsOutcome =
 	| { status: "failed"; errors: number };
 
 /**
- * Runs `luaudocs llms`: refuses to overwrite a user-owned file, extracts and
+ * Runs `luaudocs llms`. Refuses to overwrite a user-owned file, extracts and
  * renders the project, and writes (or compares under `--check`) the target file.
  * Extraction errors abort without writing so a broken file never shrinks the
  * committed API index. Normalizes CRLF when comparing so Windows checkouts
@@ -491,7 +495,7 @@ export async function runLocalLlms(
 ): Promise<LocalLlmsOutcome> {
 	const { target } = options;
 	const previous = existsSync(target) ? readFileSync(target, "utf8") : undefined;
-	// Check ownership before spawning anything: without the generated marker,
+	// Check ownership before spawning anything. Without the generated marker,
 	// `target` belongs to the user.
 	if (previous !== undefined && !isGeneratedFile(previous)) {
 		throw new Error(
@@ -501,7 +505,9 @@ export async function runLocalLlms(
 	// Walk guides first, as in `runBuild`, so a malformed `_category_` sidecar
 	// throws before spawning the extractor.
 	const guides = collectGuides(context.docsDir);
-	const { result, counts } = await renderProject(context, options.rendered);
+	const { result, counts } = await renderProject(context, options.rendered, {
+		skipDependencies: true,
+	});
 	if (counts.errors > 0) {
 		return { status: "failed", errors: counts.errors };
 	}

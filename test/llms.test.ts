@@ -4,7 +4,6 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import pkg from "../package.json";
 import { createContext, type BuildContext, type RenderedModel } from "../src/build";
 import { parseDocModel } from "../src/docmodel";
 import {
@@ -213,9 +212,6 @@ function checkoutIndex(dir: string, fixture?: string, target = join(dir, LOCAL_L
 	);
 }
 
-const unpinned = (text: string): string =>
-	text.replaceAll(`luaudocs@${pkg.version}`, "luaudocs@<version>");
-
 describe("the checkout's llms.txt", () => {
 	const dir = project({
 		"docs/index.md": HERO,
@@ -228,13 +224,13 @@ describe("the checkout's llms.txt", () => {
 	const tagged = checkoutIndex(dir, "docmodel-tags.json");
 
 	it("matches the Sample snapshot and preserves expected markers", async () => {
-		await expect(unpinned(index)).toMatchFileSnapshot("__snapshots__/sample/llms.txt");
+		await expect(index).toMatchFileSnapshot("__snapshots__/sample/llms.txt");
 
 		for (const marker of [
 			new RegExp(`^${GENERATED_COMMENT_MARK}`),
 			/^<!--.*-->\n# Demo\n/,
 			"\n> A demo site, for the tests.\n",
-			`run \`npx luaudocs@${pkg.version} llms\` in this directory`,
+			"run `npx luaudocs@latest llms` in this directory",
 			"- [Getting Started](docs/guide/getting-started.md): Install it, point it at a module, ship the site.",
 			"- [Errors](docs/guide/reference/errors.md)",
 			"\n## Sample.State\n",
@@ -287,15 +283,15 @@ describe("the checkout's llms.txt", () => {
 		expect(nested).toContain("- [Getting Started](../docs/guide/getting-started.md)");
 		expect(nested).toContain("](../src/State.luau#L44-L49)");
 		expect(nested).toContain("- [Changelog](../CHANGELOG.md)");
-		expect(nested).toContain(`\`npx luaudocs@${pkg.version} llms .. --out api.txt\``);
+		expect(nested).toContain("`npx luaudocs@latest llms .. --out api.txt`");
 		expect(checkoutIndex(dir, undefined, join(dir, "agents", LOCAL_LLMS_FILE))).toContain(
-			`\`npx luaudocs@${pkg.version} llms .. --out llms.txt\``,
+			"`npx luaudocs@latest llms .. --out llms.txt`",
 		);
 		expect(checkoutIndex(dir, undefined, join(dir, "api.txt"))).toContain(
-			`\`npx luaudocs@${pkg.version} llms --out api.txt\``,
+			"`npx luaudocs@latest llms --out api.txt`",
 		);
 		expect(checkoutIndex(dir, undefined, join(dir, "my agents", "api.txt"))).toContain(
-			`\`npx luaudocs@${pkg.version} llms .. --out api.txt\``,
+			"`npx luaudocs@latest llms .. --out api.txt`",
 		);
 		expect(checkoutIndex(dir, undefined, join(dir, "agents", "api notes.txt"))).toContain(
 			`llms .. --out "api notes.txt"\``,

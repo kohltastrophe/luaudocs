@@ -2,22 +2,15 @@
  * Tests for `luaudocs init` and `--from-moonwave` (`src/init.ts`).
  */
 import { execFileSync } from "node:child_process";
-import {
-	copyFileSync,
-	existsSync,
-	mkdirSync,
-	readdirSync,
-	readFileSync,
-	writeFileSync,
-} from "node:fs";
+import { copyFileSync, existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, relative } from "node:path";
+import { basename, join, relative } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import toolPkg from "../package.json";
 import { loadConfig } from "../src/config";
 import { packageRoot } from "../src/extract";
 import { initProject } from "../src/init";
-import { filesUnder, fixturePath, makeTempDirFactory } from "./helpers";
+import { filesUnder, fixturePath, makeTempDirFactory, seed } from "./helpers";
 
 const tempDir = makeTempDirFactory("luaudocs-scaffold-");
 const PLACEHOLDER = /@[A-Z_]+@/;
@@ -50,11 +43,7 @@ async function runInit(
 	opts: Omit<Parameters<typeof initProject>[0], "targetDir"> = {},
 ): Promise<{ dir: string; docsDir: string; lines: string[] }> {
 	const dir = tempDir();
-	for (const [rel, content] of Object.entries(files)) {
-		const abs = join(dir, rel);
-		mkdirSync(dirname(abs), { recursive: true });
-		writeFileSync(abs, content);
-	}
+	seed(dir, files);
 	const lines = await initCapturing({ targetDir: dir, ...opts });
 	return { dir, docsDir: join(dir, ".luaudocs"), lines };
 }
@@ -377,11 +366,7 @@ describe("init --from-moonwave", () => {
 			},
 		]) {
 			const badDir = tempDir();
-			for (const [rel, text] of Object.entries(badFiles)) {
-				const abs = join(badDir, rel);
-				mkdirSync(dirname(abs), { recursive: true });
-				writeFileSync(abs, text);
-			}
+			seed(badDir, badFiles);
 			await expect(initProject({ targetDir: badDir, fromMoonwave: true })).rejects.toThrow();
 			expect(existsSync(join(badDir, ".luaudocs"))).toBe(false);
 			expect(existsSync(join(badDir, "luaudocs.toml"))).toBe(false);
@@ -539,7 +524,7 @@ describe("the scaffolded Pages workflow", () => {
 		expect(yaml).not.toContain("lute");
 		expect(yaml).toContain('build --url "${{ steps.pages.outputs.base_url }}"');
 		expect(yaml).toContain('path: ".luaudocs/.vitepress/dist"');
-		expect(yaml).toContain(`npx luaudocs@${toolPkg.version} `);
+		expect(yaml).toContain("npx luaudocs@latest ");
 		expect(yaml).toContain(`node-version: "${/\d+/.exec(toolPkg.engines.node)![0]}"`);
 		expect(yaml).toContain('branches: "main"');
 
@@ -552,7 +537,9 @@ describe("the scaffolded Pages workflow", () => {
 			"luaudocs.toml": 'title = "X"\n[source]\nentries = []\n[docs]\ndir = "./docs/"\n',
 		});
 		const customYaml = readFileSync(workflowPath(custom.dir), "utf8");
-		expect(customYaml).toContain(`key: \${{ runner.os }}-luaudocs-${toolPkg.version}`);
+		expect(customYaml).toContain(
+			"key: ${{ runner.os }}-luaudocs-${{ steps.luaudocs.outputs.version }}\n",
+		);
 		expect(customYaml).toContain('path: "docs/.vitepress/dist"');
 		expect(customYaml).toContain("            docs/node_modules");
 		expect(customYaml).toContain("~/.cache/luaudocs");

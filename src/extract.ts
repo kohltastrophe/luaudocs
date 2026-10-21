@@ -113,7 +113,7 @@ export async function extractorJson(request: ExtractRequest): Promise<string> {
 		);
 	}
 	// Once `MAXBUFFER` is ruled out above, `error.killed` means Node terminated
-	// the child on its own timeout; any other signal came from outside.
+	// the child on its own timeout, while any other signal came from outside.
 	if (error.killed && timeout > 0) {
 		throw new Error(`extractor timed out after ${timeout / 1000}s; ${OVERRUN_HINT}`);
 	}
@@ -125,7 +125,7 @@ export async function extractorJson(request: ExtractRequest): Promise<string> {
 			`extractor failed (exit ${error.code})\n${stderr.trim() || stdout.trim().slice(0, 2000)}`,
 		);
 	}
-	// No exit code, signal, or timeout: the spawn itself failed because the
+	// No exit code, signal, or timeout means the spawn itself failed because the
 	// binary returned by `resolveLute` could not be executed.
 	throw new Error(lute.hint);
 }

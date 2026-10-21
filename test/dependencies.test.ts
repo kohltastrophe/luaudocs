@@ -161,6 +161,70 @@ describe("buildDependencyLinks and external resolution", () => {
 			"https://dep.test/docs/net/client",
 		]);
 	});
+
+	it("follows aliasOf passthrough entry modules and links runtime-alias module badges", () => {
+		const passthroughDep = parseDocModel(
+			modelJson([
+				{
+					id: "src/init.luau",
+					instancePath: ["Dep"],
+					name: "Dep",
+					aliasOf: "src/Impl.luau",
+					source: { file: "src/init.luau", line: 1 },
+				},
+				{
+					id: "src/Impl.luau",
+					instancePath: ["Dep", "Impl"],
+					name: "Dep",
+					types: [
+						{
+							id: "src/Impl.luau#type.Handle",
+							name: "Handle",
+							kind: "alias",
+							exported: true,
+							visibility: "public",
+							tags: { custom: [] },
+							generics: [],
+							definition: [["number"]],
+							source: { file: "src/Impl.luau", line: 1 },
+						},
+					],
+					source: { file: "src/Impl.luau", line: 1 },
+				},
+			]),
+		);
+		const links = buildDependencyLinks([
+			{ alias: "dep", url: "https://dep.test/docs", model: passthroughDep },
+		]);
+		expect(links.resolve({ alias: "dep", path: "", name: "Handle" })).toBe(
+			"https://dep.test/docs/api/Dep#handle",
+		);
+		const consumer = JSON.stringify({
+			...JSON.parse(
+				modelJson([
+					{
+						id: "src/init.luau",
+						instancePath: ["App"],
+						name: "App",
+						source: { file: "src/init.luau", line: 1 },
+						reexports: [
+							{
+								id: "src/init.luau#reexport.dep",
+								name: "dep",
+								targetModule: "@dep",
+								url: "https://dep.test/docs",
+							},
+						],
+					},
+				]),
+			),
+			externals: { "@dep": { url: "https://dep.test/docs", alias: "dep", path: "" } },
+		});
+		const rendered = emitDocsFromJson(consumer, testConfig(), links).pages.get("App.md")!;
+		expect(rendered).toContain(
+			'[<Badge type="info" text="Module" />](https://dep.test/docs/api/Dep){.badge-link .ignore-header}',
+		);
+	});
 });
 
 describe("loadDependencies", () => {

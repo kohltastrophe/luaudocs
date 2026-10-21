@@ -1,30 +1,16 @@
 /**
  * Tests for `syncDir`, `filterModel`, and `runBuild` (`src/build.ts`).
  */
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import {
-	createContext,
-	filterModel,
-	runBuild,
-	syncDir,
-	type BuildContext,
-	type RenderedModel,
-} from "../src/build";
+import { createContext, runBuild, type BuildContext, type RenderedModel } from "../src/build";
 import { parseDocModel, type DocModel } from "../src/docmodel";
-import { emitDocs } from "../src/render";
-import { makeTempDirFactory, modelJson, readFixture } from "./helpers";
+import { syncDir } from "../src/pages";
+import { emitDocs, filterModel } from "../src/render";
+import { makeTempDirFactory, modelJson, readFixture, seed } from "./helpers";
 
 const tempDir = makeTempDirFactory("luaudocs-sync-");
-
-function seed(dir: string, files: Record<string, string>): void {
-	for (const [rel, content] of Object.entries(files)) {
-		const abs = join(dir, rel);
-		mkdirSync(join(abs, ".."), { recursive: true });
-		writeFileSync(abs, content);
-	}
-}
 
 describe("syncDir", () => {
 	it("writes new/changed files, sweeps stale files/dirs, and skips unchanged files", () => {

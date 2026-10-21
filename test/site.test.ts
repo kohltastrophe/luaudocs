@@ -3,13 +3,19 @@
  * and breadcrumb trails (`src/site.ts`).
  */
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createContext } from "../src/build";
 import type { SidebarItem } from "../src/nav";
 import { isGeneratedFile } from "../src/pages";
-import { collectGuides, pageTrails, syncSite, type GuideItem } from "../src/site";
-import { makeTempDirFactory } from "./helpers";
+import {
+	apiPageTrails,
+	collectGuides,
+	guidePageTrails,
+	syncSite,
+	type GuideItem,
+} from "../src/site";
+import { makeTempDirFactory, seed } from "./helpers";
 
 const tempDir = makeTempDirFactory("luaudocs-site-");
 
@@ -31,11 +37,7 @@ function sync(dir: string, apiSidebar: SidebarItem[] = []): string[] {
 }
 
 function writeGuides(docsDir: string, files: Record<string, string>): void {
-	for (const [rel, text] of Object.entries(files)) {
-		const abs = join(docsDir, "guide", rel);
-		mkdirSync(dirname(abs), { recursive: true });
-		writeFileSync(abs, text);
-	}
+	seed(join(docsDir, "guide"), files);
 }
 
 function guidesOf(files: Record<string, string>): GuideItem[] {
@@ -462,7 +464,7 @@ describe("guides sidebar and page trails", () => {
 				],
 			],
 		]);
-		const trails = pageTrails(guides, api, true);
+		const trails = { ...guidePageTrails(guides, true), ...apiPageTrails(api) };
 		expect(trails["guide/getting-started.md"]).toEqual([HOME]);
 		expect(trails["guide/unindexed/tags.md"]).toEqual([HOME, { text: "Unindexed" }]);
 		expect(trails["guide/reference/cli.md"]).toEqual([
@@ -477,6 +479,6 @@ describe("guides sidebar and page trails", () => {
 		]);
 		expect(trails["api/index.md"]).toEqual([HOME]);
 		expect(trails["changelog.md"]).toEqual([HOME]);
-		expect(pageTrails([], new Map(), false)).toEqual({});
+		expect({ ...guidePageTrails([], false), ...apiPageTrails(new Map()) }).toEqual({});
 	});
 });

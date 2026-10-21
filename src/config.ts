@@ -1,19 +1,22 @@
 /**
- * luaudocs.toml: discovery (walk up from the start directory), parsing
- * (smol-toml), and a hand-rolled validator. Validation is strict about
- * unknown keys on purpose: silently stripping a misspelled key while its
- * default takes effect is the worst failure mode a config can have.
+ * `luaudocs.toml` discovery (walk up from the start directory), parsing
+ * (`smol-toml`), and validation. Unknown keys are rejected intentionally so a
+ * misspelled key cannot silently fall back to its default.
  *
- * The file itself is optional: when no config exists in the directory tree,
+ * The file itself is optional. When no config exists in the directory tree,
  * the loader synthesizes one (title from the folder name, entries probed by
- * convention), so `build` and `dev` work in a project with no LuauDocs
- * footprint at all. Strictness and defaults do not conflict: a key that is
- * present must be well-formed, while an omitted key falls back to its default.
+ * convention) so `build` and `dev` work in a project with no LuauDocs
+ * footprint. Present keys must be well-formed, while omitted keys fall back to
+ * their defaults.
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { parse as parseToml } from "smol-toml";
-import { toPosix } from "./pages";
+
+/** Normalizes Windows `\` path separators to `/` (Node's `relative()` returns `\` on Windows). */
+export function toPosix(path: string): string {
+	return path.replace(/\\/g, "/");
+}
 
 export interface NavItem {
 	text: string;
@@ -23,7 +26,7 @@ export interface NavItem {
 	items?: NavItem[];
 }
 
-/** One `[[site.head]]` entry: a tag appended verbatim to every page's `<head>`. */
+/** One `[[site.head]]` entry appended verbatim to every page's `<head>`. */
 export interface HeadTag {
 	tag: string;
 	attrs?: Record<string, string>;
@@ -31,12 +34,12 @@ export interface HeadTag {
 }
 
 /**
- * Target configuration for a runtime alias: `url` is the base URL its module
+ * Target configuration for a runtime alias. `url` is the base URL its module
  * pages hang under (`@lute/fs` -> `<url>/fs`), and `model` is a doc model
  * published by the runtime's own LuauDocs site (`public/docmodel.json`, via URL
  * or local path) so types reached through the alias link to their exact
- * declaration. When both are omitted, the alias is recognized and mounts
- * cleanly without linking anywhere.
+ * declaration. When both are omitted, the extractor recognizes and mounts the
+ * alias cleanly without linking anywhere.
  */
 export interface AliasConfig {
 	url?: string;
@@ -47,17 +50,17 @@ export interface LuauDocsConfig {
 	title: string;
 	description?: string;
 	source: {
-		/** `[]` means guide-only: the extractor never runs and no `/api/` pages are emitted. */
+		/** When `[]`, runs in guide-only mode without running the extractor or emitting `/api/` pages. */
 		entries: string[];
 		include?: string[];
 		exclude?: string[];
 		projectFile?: string;
-		/** Runtime-provided require aliases (lowercased, without `@`); see AliasConfig. */
+		/** Runtime-provided require aliases (lowercased, without `@`), as configured by `AliasConfig`. */
 		aliases: Record<string, AliasConfig>;
 	};
 	repo?: { url: string; branch: string };
 	site: {
-		/** Navbar brand text: defaults to `title`; `false` shows only the logo. */
+		/** Navbar brand text (defaults to `title`, or `false` to show only the logo). */
 		siteTitle?: string | false;
 		logo?: string | { light: string; dark: string };
 		favicon?: string;
@@ -86,7 +89,7 @@ export const DEFAULT_DOCS_DIR = ".luaudocs";
  * through one is a real dependency that no project file can resolve, so the
  * extractor treats it as external instead of unresolved, and types imported
  * through it link to the module's page under this base URL (`@lute/fs` ->
- * `.../lute/fs`). `[source.aliases]` adds to or overrides these defaults;
+ * `.../lute/fs`). `[source.aliases]` adds to or overrides these defaults, and
  * `false` removes a built-in alias.
  */
 export const DEFAULT_ALIASES: Record<string, AliasConfig> = {
@@ -97,8 +100,8 @@ export const DEFAULT_ALIASES: Record<string, AliasConfig> = {
 
 /**
  * Formats a repository file URL on its host for source links and rewritten
- * README links: `blob` renders the file view, while `raw` serves the raw bytes
- * needed by inline `<img>` tags. Uses GitHub's URL layout, which `[repo]`
+ * README links (`blob` renders the file view, while `raw` serves the raw bytes
+ * needed by inline `<img>` tags). Uses GitHub's URL layout, which `[repo]`
  * targets.
  */
 export function repoFileUrl(
@@ -144,8 +147,8 @@ function strArray(value: unknown, path: string): string[] {
 }
 
 /**
- * `[source] aliases`, merged over the built-in runtimes. Names are lowercased
- * (Luau resolves aliases case-insensitively) and stripped of any leading `@`,
+ * Validates `[source] aliases` merged over the built-in runtimes. Lowercases
+ * names (Luau resolves aliases case-insensitively) and strips any leading `@`,
  * so `"@Lute"` and `lute` name the same alias. A URL string links the alias to
  * that base, a table sets `url` and `model` separately (`model` requires `url`),
  * `true` registers the alias without linking it, and `false` removes a built-in.
@@ -169,7 +172,7 @@ function aliases(value: unknown, path: string): Record<string, AliasConfig> {
 				url: opt(spec, entryPath, "url", url),
 				model: opt(spec, entryPath, "model", str),
 			};
-			// a model's links resolve against the site it was published from
+			// A model's links resolve against the site that published it.
 			if (alias.model !== undefined && alias.url === undefined) {
 				fail(
 					keyPath(entryPath, "url"),
@@ -185,7 +188,7 @@ function aliases(value: unknown, path: string): Record<string, AliasConfig> {
 }
 
 /**
- * Shared URL normalizer for every URL config key and `build --url`: trims
+ * Shared URL normalizer for every URL config key and `build --url`. Trims
  * trailing slashes (callers append their own) and returns `undefined` when the
  * input is not an `http(s)` URL. Checking the scheme catches bare hosts with
  * ports (`docs.example.com:8080` parses as scheme `docs.example.com:` with path
@@ -194,12 +197,11 @@ function aliases(value: unknown, path: string): Record<string, AliasConfig> {
  */
 function normalizeUrl(value: string): string | undefined {
 	const text = value.replace(/\/+$/, "");
-	try {
-		const { protocol } = new URL(text);
-		return protocol === "http:" || protocol === "https:" ? text : undefined;
-	} catch {
+	if (!URL.canParse(text)) {
 		return undefined;
 	}
+	const { protocol } = new URL(text);
+	return protocol === "http:" || protocol === "https:" ? text : undefined;
 }
 
 function url(value: unknown, path: string): string {
@@ -299,8 +301,8 @@ function headTags(value: unknown, path: string): HeadTag[] {
 /**
  * Validates a parsed TOML document into a complete config with defaults filled.
  * `fallbackTitle` (the folder name supplied by the config loaders) makes
- * `title` optional on disk; calling `validateConfig` without one keeps `title`
- * required.
+ * `title` optional on disk, while calling `validateConfig` without one keeps
+ * `title` required.
  */
 export function validateConfig(data: unknown, fallbackTitle?: string): LuauDocsConfig {
 	const raw = table(data, "(root)");
@@ -319,7 +321,7 @@ export function validateConfig(data: unknown, fallbackTitle?: string): LuauDocsC
 		aliases: opt(rawSource, "source", "aliases", aliases) ?? { ...DEFAULT_ALIASES },
 	};
 
-	// [repo] has a required `url` key, so it stays undefined when omitted
+	// `[repo]` requires `url`, so it stays `undefined` when omitted.
 	let repo: LuauDocsConfig["repo"];
 	if (raw.repo !== undefined) {
 		const rawRepo = table(raw.repo, "repo");
@@ -347,7 +349,7 @@ export function validateConfig(data: unknown, fallbackTitle?: string): LuauDocsC
 		nav: opt(rawSite, "site", "nav", navItems),
 		head: opt(rawSite, "site", "head", headTags),
 	};
-	// union-typed keys validated inline rather than through a single-purpose coercer
+	// Validate union-typed keys inline rather than through single-purpose coercers.
 	if (rawSite.siteTitle !== undefined) {
 		if (typeof rawSite.siteTitle !== "string" && rawSite.siteTitle !== false) {
 			fail("site.siteTitle", "a string or false");
@@ -387,7 +389,7 @@ export function validateConfig(data: unknown, fallbackTitle?: string): LuauDocsC
 	};
 
 	return {
-		// the guard above ensures fallbackTitle is defined whenever raw.title is absent
+		// The guard above guarantees `fallbackTitle` is defined whenever `raw.title` is absent.
 		title: raw.title === undefined ? fallbackTitle! : str(raw.title, "title"),
 		description: opt(raw, "", "description", str),
 		source,
@@ -420,7 +422,7 @@ export function parseUrlFlag(value: string): string {
 
 export interface LoadedConfig {
 	config: LuauDocsConfig;
-	/** Base directory for relative paths: the folder containing `luaudocs.toml`, or the start directory when no config file exists. */
+	/** Base directory for relative paths (the folder containing `luaudocs.toml`, or the start directory when no config file exists). */
 	root: string;
 	/** Undefined when the project has no `luaudocs.toml` and runs on defaults. */
 	configPath?: string;
@@ -450,8 +452,8 @@ export const PROBED_ENTRIES = ["src", "lib"];
  * Probes conventional module roots in caller-specified order, shared by
  * config-less builds, `init`, and Moonwave conversion. When `requireInit` is
  * true, only directories containing an `init.luau` or `init.lua` match, so
- * `init` never writes an entry directory that would fail the first build;
- * config-less builds pass `false` so the extractor's own `entry-missing`
+ * `init` never writes an entry directory that would fail the first build.
+ * Config-less builds pass `false` so the extractor's own `entry-missing`
  * diagnostic reports a folder without an init file.
  */
 export function probeEntries(root: string, order: string[], requireInit: boolean): string[] {
@@ -483,9 +485,9 @@ export function defaultConfig(root: string): LuauDocsConfig {
  * Normalizes `[docs] dir` to a clean POSIX path relative to `root` (with no
  * leading `./` or trailing slash) so edit links, the Pages workflow's artifact
  * path, and re-templated configs all agree without leaking machine-local
- * absolute paths. Rejects the project root itself and any directory outside it:
- * the build owns `index.md`, `package.json`, and `.gitignore` in the docs root
- * and sweeps `.vitepress/` and `api/` beneath it.
+ * absolute paths. Rejects the project root itself and any directory outside it,
+ * since the build owns `index.md`, `package.json`, and `.gitignore` in the docs
+ * root and sweeps `.vitepress/` and `api/` beneath it.
  */
 export function normalizeDocsDir(config: LuauDocsConfig, root: string): LuauDocsConfig {
 	const rel = toPosix(relative(root, resolve(root, config.docs.dir)));
@@ -500,10 +502,13 @@ export function normalizeDocsDir(config: LuauDocsConfig, root: string): LuauDocs
 }
 
 export function loadConfig(startDir: string): LoadedConfig {
-	const configPath = findConfig(startDir);
+	const resolvedStart = resolve(startDir);
+	if (!existsSync(resolvedStart) || !statSync(resolvedStart).isDirectory()) {
+		throw new ConfigError(`directory not found: ${startDir}`);
+	}
+	const configPath = findConfig(resolvedStart);
 	if (configPath === undefined) {
-		const root = resolve(startDir);
-		return { config: defaultConfig(root), root };
+		return { config: defaultConfig(resolvedStart), root: resolvedStart };
 	}
 	const root = dirname(configPath);
 	return {

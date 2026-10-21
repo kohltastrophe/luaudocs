@@ -8,10 +8,10 @@
 // trail before block parsing.
 //
 // All rewrites share a single fence-masking pass so fenced code examples that
-// show `<Frame>`, `<Tabs>`, or `:::note` syntax are left untouched.
+// show `<Frame>`, `<Tabs>`, or `:::note` syntax stay untouched.
 //
-// Because this file is synced into user sites, it cannot import from `src/`;
-// `splitFences` lives here and `src/markdown.ts` re-exports it.
+// Because `syncSite` copies this file into user sites, it cannot import from
+// `src/`; `splitFences` lives here and `src/markdown.ts` re-exports it.
 import type MarkdownIt from "markdown-it";
 
 // Up-to-3-space indent accepted by CommonMark, followed by a fence marker run.
@@ -134,9 +134,15 @@ function closeGap(body: string): string {
 	return body.endsWith(MARK) ? "\n" : "\n\n";
 }
 
+const ATTR_PATTERNS = {
+	label: /\blabel\s*=\s*(["'])(.*?)\1/,
+	value: /\bvalue\s*=\s*(["'])(.*?)\1/,
+	link: /\blink\s*=\s*(["'])(.*?)\1/,
+} as const;
+
 /** Reads a double- or single-quoted attribute from an opening tag's attribute string. */
-function attr(attrs: string, name: string): string | undefined {
-	return attrs.match(new RegExp(`\\b${name}\\s*=\\s*(["'])(.*?)\\1`))?.[2];
+function attr(attrs: string, name: keyof typeof ATTR_PATTERNS): string | undefined {
+	return ATTR_PATTERNS[name].exec(attrs)?.[2];
 }
 
 /** Tests for Docusaurus's boolean `default` attribute on `<TabItem>` after stripping quoted attribute values. */
@@ -162,7 +168,7 @@ function rewriteTabs(masked: string, fences: string[]): string {
 				label: attr(attrs, "label") ?? attr(attrs, "value") ?? "",
 				default: isDefault(attrs),
 				body: text,
-				fence: marker ? fences[Number(marker[1])] : undefined,
+				fenceIndex: marker ? Number(marker[1]) : undefined,
 			};
 		});
 		if (items.length === 0) {
@@ -185,15 +191,18 @@ function rewriteTabs(masked: string, fences: string[]): string {
 			})
 			.join("");
 		const panels = items.map((item, index) => {
-			if (item.fence !== undefined) {
+			if (item.fenceIndex !== undefined) {
 				// When a tab contains a single code fence, the fence itself is the
 				// panel; strip any `[title]` from the fence opener since the tab
-				// label already names it.
-				const fence = item.fence.replace(FENCE_INFO, (line) => {
+				// label already names it. Mutate the masked entry in place and keep
+				// the sentinel in the document so `rewriteFrames` and
+				// `rewriteAdmonitions` cannot rewrite inside the code fence.
+				const fence = fences[item.fenceIndex]!.replace(FENCE_INFO, (line) => {
 					const bare = line.replace(FENCE_TITLE, "");
 					return index === top ? `${bare} active` : bare;
 				});
-				return fence.trimEnd();
+				fences[item.fenceIndex] = fence.trimEnd();
+				return item.body;
 			}
 			return (
 				`<div class="vp-block${index === top ? " active" : ""}">\n\n` +
@@ -220,7 +229,7 @@ const HEADING_INLINE =
 	/`([^`\n]+)`|\[([^\]\n]*)\]\((<[^<>\n]*>|[^\s()]*)\)(?:\{([^{}\n]*)\})?|\\([!-/:-@[-`{-~])/g;
 
 /** Converts inline markdown constructs inside a framed heading into HTML. */
-function headingHtml(text: string): string {
+function headingHtml(text: string, basePrefix = ""): string {
 	return text.replace(
 		HEADING_INLINE,
 		(
@@ -241,7 +250,11 @@ function headingHtml(text: string): string {
 					.map((attr) => attr.slice(1));
 				const cls = classes.length > 0 ? ` class="${escapeHtml(classes.join(" "))}"` : "";
 				const target = href!.replace(/^<(.*)>$/, "$1");
-				return `<a href="${escapeHtml(target)}"${cls}>${headingHtml(label)}</a>`;
+				const resolved =
+					target.startsWith("/") && !target.startsWith("//")
+						? `${basePrefix}${target}`
+						: target;
+				return `<a href="${escapeHtml(resolved)}"${cls}>${headingHtml(label, basePrefix)}</a>`;
 			}
 			return escapeHtml(escaped!);
 		},
@@ -258,11 +271,11 @@ function headingHtml(text: string): string {
  * converts code spans, linked badges, and backslash escapes in the heading line
  * directly to HTML.
  */
-function unlistHeadings(body: string): string {
+function unlistHeadings(body: string, basePrefix = ""): string {
 	return body.replace(
 		ATX_HEADING,
 		(_line, hashes: string, text: string) =>
-			`<h${hashes.length}>${headingHtml(text)}</h${hashes.length}>`,
+			`<h${hashes.length}>${headingHtml(text, basePrefix)}</h${hashes.length}>`,
 	);
 }
 
@@ -287,39 +300,41 @@ export function linkDestination(url: string): string {
  * Rewrites `<Frame>` into a bordered callout block with an optional top-border
  * caption (`label`, optionally linked via `link`).
  *
- * Linked captions and the frame body are emitted as markdown separated by blank
- * lines so VitePress prefixes the site `base`, runs its dead-link check, and
- * parses the body as markdown rather than raw HTML.
+ * Emits linked captions and the frame body as markdown separated by blank lines
+ * so VitePress prefixes the site `base`, runs its dead-link check, and parses
+ * the body as markdown rather than raw HTML.
  */
-function rewriteFrames(masked: string): string {
+function rewriteFrames(masked: string, basePrefix = ""): string {
 	return masked.replace(FRAME, (_frame, attrs: string, body: string) => {
 		const label = attr(attrs, "label");
 		const link = attr(attrs, "link");
-		const caption =
-			label === undefined
-				? ""
-				: link === undefined
+		let caption = "";
+		if (label !== undefined) {
+			caption =
+				link === undefined
 					? `<div class="luaudocs-frame-label">${escapeHtml(label)}</div>\n`
 					: `<div class="luaudocs-frame-label">\n\n[${escapeMarkdown(label)}` +
 						`<span class="luaudocs-frame-arrow">&#8594;</span>](${linkDestination(link)})` +
 						`\n\n</div>\n`;
-		const content = unlistHeadings(body.trim());
+		}
+		const content = unlistHeadings(body.trim(), basePrefix);
 		return `<div class="luaudocs-frame">\n${caption}\n${content}${closeGap(content)}</div>`;
 	});
 }
 
 /**
  * Runs `<Tabs>`, `<Frame>`, and admonition rewrites over a markdown document
- * while masking fenced code blocks with null-byte markers so code examples are
- * never rewritten.
+ * while masking fenced code blocks with null-byte markers so code examples stay
+ * untouched.
  */
-export function rewriteMarkup(text: string): string {
+export function rewriteMarkup(text: string, base = "/"): string {
 	const tabs = text.includes("<Tabs");
 	const frames = text.includes("<Frame");
 	const admonitions = /^[ \t]{0,3}:::\w/m.test(text);
 	if (!tabs && !frames && !admonitions) {
 		return text;
 	}
+	const basePrefix = base.replace(/\/+$/, "");
 	const fences: string[] = [];
 	const masked = splitFences(text)
 		.map((part, index) => {
@@ -338,7 +353,7 @@ export function rewriteMarkup(text: string): string {
 		rewritten = rewriteTabs(rewritten, fences);
 	}
 	if (frames) {
-		rewritten = rewriteFrames(rewritten);
+		rewritten = rewriteFrames(rewritten, basePrefix);
 	}
 	if (admonitions) {
 		rewritten = rewriteAdmonitions(rewritten);
@@ -379,10 +394,10 @@ export function prependTrail(source: string, trail: TrailSegment[] | undefined):
  * Installs the `markdown-it` core rule that runs `rewriteMarkup` and
  * `prependTrail` on each page's raw source before block parsing.
  */
-export function installMarkupRule(md: MarkdownIt, trails: PageTrails): void {
+export function installMarkupRule(md: MarkdownIt, trails: PageTrails, base = "/"): void {
 	md.core.ruler.before("block", "luaudocs", (state) => {
 		const page = (state.env as { relativePath?: string } | null)?.relativePath ?? "";
-		state.src = prependTrail(rewriteMarkup(state.src), trails[page]);
+		state.src = prependTrail(rewriteMarkup(state.src, base), trails[page]);
 		return true;
 	});
 }

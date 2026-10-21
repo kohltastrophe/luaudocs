@@ -45,8 +45,11 @@ export function parseLinks(meta: string | undefined): Array<[number, number, str
 	try {
 		const parsed: unknown = JSON.parse(split.payload);
 		return Array.isArray(parsed) ? (parsed as Array<[number, number, string]>) : undefined;
-	} catch {
-		return undefined;
+	} catch (error) {
+		if (error instanceof SyntaxError) {
+			return undefined;
+		}
+		throw error;
 	}
 }
 
@@ -70,8 +73,8 @@ function retoken(
 
 /**
  * Base64url-encodes `luaudocs-links=` before VitePress's fence renderer runs.
- * Must be installed last so this wrapper is outermost and runs before VitePress
- * strips `/\[.*\]/` (code-group titles) from the fence info string.
+ * Install last so this wrapper sits outermost and runs before VitePress strips
+ * `/\[.*\]/` (code-group titles) from the fence info string.
  */
 export function relayLinks(md: MarkdownIt): void {
 	const fence = md.renderer.rules.fence!;
@@ -104,14 +107,14 @@ export function decodeLinks(): ShikiTransformer {
 }
 
 /**
- * Wraps linked type spans in `<a class="sig-link">` decorations. `base` is the
- * VitePress site `base` path and must be prefixed here: these `<a>` elements
- * are created inside Shiki's HAST rather than as `markdown-it` `link_open`
- * tokens, so VitePress does not prefix `base` on them automatically.
+ * Wraps linked type spans in `<a class="sig-link">` decorations. Prefixes the
+ * VitePress site `base` path onto root-relative hrefs: Shiki creates these `<a>`
+ * elements inside its HAST rather than as `markdown-it` `link_open` tokens, so
+ * VitePress does not prefix `base` on them automatically.
  */
 export function signatureLinks(base = "/"): ShikiTransformer {
 	const prefix = base.replace(/\/$/, "");
-	const rooted = (href: string) => (href.startsWith("/") ? `${prefix}${href}` : href);
+	const withBaseHref = (href: string) => (href.startsWith("/") ? `${prefix}${href}` : href);
 	return {
 		name: "luaudocs:signature-links",
 		preprocess(code, options) {
@@ -143,7 +146,7 @@ export function signatureLinks(base = "/"): ShikiTransformer {
 					start,
 					end,
 					tagName: "a",
-					properties: { href: rooted(href), class: "sig-link" },
+					properties: { href: withBaseHref(href), class: "sig-link" },
 				});
 			}
 		},

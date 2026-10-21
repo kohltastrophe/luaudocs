@@ -1,10 +1,21 @@
 /**
- * Organizes `DocModel` into `PageModel[]`: one page per module, with its classes
- * rendered as sections. Owns visibility filtering, the reachable-type closure,
+ * Organizes `DocModel` into `PageModel[]` (one page per module, with its classes
+ * rendered as sections). Owns visibility filtering, the reachable-type closure,
  * re-export inlining, page-slug disambiguation, and the module export edges
- * that `src/nav.ts` follows. Heading anchors are populated afterward by
- * `mintAnchors` in `src/render.ts`.
+ * that `src/nav.ts` follows. `mintAnchors` in `src/render.ts` populates heading
+ * anchors afterward.
  */
+import {
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	renameSync,
+	rmdirSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
+import { dirname, join, relative } from "node:path";
 import type {
 	Badges,
 	Class,
@@ -18,8 +29,29 @@ import type {
 	SourceSpan,
 	TypeDecl,
 } from "./docmodel";
-import type { LuauDocsConfig } from "./config";
+import { toPosix, type LuauDocsConfig } from "./config";
 import { frontmatter } from "./markdown";
+
+export { toPosix };
+
+export interface BuildContext {
+	config: LuauDocsConfig;
+	/**
+	 * Base directory for all relative paths (the directory containing
+	 * `luaudocs.toml`, or `startDir` when running with synthesized defaults).
+	 */
+	root: string;
+	/** Absent when the project runs on synthesized defaults. */
+	configPath?: string;
+	docsDir: string;
+	apiDir: string;
+}
+
+/**
+ * Packages written into the generated docs `package.json` by `docsPackageJson`,
+ * checked by `ensureVitepress` to detect missing dependencies in an existing install.
+ */
+export const SITE_DEPENDENCIES = ["vitepress", "vitepress-plugin-group-icons", "vue"] as const;
 
 /** `<docsDir>/api/` on disk, served at `/api/`. */
 export const API_DIR = "api";
@@ -34,9 +66,137 @@ export function apiPageFile(slug: string): string {
 	return `${slug}.md`;
 }
 
-/** Normalizes Windows `\` path separators to `/` (Node's `relative()` returns `\` on Windows). */
-export function toPosix(path: string): string {
-	return path.replace(/\\/g, "/");
+/**
+ * Writes `absPath` only when its content differs, so file watchers (VitePress
+ * HMR) only react to real changes. Compares raw bytes when given a `Uint8Array`
+ * because the runtime templates include a `.woff2` font that a UTF-8 round-trip
+ * would corrupt with `U+FFFD` replacement characters.
+ */
+export function writeIfChanged(absPath: string, content: string | Uint8Array): boolean {
+	try {
+		const unchanged =
+			typeof content === "string"
+				? readFileSync(absPath, "utf8") === content
+				: readFileSync(absPath).equals(content);
+		if (unchanged) {
+			return false;
+		}
+	} catch {
+		// Missing or unreadable file: fall through to write.
+	}
+	mkdirSync(dirname(absPath), { recursive: true });
+	writeFileSync(absPath, content);
+	return true;
+}
+
+/** Writes `content` when defined, or removes `absPath` if it exists. */
+export function syncFile(absPath: string, content: string | undefined): void {
+	if (content !== undefined) {
+		writeIfChanged(absPath, content);
+	} else if (existsSync(absPath)) {
+		rmSync(absPath);
+	}
+}
+
+/** Lists every file under `root`, POSIX-relative and sorted (`[]` if `root` is missing). */
+export function filesUnder(root: string): Array<{ abs: string; rel: string }> {
+	if (!existsSync(root)) {
+		return [];
+	}
+	return readdirSync(root, { recursive: true, withFileTypes: true })
+		.filter((entry) => entry.isFile())
+		.map((entry) => {
+			const abs = join(entry.parentPath, entry.name);
+			return { abs, rel: toPosix(relative(root, abs)) };
+		})
+		.sort((a, b) => (a.rel < b.rel ? -1 : 1));
+}
+
+export interface SyncSummary {
+	written: number;
+	deleted: number;
+	unchanged: number;
+}
+
+/**
+ * Syncs `dir` to contain the exact `files` map. `deleteStale: false` skips the
+ * stale-file sweep (on error builds), and `keepForeign` exempts paths owned by
+ * another process inside a tool-owned tree (such as VitePress's `dist/` and `cache/`).
+ *
+ * On case-insensitive, case-preserving filesystems (macOS and Windows), writing
+ * a re-cased slug updates the existing file in place without changing its
+ * directory-entry casing. Because slugs never collide case-insensitively within
+ * a build (`claimSlug`), the sweep renames any entry that matches a kept file
+ * only case-insensitively (`widget.md` -> `Widget.md`) instead of deleting it.
+ */
+export function syncDir(
+	dir: string,
+	files: Map<string, string | Uint8Array>,
+	deleteStale = true,
+	keepForeign?: (relPath: string) => boolean,
+): SyncSummary {
+	const summary: SyncSummary = { written: 0, deleted: 0, unchanged: 0 };
+	if (!existsSync(dir) && files.size === 0) {
+		return summary;
+	}
+	mkdirSync(dir, { recursive: true });
+
+	const keep = new Set<string>();
+	for (const [relPath, content] of files) {
+		const abs = join(dir, relPath);
+		// Record the normalized relative path (`filesUnder` uses the same form) so a
+		// non-canonical key (`./Foo.md`) is not written and then swept.
+		keep.add(toPosix(relative(dir, abs)));
+		if (writeIfChanged(abs, content)) {
+			summary.written += 1;
+		} else {
+			summary.unchanged += 1;
+		}
+	}
+
+	if (!deleteStale) {
+		return summary;
+	}
+
+	const onDisk: Array<{ abs: string; rel: string }> = [];
+	const present = new Set<string>();
+	const subdirs: string[] = [];
+	for (const entry of readdirSync(dir, { recursive: true, withFileTypes: true })) {
+		const abs = join(entry.parentPath, entry.name);
+		const rel = toPosix(relative(dir, abs));
+		if (keepForeign?.(rel)) {
+			continue;
+		}
+		if (entry.isDirectory()) {
+			subdirs.push(abs);
+		} else if (entry.isFile()) {
+			onDisk.push({ abs, rel });
+			present.add(rel);
+		}
+	}
+	let keepByLower: Map<string, string> | undefined;
+	for (const { abs, rel } of onDisk) {
+		if (keep.has(rel)) {
+			continue;
+		}
+		keepByLower ??= new Map([...keep].map((item) => [item.toLowerCase(), item]));
+		const kept = keepByLower.get(rel.toLowerCase());
+		if (kept !== undefined && !present.has(kept)) {
+			renameSync(abs, join(dir, kept));
+			continue;
+		}
+		rmSync(abs);
+		summary.deleted += 1;
+	}
+	// Remove directories emptied by the sweep, deepest first (non-empty ones throw and stay).
+	for (const emptied of subdirs.sort((a, b) => b.length - a.length)) {
+		try {
+			rmdirSync(emptied);
+		} catch {
+			// Directory still holds kept files.
+		}
+	}
+	return summary;
 }
 
 /** Compares titles with a pinned `"en"` locale so sort order is identical across OS/ICU builds. */
@@ -48,8 +208,8 @@ export function compareTitles(a: string, b: string): number {
  * Ownership marker placed on the first line (or first frontmatter line) of
  * files LuauDocs writes into user-owned locations (`<docs>/index.md`,
  * `<docs>/.gitignore`, `<docs>/changelog.md`). A file without this marker
- * belongs to the user and is never overwritten; deleting the marker line is how
- * an author takes ownership of a generated file.
+ * belongs to the user and is never overwritten, and deleting the marker line is
+ * how an author takes ownership of a generated file.
  */
 export const GENERATED_MARK = "# Generated by luaudocs";
 
@@ -120,7 +280,6 @@ export function generatedFrontmatter(title: string, extra: string[] = []): strin
 	].join("\n");
 }
 
-/** Heading for the page-level types section, rendered ahead of the primary section's members. */
 export const TYPES_HEADING = "Types";
 
 /** Provenance metadata for a member inlined from another module. */
@@ -173,8 +332,8 @@ export interface PageModel {
 	/**
 	 * Disambiguated title qualified with the parent instance segment
 	 * (`"Defaults (Flux)"`), set only when another module claimed `title` first.
-	 * Used in the sidebar, search index, and browser tab; the page H1 and URL
-	 * slug still use `title`.
+	 * Used in the sidebar, search index, and browser tab, while the page H1 and
+	 * URL slug still use `title`.
 	 */
 	navTitle?: string;
 	moduleId: string;
@@ -240,7 +399,6 @@ function aliasResolver(model: DocModel): (moduleId: string) => string {
 	};
 }
 
-/** Returns `true` when a declaration should be included on the rendered page. */
 function isVisible(member: { visibility: string }, includePrivate: boolean): boolean {
 	return includePrivate || member.visibility !== "private";
 }
@@ -255,10 +413,11 @@ function sectionHasContent(section: PageSection): boolean {
 
 function classToSection(cls: Class, primaryName: string, includePrivate: boolean): PageSection {
 	const isPrimary = isPrimaryClass(cls, primaryName);
+	const qualifiedName = cls.within ? `${cls.within}.${cls.name}` : cls.name;
 	return {
 		name: isPrimary ? "" : cls.name,
 		id: isPrimary ? undefined : cls.id,
-		container: isPrimary ? primaryName : cls.within ? `${cls.within}.${cls.name}` : cls.name,
+		container: isPrimary ? primaryName : qualifiedName,
 		doc: cls.doc,
 		tags: cls.tags,
 		constructors: cls.constructors,
@@ -300,6 +459,13 @@ function listedTypeIds(model: DocModel, includePrivate: boolean): Set<string> {
 		}
 	};
 
+	const mentionMember = (member: Member) => {
+		if (isVisible(member, includePrivate)) {
+			// `signature.segs` spans the entire signature after `callee`,
+			// covering parameters, returns, and generic defaults in one pass.
+			mention(member.kind === "prop" ? member.type : member.signature.segs);
+		}
+	};
 	for (const module of model.modules) {
 		// `type function` has no `export` keyword in Luau, so list it whenever visible.
 		for (const ty of module.types) {
@@ -307,11 +473,12 @@ function listedTypeIds(model: DocModel, includePrivate: boolean): Set<string> {
 				add(ty.id);
 			}
 		}
-		for (const member of [...module.members, ...module.classes.flatMap((cls) => cls.members)]) {
-			if (isVisible(member, includePrivate)) {
-				// `signature.segs` spans the entire signature after `callee`,
-				// covering parameters, returns, and generic defaults in one pass.
-				mention(member.kind === "prop" ? member.type : member.signature.segs);
+		for (const member of module.members) {
+			mentionMember(member);
+		}
+		for (const cls of module.classes) {
+			for (const member of cls.members) {
+				mentionMember(member);
 			}
 		}
 	}
@@ -321,6 +488,7 @@ function listedTypeIds(model: DocModel, includePrivate: boolean): Set<string> {
 		for (const line of decl.definition ?? []) {
 			mention(line);
 		}
+		mention(decl.params);
 		for (const field of decl.fields ?? []) {
 			mention(field.type);
 		}
@@ -335,9 +503,6 @@ function listedTypeIds(model: DocModel, includePrivate: boolean): Set<string> {
 /** Target declaration that a `Reexport.targetId` can resolve to. */
 type Definition = { member?: Member; cls?: Class };
 
-/**
- * Indexes every member and class by doc-model ID for re-export resolution.
- */
 function definitionsById(model: DocModel): Map<string, Definition> {
 	const byId = new Map<string, Definition>();
 	for (const module of model.modules) {
@@ -373,7 +538,7 @@ function buildSections(
 		const section = classToSection(cls, module.name, includePrivate);
 		if (section.name === "") {
 			// Multiple class entries can share the module's name (for example,
-			// the root table plus a floating `-- @class M` block): merge their
+			// the root table plus a floating `-- @class M` block), so merge their
 			// docs, tags, constructors, and members into `primary`.
 			primary.doc = primary.doc ?? section.doc;
 			primary.tags = primary.tags ?? section.tags;
@@ -383,10 +548,21 @@ function buildSections(
 			nested.push(section);
 		}
 	}
+	// A callable module with no comment block of its own promotes its call
+	// member's comment to `module.doc` (the page intro and index summary).
+	// Strip the duplicate on `PageMember` once so rendering, anchor minting,
+	// and `llms.txt` all see the deduplicated member.
+	primary.members = primary.members.map((member) =>
+		member.kind !== "prop" &&
+		member.doc !== undefined &&
+		member.doc === module.doc &&
+		member.signature.callee === module.name
+			? { ...member, doc: undefined }
+			: member,
+	);
 	return { primary, nested };
 }
 
-/** Returns `true` when `reexport` mounts an entire module rather than an individual member. */
 function isModuleMount(reexport: Reexport): boolean {
 	return reexport.targetMember === undefined;
 }
@@ -442,7 +618,7 @@ function withSelf(signature: Fn["signature"]): Fn["signature"] {
 			const char = seg[index];
 			if (char === "<") {
 				depth += 1;
-			} else if (char === ">") {
+			} else if (char === ">" && seg[index - 1] !== "-") {
 				depth -= 1;
 			} else if (char === "(" && depth === 0) {
 				inserted = true;
@@ -457,7 +633,7 @@ function withSelf(signature: Fn["signature"]): Fn["signature"] {
 
 /**
  * Inlines `module.reexports` into their owning section (`primary` or a matching
- * `nested` section): resolved members keep their kind (with methods converted to
+ * `nested` section). Resolved members keep their kind (with methods converted to
  * dot-called functions), while whole-module mounts, class mounts, and
  * undocumented targets become synthesized properties.
  */
@@ -513,33 +689,27 @@ function inlineReexports(
 				}),
 			);
 		} else {
-			// Whole-module mount or a member the target module does not document:
-			// both link to the target module page, and whole-module mounts carry
+			// Whole-module mount or a member the target module does not document.
+			// Both link to the target module page, and whole-module mounts carry
 			// the target module (or `@alias/path` runtime require) as their type.
 			const mount = isModuleMount(reexport);
 			// Project module IDs are relative paths, so a leading `@` identifies
 			// a runtime alias (`@lute/fs`).
 			const runtime = reexport.targetModule.startsWith("@");
+			const targetName = target?.name ?? (runtime ? reexport.targetModule : undefined);
+			const targetId = target?.id ?? (runtime ? reexport.targetModule : undefined);
 			const type =
-				mount && target
-					? [{ text: target.name, id: target.id }]
-					: mount && runtime
-						? [{ text: reexport.targetModule }]
-						: undefined;
+				mount && targetName !== undefined
+					? [{ text: targetName, ...(target ? { id: target.id } : {}) }]
+					: undefined;
 			section.members.push(
 				synthesizedProp(reexport, {
 					type,
 					doc: reexport.doc,
 					source: target?.source ?? module.source,
 					reexport: {
-						...(mount
-							? { module: true }
-							: {
-									from:
-										target?.name ??
-										(runtime ? reexport.targetModule : undefined),
-								}),
-						targetId: target?.id,
+						...(mount ? { module: true } : { from: targetName }),
+						targetId,
 						url: reexport.url,
 					},
 				}),
@@ -587,16 +757,17 @@ function linkExports(
 		const prefix = `${page.title}.`;
 		for (const reexport of modulesById.get(page.moduleId)?.reexports ?? []) {
 			const target = resolveAlias(reexport.targetModule);
-			if (isModuleMount(reexport) && pageIds.has(target) && !seen.has(target)) {
-				seen.add(target);
-				const within = reexport.within?.startsWith(prefix)
-					? reexport.within.slice(prefix.length)
-					: reexport.within;
-				page.exports.push({
-					moduleId: target,
-					name: within ? `${within}.${reexport.name}` : reexport.name,
-				});
+			if (!isModuleMount(reexport) || !pageIds.has(target) || seen.has(target)) {
+				continue;
 			}
+			seen.add(target);
+			const within = reexport.within?.startsWith(prefix)
+				? reexport.within.slice(prefix.length)
+				: reexport.within;
+			page.exports.push({
+				moduleId: target,
+				name: within ? `${within}.${reexport.name}` : reexport.name,
+			});
 		}
 	}
 }
@@ -641,7 +812,7 @@ export function buildPages(model: DocModel, config: LuauDocsConfig): BuildResult
 			(ty) => listed.has(ty.id) && (ty.exported || !exportedNames.has(ty.name)),
 		);
 		inlineReexports(module, primary, nested, ctx);
-		// Drop nested classes that have no visible members or doc comment; keep
+		// Drop nested classes that have no visible members or doc comment, while keeping
 		// `primary` unconditionally because it holds module-level members and badges.
 		const sections = [primary, ...nested.filter(sectionHasContent)];
 		if (!sections.some(sectionHasContent) && types.length === 0 && !module.doc) {

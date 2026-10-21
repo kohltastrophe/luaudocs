@@ -5,7 +5,7 @@
 
 This file indexes the project for coding agents reading a local copy of it, in the llms.txt format: its guides, then every module, type, and member its Luau source exposes. Links are relative to this file, and each API entry links the lines that declare it, directly below its doc comment.
 
-Keep it current: after changing the public surface, a doc comment, or a guide, run `npx luaudocs@<version> llms` in this directory and commit the result. When nothing listed here changed, the command leaves the file as it is.
+Keep it current: after changing the public surface, a doc comment, or a guide, run `npx luaudocs@latest llms` in this directory and commit the result. When nothing listed here changed, the command leaves the file as it is.
 
 ## Guides
 

@@ -14,7 +14,7 @@
  * - `apiSections` (in `src/llms.ts`): heads each module in the checkout
  *   `llms.txt` with its public access path
  */
-import { docSummary, region } from "./markdown";
+import { docSummary, region, type TrailSegment } from "./markdown";
 import {
 	apiHref,
 	apiPageFile,
@@ -24,9 +24,8 @@ import {
 	memberAccess,
 	type PageModel,
 } from "./pages";
-import type { TrailSegment } from "../templates/runtime/markup";
 
-/** The API overview entry: first item in the API sidebar and root of every API page trail. */
+/** The API overview entry (first item in the API sidebar and root of every API page trail). */
 const API_INDEX: TrailSegment = { text: "Overview", link: apiHref("") };
 
 export interface SidebarItem {
@@ -48,9 +47,9 @@ export interface TreeNode {
 }
 
 /**
- * Computes the parent module ID and public access path (`access`) for every page:
- * prefers the first module that re-exports it (breadth-first from entry modules),
- * falling back to the nearest enclosing module in the instance hierarchy. Pages
+ * Computes the parent module ID and public access path (`access`) for every page,
+ * preferring the first module that re-exports it (breadth-first from entry modules)
+ * and falling back to the nearest enclosing module in the instance hierarchy. Pages
  * with `parent.get(id) === undefined` become tree roots.
  */
 function parentOf(pages: PageModel[]): {
@@ -74,7 +73,10 @@ function parentOf(pages: PageModel[]): {
 			const child = byId.get(edge.moduleId);
 			if (child && !parent.has(edge.moduleId)) {
 				parent.set(edge.moduleId, page.moduleId);
-				access.set(edge.moduleId, memberAccess(access.get(page.moduleId)!, edge.name));
+				access.set(
+					edge.moduleId,
+					edge.name.split(".").reduce(memberAccess, access.get(page.moduleId)!),
+				);
 				queue.push(child);
 			}
 		}
@@ -110,7 +112,7 @@ function parentOf(pages: PageModel[]): {
 const byTitle = (a: PageModel, b: PageModel) => compareTitles(a.title, b.title);
 const byNodeTitle = (a: TreeNode, b: TreeNode) => byTitle(a.page, b.page);
 
-/** Builds the access tree: entry roots in project order first, remaining roots and children sorted by title. */
+/** Builds the access tree, placing entry roots in project order first and sorting remaining roots and children by title. */
 export function buildAccessTree(pages: PageModel[]): TreeNode[] {
 	const { parent, access } = parentOf(pages);
 	const nodes = new Map<string, TreeNode>(
@@ -151,7 +153,7 @@ export function apiTrails(tree: TreeNode[]): Map<string, TrailSegment[]> {
 	trails.set(apiPageFile("index"), []);
 	const walk = (node: TreeNode, above: TrailSegment[]) => {
 		trails.set(apiPageFile(node.page.slug), above);
-		// Use the bare `page.title` rather than `displayTitle`: the trail above
+		// Use the bare `page.title` rather than `displayTitle` because the trail above
 		// already shows the parent module that `navTitle`'s parenthetical names.
 		const below = [...above, { text: node.page.title, link: apiHref(node.page.slug) }];
 		for (const child of node.children) {
@@ -183,7 +185,7 @@ export function apiSidebar(tree: TreeNode[]): SidebarItem[] {
 	// top-level section title instead of folding it into an untitled group one
 	// level down (`getSidebarGroups` in VitePress's default theme).
 	const sections: SidebarItem[] = [{ ...API_INDEX, items: [] }];
-	// Each entry module with children heads its own sidebar section; entry
+	// Each entry module with children heads its own sidebar section, while entry
 	// modules without children and unreached roots collect under `Reference`.
 	const loose: TreeNode[] = [];
 	for (const root of tree) {
@@ -204,7 +206,7 @@ export function apiSidebar(tree: TreeNode[]): SidebarItem[] {
 }
 
 /**
- * Renders `/api/index.md`: the access tree as a nested Markdown list inside a
+ * Renders `/api/index.md` as a nested Markdown list of the access tree inside a
  * `.luaudocs-tree` wrapper (styled with tree branch lines in `luaudocs.css`
  * while remaining standard Markdown for `llms-full.txt`).
  */

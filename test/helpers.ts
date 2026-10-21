@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, expect } from "vitest";
-import { filesUnder as walkFiles } from "../src/build";
 import { validateConfig, type LuauDocsConfig } from "../src/config";
 import type { SidebarItem } from "../src/nav";
+import { filesUnder as walkFiles } from "../src/pages";
 import { parseLinks } from "../templates/runtime/signature-links";
 
 /**
@@ -45,6 +45,17 @@ export function makeTempDirFactory(prefix: string): () => string {
 	};
 }
 
+/** Writes a relative-path -> content map under `dir`, creating parent directories. */
+export function seed(dir: string, files: Record<string, string | Buffer | undefined>): void {
+	for (const [rel, content] of Object.entries(files)) {
+		if (content !== undefined) {
+			const abs = join(dir, rel);
+			mkdirSync(dirname(abs), { recursive: true });
+			writeFileSync(abs, content);
+		}
+	}
+}
+
 /**
  * `defaultToml` is written as luaudocs.toml unless the caller's own files
  * override it. Parent directories are created.
@@ -56,11 +67,7 @@ export function makeProjectFactory(
 	const tempDir = makeTempDirFactory(prefix);
 	return (files = {}) => {
 		const dir = tempDir();
-		for (const [rel, content] of Object.entries({ "luaudocs.toml": defaultToml, ...files })) {
-			const abs = join(dir, rel);
-			mkdirSync(dirname(abs), { recursive: true });
-			writeFileSync(abs, content);
-		}
+		seed(dir, { "luaudocs.toml": defaultToml, ...files });
 		return dir;
 	};
 }

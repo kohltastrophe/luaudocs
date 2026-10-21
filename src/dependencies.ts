@@ -2,14 +2,14 @@
  * Loads published doc models for `[source] aliases` entries that set `model`,
  * either from a local path or fetched by URL. This lets a type reached through
  * an alias link to its exact entry on the dependency's site rather than just
- * the module page. This module handles I/O only; `src/render.ts` resolves the
- * loaded models into links.
+ * the module page. This module handles I/O only, while `src/render.ts` resolves
+ * the loaded models into links.
  *
  * Unreadable models produce a warning rather than failing the build, because
- * the alias still falls back to its base `url`. Fetched models are cached per
- * user (beside the Lute install) and reused when offline, so an offline rebuild
- * links identically to the last online build. Only valid, parsed models are
- * cached so a bad HTTP response never evicts a working copy.
+ * the alias still falls back to its base `url`. Caches fetched models per user
+ * (beside the Lute install) and reuses them when offline, so an offline rebuild
+ * links identically to the last online build. Caches only valid, parsed models
+ * so a bad HTTP response never evicts a working copy.
  */
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -17,7 +17,13 @@ import { join, resolve } from "node:path";
 import type { LuauDocsConfig } from "./config";
 import { parseDocModel, type DocModel } from "./docmodel";
 import { cacheHome } from "./lute";
-import type { LoadedDependency } from "./render";
+
+export interface LoadedDependency {
+	alias: string;
+	/** Base URL of the dependency's published docs site. */
+	url: string;
+	model: DocModel;
+}
 
 export interface LoadedDependencies {
 	loaded: LoadedDependency[];
@@ -32,18 +38,27 @@ export async function loadDependencies(
 	const warnings: string[] = [];
 	// Sort aliases alphabetically so warnings appear in a deterministic order across builds.
 	const specs = Object.entries(config.source.aliases).sort(([a], [b]) => (a < b ? -1 : 1));
-	for (const [alias, { url, model }] of specs) {
-		// Config validation guarantees that `model` is paired with `url`.
-		if (model === undefined || url === undefined) {
-			continue;
-		}
-		try {
-			loaded.push({ alias, url, model: await readModel(model, root) });
-		} catch (error) {
-			const reason = error instanceof Error ? error.message : String(error);
-			warnings.push(
-				`[source] aliases.${alias}: could not load its doc model from ${model} (${reason}); types reached through @${alias} link to their module pages under ${url} instead of their exact entries`,
-			);
+	const outcomes = await Promise.all(
+		specs.map(async ([alias, { url, model }]) => {
+			// Config validation guarantees that `model` is paired with `url`.
+			if (model === undefined || url === undefined) {
+				return undefined;
+			}
+			try {
+				return { loaded: { alias, url, model: await readModel(model, root) } };
+			} catch (error) {
+				const reason = error instanceof Error ? error.message : String(error);
+				return {
+					warning: `[source] aliases.${alias}: could not load its doc model from ${model} (${reason}); types reached through @${alias} link to their module pages under ${url} instead of their exact entries`,
+				};
+			}
+		}),
+	);
+	for (const outcome of outcomes) {
+		if (outcome?.loaded) {
+			loaded.push(outcome.loaded);
+		} else if (outcome?.warning) {
+			warnings.push(outcome.warning);
 		}
 	}
 	return { loaded, warnings };
@@ -51,15 +66,15 @@ export async function loadDependencies(
 
 async function readModel(source: string, root: string): Promise<DocModel> {
 	if (/^https?:\/\//i.test(source)) {
-		return fetchCached(source);
+		return await fetchCached(source);
 	}
 	return parseDocModel(readFileSync(resolve(root, source), "utf8"));
 }
 
 /**
- * Deduplicates fetches to one per URL per process: `dev` re-renders on every
- * save, and a dependency's published model does not change mid-session. Failed
- * fetches are evicted so the next rebuild retries the network.
+ * Deduplicates fetches to one per URL per process, since `dev` re-renders on every
+ * save and a dependency's published model does not change mid-session. Evicts
+ * failed fetches so the next rebuild retries the network.
  */
 const fetched = new Map<string, Promise<DocModel>>();
 

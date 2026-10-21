@@ -13,7 +13,6 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { extractorJson } from "../src/extract";
 
-/** Fixture projects and their corresponding checked-in doc-model JSON files. */
 const captures = [
 	{ project: "sample-project", capture: "docmodel-sample.json" },
 	{ project: "tags-project", capture: "docmodel-tags.json" },
@@ -23,7 +22,6 @@ const fixtures = fileURLToPath(new URL("../test/fixtures/", import.meta.url));
 const check = process.argv.includes("--check");
 let stale = 0;
 
-// Run the independent Lute subprocesses in parallel.
 const outputs = await Promise.all(
 	captures.map(async ({ project }) => {
 		// `pretty: true` (with `emit.luau`'s sorted keys) produces deterministic,

@@ -1,48 +1,33 @@
 /**
- * The build pipeline: load config, run the extractor, emit Markdown, sync
- * generated files to disk, and spawn the docs-local VitePress binary.
+ * The build pipeline. Loads config, runs the extractor, emits Markdown, syncs
+ * generated files to disk, and spawns the docs-local VitePress binary.
  *
- * Owns the write contract: `<docs>/api/` and `<docs>/.vitepress/` are synced to
- * contain the exact emitted file set, except on extractor errors, where all
- * deletions are withheld so a transient parse error never unpublishes a page.
+ * Syncs `<docs>/api/` and `<docs>/.vitepress/` to contain the exact emitted
+ * file set, except on extractor errors, where it withholds all deletions so a
+ * transient parse error never unpublishes a page.
  */
-import {
-	existsSync,
-	mkdirSync,
-	readdirSync,
-	readFileSync,
-	renameSync,
-	rmdirSync,
-	rmSync,
-	writeFileSync,
-} from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createRequire } from "node:module";
-import { dirname, join, relative, resolve } from "node:path";
-import picomatch from "picomatch";
+import { dirname, join, resolve } from "node:path";
 import pc from "picocolors";
 import pkg from "../package.json";
-import { loadConfig, parseUrlFlag, type LuauDocsConfig } from "./config";
+import { loadConfig, parseUrlFlag } from "./config";
 import { formatDocModel, type DocModel } from "./docmodel";
-import { runExtractor } from "./extract";
-import { loadDependencies } from "./dependencies";
-import { buildDependencyLinks, emitDocs, type EmitResult } from "./render";
-import { API_DIR, apiPageFile, toPosix } from "./pages";
+import { printWarnings, renderProject, type RenderedModel, type RenderedProject } from "./render";
+import {
+	API_DIR,
+	apiPageFile,
+	SITE_DEPENDENCIES,
+	syncDir,
+	syncFile,
+	type BuildContext,
+	type SyncSummary,
+} from "./pages";
 import { collectGuides, syncSite, type GuideItem } from "./site";
 import { syncLlms } from "./llms";
 
-export interface BuildContext {
-	config: LuauDocsConfig;
-	/**
-	 * Base directory for all relative paths: the directory containing
-	 * `luaudocs.toml`, or `startDir` when running with synthesized defaults.
-	 */
-	root: string;
-	/** Absent when the project runs on synthesized defaults. */
-	configPath?: string;
-	docsDir: string;
-	apiDir: string;
-}
+export type { BuildContext, RenderedModel };
 
 export function createContext(startDir: string, overrides?: { url?: string }): BuildContext {
 	const { config, root, configPath } = loadConfig(startDir);
@@ -55,58 +40,8 @@ export function createContext(startDir: string, overrides?: { url?: string }): B
 	return { config, root, configPath, docsDir, apiDir: join(docsDir, API_DIR) };
 }
 
-/*
- * ------------------------------------------------------------------- writing
- */
-
 /**
- * Writes `absPath` only when its content differs, so file watchers (VitePress
- * HMR) only react to real changes. Compares raw bytes when given a `Uint8Array`
- * because the runtime templates include a `.woff2` font that a UTF-8 round-trip
- * would corrupt with `U+FFFD` replacement characters.
- */
-export function writeIfChanged(absPath: string, content: string | Uint8Array): boolean {
-	mkdirSync(dirname(absPath), { recursive: true });
-	try {
-		const unchanged =
-			typeof content === "string"
-				? readFileSync(absPath, "utf8") === content
-				: readFileSync(absPath).equals(content);
-		if (unchanged) {
-			return false;
-		}
-	} catch {
-		// Missing or unreadable file: fall through to write.
-	}
-	writeFileSync(absPath, content);
-	return true;
-}
-
-/** Writes `content` when defined, or removes `absPath` if it exists. */
-export function syncFile(absPath: string, content: string | undefined): void {
-	if (content !== undefined) {
-		writeIfChanged(absPath, content);
-	} else if (existsSync(absPath)) {
-		rmSync(absPath);
-	}
-}
-
-/** Lists every file under `root`, POSIX-relative and sorted (`[]` if `root` is missing). */
-export function filesUnder(root: string): Array<{ abs: string; rel: string }> {
-	if (!existsSync(root)) {
-		return [];
-	}
-	return readdirSync(root, { recursive: true, withFileTypes: true })
-		.filter((entry) => entry.isFile())
-		.map((entry) => {
-			const abs = join(entry.parentPath, entry.name);
-			return { abs, rel: toPosix(relative(root, abs)) };
-		})
-		.sort((a, b) => (a.rel < b.rel ? -1 : 1));
-}
-
-/**
- * Every docs-relative path written by a build inside `docsDir`: the two
+ * Every docs-relative path written by a build inside `docsDir`, covering the two
  * tool-owned trees (`api/` and `.vitepress/`) plus the root files it manages.
  * Exported as a single list so `dev` can ignore its own build output across
  * `build.ts`, `site.ts`, and `llms.ts`.
@@ -123,196 +58,9 @@ export const GENERATED_PATHS = [
 	"public/docmodel.json",
 ] as const;
 
-export interface SyncSummary {
-	written: number;
-	deleted: number;
-	unchanged: number;
-}
-
-/**
- * Syncs `dir` to contain the exact `files` map. `deleteStale: false` skips the
- * stale-file sweep (on error builds); `keepForeign` exempts paths owned by
- * another process inside a tool-owned tree (such as VitePress's `dist/` and `cache/`).
- *
- * On case-insensitive, case-preserving filesystems (macOS and Windows), writing
- * a re-cased slug updates the existing file in place without changing its
- * directory-entry casing. Because slugs never collide case-insensitively within
- * a build, a lowercase match with no exact on-disk counterpart is renamed in
- * place to the new casing instead of being deleted.
- */
-export function syncDir(
-	dir: string,
-	files: Map<string, string | Uint8Array>,
-	deleteStale = true,
-	keepForeign?: (rel: string) => boolean,
-): SyncSummary {
-	const summary: SyncSummary = { written: 0, deleted: 0, unchanged: 0 };
-	// Nothing to write and nothing on disk: avoid creating an empty directory.
-	if (files.size === 0 && !existsSync(dir)) {
-		return summary;
-	}
-	const keep = new Set<string>();
-	for (const [file, content] of files) {
-		const abs = join(dir, file);
-		// Normalize keys the same way the sweep derives relative paths so a
-		// non-canonical key (`./Foo.md`) is not written and then swept.
-		keep.add(toPosix(relative(dir, abs)));
-		if (writeIfChanged(abs, content)) {
-			summary.written += 1;
-		} else {
-			summary.unchanged += 1;
-		}
-	}
-	if (!deleteStale || !existsSync(dir)) {
-		return summary;
-	}
-
-	const onDisk: Array<{ abs: string; rel: string }> = [];
-	const subdirs: string[] = [];
-	for (const entry of readdirSync(dir, { recursive: true, withFileTypes: true })) {
-		const abs = join(entry.parentPath, entry.name);
-		const rel = toPosix(relative(dir, abs));
-		if (keepForeign?.(rel)) {
-			continue;
-		}
-		if (entry.isDirectory()) {
-			subdirs.push(abs);
-		} else if (entry.isFile()) {
-			onDisk.push({ abs, rel });
-		}
-	}
-	const present = new Set(onDisk.map((file) => file.rel));
-	const keepByLower = new Map([...keep].map((rel) => [rel.toLowerCase(), rel]));
-	for (const { abs, rel } of onDisk) {
-		if (keep.has(rel)) {
-			continue;
-		}
-		const kept = keepByLower.get(rel.toLowerCase());
-		if (kept !== undefined && !present.has(kept)) {
-			renameSync(abs, join(dir, kept));
-			continue;
-		}
-		rmSync(abs);
-		summary.deleted += 1;
-	}
-	// Remove directories emptied by the sweep, deepest first; non-empty ones throw and stay.
-	for (const emptied of subdirs.sort((a, b) => b.length - a.length)) {
-		try {
-			rmdirSync(emptied);
-		} catch {
-			// Directory still holds kept files.
-		}
-	}
-	return summary;
-}
-
-/*
- * ----------------------------------------------------------------- reporting
- */
-
-/** Prints warnings and returns the count for `--strict` checks. */
-export function printWarnings(warnings: string[]): number {
-	for (const warning of warnings) {
-		console.warn(pc.yellow(warning));
-	}
-	return warnings.length;
-}
-
-function reportDiagnostics(
-	model: DocModel,
-	warnings: string[],
-): { errors: number; warnings: number } {
-	let errors = 0;
-	let warningCount = 0;
-	for (const diagnostic of model.diagnostics) {
-		const location = diagnostic.file
-			? `${diagnostic.file}${diagnostic.line ? `:${diagnostic.line}` : ""}`
-			: "<project>";
-		const line = `${location}: ${diagnostic.severity}[${diagnostic.code}]: ${diagnostic.message}`;
-		if (diagnostic.severity === "error") {
-			errors += 1;
-			console.error(pc.red(line));
-		} else if (diagnostic.severity === "warning") {
-			warningCount += 1;
-			console.warn(pc.yellow(line));
-		} else {
-			console.log(pc.dim(line));
-		}
-	}
-	for (const warning of warnings) {
-		warningCount += 1;
-		console.warn(pc.yellow(`renderer: ${warning}`));
-	}
-	return { errors, warnings: warningCount };
-}
-
 /*
  * ----------------------------------------------------------------- the build
  */
-
-/**
- * Applies `[source] include` and `exclude` globs to an extracted model in place.
- * Checks `include !== undefined` rather than `include.length > 0` so an explicit
- * `include = []` matches nothing. Sets `dot: true` so globs can match paths
- * under dot-directories, and normalizes paths with `toPosix` for Windows.
- */
-export function filterModel(
-	model: DocModel,
-	include: string[] | undefined,
-	exclude: string[] | undefined,
-): DocModel {
-	if (include === undefined && !exclude?.length) {
-		return model;
-	}
-	const match = picomatch(include ?? ["**"], { ignore: exclude ?? [], dot: true });
-	model.modules = model.modules.filter((module) => match(toPosix(module.id)));
-	// Drop diagnostics located in filtered-out files (excluding a broken
-	// generated module is the documented way to keep a build green), while
-	// keeping project-level diagnostics (`file === undefined`).
-	model.diagnostics = model.diagnostics.filter(
-		(diagnostic) => diagnostic.file === undefined || match(toPosix(diagnostic.file)),
-	);
-	return model;
-}
-
-async function extractModel(context: BuildContext): Promise<DocModel> {
-	const { config, root } = context;
-	// `[source] entries = []` means a guide-only project with no Luau modules:
-	// skip spawning the extractor and return an empty model.
-	if (config.source.entries.length === 0) {
-		return { schemaVersion: 1, project: { entryPoints: [] }, modules: [], diagnostics: [] };
-	}
-	const model = await runExtractor({
-		root,
-		entries: config.source.entries,
-		projectFile: config.source.projectFile,
-		aliases: config.source.aliases,
-		reportUndocumented: config.api.reportUndocumented,
-	});
-	return filterModel(model, config.source.include, config.source.exclude);
-}
-
-/**
- * Cached extract-and-render output. Paired as a single value because rendering
- * is a pure function of the model and config, so reusing a cached model in
- * `dev` also reuses its rendered pages.
- */
-export interface RenderedModel {
-	model: DocModel;
-	result: EmitResult;
-}
-
-async function renderModel(context: BuildContext): Promise<RenderedModel> {
-	const model = await extractModel(context);
-	// Guide-only projects have no signatures to link, so skip fetching dependency models.
-	const dependencies =
-		model.modules.length > 0
-			? await loadDependencies(context.config, context.root)
-			: { loaded: [], warnings: [] };
-	const result = emitDocs(model, context.config, buildDependencyLinks(dependencies.loaded));
-	result.warnings.unshift(...dependencies.warnings);
-	return { model, result };
-}
 
 /**
  * Writes `public/docmodel.json` when `[docs] model = true` so dependent sites
@@ -328,23 +76,6 @@ function syncModel(context: BuildContext, model: DocModel): void {
 	);
 }
 
-export interface RenderedProject extends RenderedModel {
-	counts: { errors: number; warnings: number };
-}
-
-/**
- * Extracts, renders, and reports diagnostics without writing to disk. Shared by
- * `runBuild` and `luaudocs llms`. When `rendered` is passed (`dev`'s model
- * cache), re-reports its diagnostics without re-extracting.
- */
-export async function renderProject(
-	context: BuildContext,
-	rendered?: RenderedModel,
-): Promise<RenderedProject> {
-	const { model, result } = rendered ?? (await renderModel(context));
-	return { model, result, counts: reportDiagnostics(model, result.warnings) };
-}
-
 export interface BuildOutcome extends RenderedProject {
 	/** Guide walk used by this build, cached by `dev` alongside the model. */
 	guides: GuideItem[];
@@ -353,8 +84,8 @@ export interface BuildOutcome extends RenderedProject {
 }
 
 /**
- * Runs a full build: extract, render, report diagnostics, and sync files to
- * disk. Diagnostics are printed before writing so the "keeping previously
+ * Runs a full build, extracting, rendering, reporting diagnostics, and syncing
+ * files to disk. Prints diagnostics before writing so the "keeping previously
  * generated pages" warning appears directly below the errors that triggered it.
  * `options` let `dev` skip the per-keystroke `llms` pass (`llms: false`) and
  * reuse whichever half (`rendered` or `guides`) did not change.
@@ -404,52 +135,58 @@ export async function runBuild(
  */
 
 /**
- * Packages written into the generated docs `package.json` by `docsPackageJson`,
- * checked by `ensureVitepress` to detect missing dependencies in an existing install.
- */
-export const SITE_DEPENDENCIES = ["vitepress", "vitepress-plugin-group-icons", "vue"] as const;
-
-/**
- * Resolves `<name>/package.json` from `docsDir`, or returns `undefined`.
+ * Resolves `<name>/package.json` with `req`, or returns `undefined`.
  * Using module resolution rather than probing `node_modules/` directly supports
  * hoisted and workspace installs.
  */
-function resolveFromDocs(docsDir: string, name: string): string | undefined {
+function resolveFromDocs(req: NodeJS.Require, name: string): string | undefined {
 	try {
-		return createRequire(join(docsDir, "package.json")).resolve(`${name}/package.json`);
-	} catch {
-		return undefined;
+		return req.resolve(`${name}/package.json`);
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		// `ERR_PACKAGE_PATH_NOT_EXPORTED` means Node located `<name>/package.json`
+		// in `node_modules` and read its `exports` map (e.g. `vitepress-plugin-group-icons`).
+		if (code === "ERR_PACKAGE_PATH_NOT_EXPORTED") {
+			return name;
+		}
+		if (code === "MODULE_NOT_FOUND") {
+			return undefined;
+		}
+		throw error;
 	}
 }
 
 /**
  * Runs `npm install` in `docsDir` when any dependency in the generated
  * `package.json` fails to resolve (a fresh checkout, a bumped VitePress pin,
- * or a newly added site dependency). Existing valid installs, including hoisted
- * and workspace-managed ones, are left alone.
+ * or a newly added site dependency). Leaves existing valid installs, including
+ * hoisted and workspace-managed ones, untouched.
  */
 export async function ensureVitepress(docsDir: string): Promise<void> {
-	const resolved = resolveFromDocs(docsDir, "vitepress");
+	const req = createRequire(join(docsDir, "package.json"));
+	const resolved = resolveFromDocs(req, "vitepress");
 	if (resolved !== undefined) {
 		const { version } = JSON.parse(readFileSync(resolved, "utf8")) as { version: string };
 		// VitePress is pinned to an exact version; the remaining dependencies
 		// use caret ranges and only need to resolve.
 		if (
 			version === pkg.devDependencies.vitepress &&
-			SITE_DEPENDENCIES.every((name) => resolveFromDocs(docsDir, name) !== undefined)
+			SITE_DEPENDENCIES.every(
+				(name) => name === "vitepress" || resolveFromDocs(req, name) !== undefined,
+			)
 		) {
 			return;
 		}
 	}
 	// If the generated `package.json` is missing, `npm install` would walk up
-	// and install into a parent project; return and let `vitepressBin` report
+	// and install into a parent project. Return and let `vitepressBin` report
 	// the missing install.
 	if (!existsSync(join(docsDir, "package.json"))) {
 		return;
 	}
 	console.log(pc.cyan(`installing the docs site dependencies (npm install in ${docsDir})`));
 	await new Promise<void>((settle, reject) => {
-		// Windows `.cmd` shims require `shell: true` to spawn; arguments are
+		// Windows `.cmd` shims require `shell: true` to spawn. Arguments are
 		// static strings, so nothing is subject to shell expansion.
 		const child = spawn("npm", ["install", "--no-fund", "--no-audit"], {
 			cwd: docsDir,
@@ -477,7 +214,7 @@ export async function ensureVitepress(docsDir: string): Promise<void> {
  * extensionless `sh` shim cannot execute and Bun does not create `.cmd` shims).
  */
 function vitepressBin(docsDir: string): string {
-	const pkgPath = resolveFromDocs(docsDir, "vitepress");
+	const pkgPath = resolveFromDocs(createRequire(join(docsDir, "package.json")), "vitepress");
 	if (!pkgPath) {
 		throw new Error(
 			`vitepress is not installed in ${docsDir}; run \`npm install\` in that directory first`,
@@ -493,7 +230,7 @@ function vitepressBin(docsDir: string): string {
 
 export interface VitepressProcess {
 	child: ChildProcess;
-	/** Resolves on exit 0; rejects on a nonzero exit code or termination signal. */
+	/** Resolves on exit 0 and rejects on a nonzero exit code or termination signal. */
 	done: Promise<void>;
 }
 

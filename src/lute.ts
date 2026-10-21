@@ -1,11 +1,11 @@
 /**
- * Owns the Lute binary that runs the extractor: the pinned version, the
- * platform asset table, the download, and the per-user cache directory.
+ * Owns the Lute binary that runs the extractor, including the pinned version,
+ * platform asset table, download logic, and per-user cache directory.
  *
  * Because extraction output depends on the Lute parser version, LuauDocs pins
  * an exact Lute release (just as `src/site.ts` pins VitePress) and downloads it
  * automatically rather than requiring every consumer to configure a toolchain
- * manager. The cache is keyed by version outside the package directory, so
+ * manager. Keys the cache by version outside the package directory so
  * `npx luaudocs` runs and LuauDocs upgrades reuse an existing download.
  */
 import { createHash } from "node:crypto";
@@ -16,7 +16,7 @@ import { inflateRawSync } from "node:zlib";
 import pc from "picocolors";
 
 /**
- * Bumping `LUTE_VERSION` is a deliberate release step: re-run
+ * Bumping `LUTE_VERSION` is a deliberate release step. Re-run
  * `bun run regen:docmodels` and inspect the diff, because extractor output
  * follows what this Lute version parses. Checksums come from each release
  * asset's `digest` field.
@@ -48,7 +48,7 @@ const ASSETS: Record<string, { zip: string; sha256: string }> = {
 };
 
 export interface Lute {
-	/** `argv[0]` for spawning Lute: an absolute path, or `"lute"` on `PATH`. */
+	/** `argv[0]` for spawning Lute (an absolute path, or `"lute"` on `PATH`). */
 	command: string;
 	/** Diagnostic hint shown when spawning `command` fails outright. */
 	hint: string;
@@ -134,8 +134,8 @@ async function install(asset: { zip: string; sha256: string }): Promise<void> {
 
 	let zip: Buffer;
 	try {
-		// Node's `fetch` has no default timeout; bound the download so a stalled
-		// connection fails instead of hanging until CI's job timeout.
+		// Node's `fetch` has no default timeout, so bound the download to fail on
+		// a stalled connection instead of hanging until CI's job timeout.
 		const response = await fetch(url, { signal: AbortSignal.timeout(120_000) });
 		if (!response.ok) {
 			throw new Error(`${response.status} ${response.statusText}`);
@@ -187,7 +187,7 @@ export function commitInstall(staging: string, target: string, binaryFile: strin
 		}
 	}
 	// An existing `target` directory missing its binary would fail `renameSync`
-	// permanently (`ENOTEMPTY` on POSIX, `EPERM` on Windows); clear it and retry.
+	// permanently (`ENOTEMPTY` on POSIX, `EPERM` on Windows), so clear it and retry.
 	rmSync(target, { recursive: true, force: true });
 	try {
 		renameSync(staging, target);
@@ -236,10 +236,10 @@ export function unzipSingleFile(zip: Buffer): Buffer {
 	// Advance past the 30-byte local file header plus its variable-length filename and extra fields.
 	const data = local + 30 + zip.readUInt16LE(local + 26) + zip.readUInt16LE(local + 28);
 	const body = zip.subarray(data, data + compressedSize);
-	const file = method === 0 ? body : method === 8 ? inflateRawSync(body) : undefined;
-	if (file === undefined) {
+	if (method !== 0 && method !== 8) {
 		throw new Error(`unsupported zip compression method ${method}`);
 	}
+	const file = method === 0 ? body : inflateRawSync(body);
 	if (file.length !== uncompressedSize) {
 		throw new Error(
 			`Lute archive unpacked to ${file.length} bytes, expected ${uncompressedSize}`,

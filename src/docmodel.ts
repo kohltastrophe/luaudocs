@@ -1,8 +1,8 @@
 /**
- * The doc model: the JSON wire contract with the Lute extractor (`schemaVersion: 1`,
- * documented in `extractor/model/init.luau`).
+ * The doc model, which defines the JSON wire contract with the Lute extractor
+ * (`schemaVersion: 1`, documented in `extractor/model/init.luau`).
  *
- * Intentionally omits a field-by-field runtime schema validator: the sole
+ * Intentionally omits a field-by-field runtime schema validator because the sole
  * producer is this repo's own extractor, and `regen:docmodels --check` pins both
  * fixture captures byte-for-byte in CI. `parseDocModel` validates what a user
  * can actually hit in practice: invalid JSON, a non-object payload, or a
@@ -11,17 +11,17 @@
 
 /**
  * One segment of a rendered type or signature display. `id` names a declaration
- * in the project; an object without `id` is an unresolved type-position
+ * in the project, while an object without `id` is an unresolved type-position
  * identifier that the renderer may link by text (`@external` mappings first,
  * then Roblox engine types). Concatenating every segment's text reproduces the
  * display string verbatim.
  */
 export type Seg = string | { text: string; id?: string };
 
-/** An inline type position: parameters, returns, property types, field types, and generic defaults. */
+/** An inline type position (parameters, returns, property types, field types, and generic defaults). */
 export type Inline = Seg[];
 
-/** A type-alias definition: an array of display lines (no individual segment contains a newline). */
+/** A type-alias definition represented as an array of display lines (no individual segment contains a newline). */
 export type Block = Seg[][];
 
 export interface SourceSpan {
@@ -53,7 +53,7 @@ export interface Return {
 }
 
 export interface Signature {
-	/** Call prefix (`Flux.compute`, `State:Connect`); `segs` follows immediately after it. */
+	/** Call prefix (`Flux.compute`, `State:Connect`), with `segs` following immediately after it. */
 	callee: string;
 	/** Everything after `callee` (`<T>(x: T): T`), as segments. */
 	segs: Inline;
@@ -97,7 +97,7 @@ export interface TypeField {
 	name: string;
 	type?: Inline;
 	doc?: string;
-	/** 1-based line index into `definition`; absent when the definition has no dedicated line for this field. */
+	/** 1-based line index into `definition`, omitted when the definition has no dedicated line for this field. */
 	line?: number;
 	/** True when the definition line already includes an inline `--` source comment, so the renderer must not splice `doc` above it again. */
 	docInDisplay?: boolean;
@@ -138,9 +138,9 @@ export interface Reexport {
 	/** Enclosing nested container (`Flux.Clock`, `KA.Shared`) when the re-export lives inside a nested table. */
 	within?: string;
 	targetModule: string;
-	/** Member name inside `targetModule`; absent when mounting the entire module. */
+	/** Member name inside `targetModule`, omitted when mounting the entire module. */
 	targetMember?: string;
-	/** Target member or class id in `targetModule`; absent when the target module documents no matching member. */
+	/** Target member or class id in `targetModule`, omitted when the target module documents no matching member. */
 	targetId?: string;
 	/** External docs URL for a runtime alias (`[source] aliases`), where `targetModule` is the require path (`@lute/fs`) and `targetId` is absent. */
 	url?: string;
@@ -150,13 +150,13 @@ export interface Reexport {
 }
 
 export interface Module {
-	/** Project-relative POSIX file path; stable, used in symbol ids and source links. */
+	/** Project-relative POSIX file path, used in symbol ids and source links. */
 	id: string;
 	name: string;
 	/** Instance path, root-first (from the Rojo project tree, or folder layout without one). */
 	instancePath: string[];
 	doc?: string;
-	/** Target module id for a passthrough module (`return require(X)`); references resolve to `X`'s page. */
+	/** Target module id for a passthrough module (`return require(X)`), whose references resolve to `X`'s page. */
 	aliasOf?: string;
 	classes: Class[];
 	members: Member[];
@@ -174,7 +174,7 @@ export interface Diagnostic {
 }
 
 /**
- * A name reached through a runtime alias (`[source] aliases`): either a whole
+ * A name reached through a runtime alias (`[source] aliases`), either a whole
  * runtime module mount (`@lute/fs`) or a type accessed on one (`fs.File`).
  * `alias` and `path` record the require target (`lute`, `fs`), `name` is the
  * exported type name when referencing a type, and `url` is the module page URL
@@ -193,7 +193,7 @@ export interface DocModel {
 	project: { entryPoints: string[] };
 	modules: Module[];
 	/**
-	 * External names linked by text: `@external` declarations map directly to a
+	 * External names linked by text. `@external` declarations map directly to a
 	 * URL string, while runtime-alias references map to an `ExternalRef`.
 	 * Absent when empty.
 	 */

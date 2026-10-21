@@ -17,11 +17,11 @@ const SENSITIVE_CLOSE = new RegExp(`</(?:${SENSITIVE_TAGS})\\b`, "i");
 const INCLUDE_MARKER = /^[ \t]*<!-- @include-(?:start:|end)/m;
 
 export function whitespacePlugin(md: MarkdownIt): void {
-	const softbreak = md.renderer.rules.softbreak!;
+	const renderSoftbreak = md.renderer.rules.softbreak!;
 	md.renderer.rules.softbreak = (tokens, idx, options, env, self) => {
 		// When `options.breaks` is enabled, a softbreak renders as `<br>`, not whitespace.
 		if (options.breaks) {
-			return softbreak(tokens, idx, options, env, self);
+			return renderSoftbreak(tokens, idx, options, env, self);
 		}
 		// A whitespace-sensitive tag opened mid-paragraph is tokenized as
 		// `html_inline`; scan backward to preserve newlines inside an unclosed one.
@@ -34,13 +34,13 @@ export function whitespacePlugin(md: MarkdownIt): void {
 				break;
 			}
 			if (SENSITIVE.test(html)) {
-				return softbreak(tokens, idx, options, env, self);
+				return renderSoftbreak(tokens, idx, options, env, self);
 			}
 		}
 		return " ";
 	};
 
-	const htmlBlock = md.renderer.rules.html_block!;
+	const renderHtmlBlock = md.renderer.rules.html_block!;
 	md.renderer.rules.html_block = (tokens, idx, options, env, self) => {
 		const token = tokens[idx]!;
 		const original = token.content;
@@ -49,7 +49,7 @@ export function whitespacePlugin(md: MarkdownIt): void {
 			// directly, then restore it after rendering.
 			token.content = original.replace(/[ \t]*\n[ \t]*(?=\S)/g, " ");
 		}
-		const html = htmlBlock(tokens, idx, options, env, self);
+		const html = renderHtmlBlock(tokens, idx, options, env, self);
 		token.content = original;
 		return html;
 	};

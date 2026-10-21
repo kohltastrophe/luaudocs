@@ -1,17 +1,17 @@
 /**
- * `luaudocs init`: scaffolds `luaudocs.toml` plus the user-owned docs content,
+ * `luaudocs init` command. Scaffolds `luaudocs.toml` plus the user-owned docs content,
  * and optionally converts an existing Moonwave project (both config and
- * hand-written pages, via `src/moonwave.ts`). Existing user files are skipped
- * unless `--force` is passed, and LuauDocs never touches them again after
- * creation. The `.vitepress/` machinery is synced once at the end so the site
- * resolves before the first build.
+ * hand-written pages, via `src/moonwave.ts`). Skips existing user files unless
+ * `--force` is passed, and never touches them again after creation. Syncs the
+ * `.vitepress/` machinery once at the end so the site resolves before the first
+ * build.
  */
 import { execFile } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import pc from "picocolors";
 import pkg from "../package.json";
-import { createContext, filesUnder, printWarnings } from "./build";
+import { createContext } from "./build";
 import {
 	DEFAULT_BRANCH,
 	DEFAULT_DOCS_DIR,
@@ -31,7 +31,8 @@ import {
 	type MoonwaveSource,
 	readMoonwave,
 } from "./moonwave";
-import { isGeneratedFile } from "./pages";
+import { filesUnder, isGeneratedFile } from "./pages";
+import { printWarnings } from "./render";
 import { collectGuides, firstGuidePage, syncSite } from "./site";
 
 /** The Node major version from `engines.node`, installed by the scaffolded workflow. */
@@ -49,15 +50,10 @@ export interface InitOptions {
  * -------------------------------------------------------------- the new config
  */
 
-/** Formats a TOML basic string (JSON string escapes are a valid subset of TOML's). */
-function tomlString(value: string): string {
-	return JSON.stringify(value);
-}
-
 /**
- * Built in code rather than shipped as a template file because `init` fills in
- * probed source roots, a detected GitHub remote, and any existing custom docs
- * directory conditionally.
+ * Builds `luaudocs.toml` in code rather than shipping a template file because
+ * `init` conditionally fills in probed source roots, a detected GitHub remote,
+ * and any existing custom docs directory.
  */
 function configToml(options: {
 	title: string;
@@ -67,19 +63,21 @@ function configToml(options: {
 	docsDir?: string;
 }): string {
 	// A detected GitHub remote enables `[repo]` (source links, edit links, and
-	// the GitHub icon) instead of leaving the table commented out; `branch`
+	// the GitHub icon) instead of leaving the table commented out, while `branch`
 	// stays commented because the config loader defaults it to `"main"`.
 	const repo = options.repoUrl
-		? `[repo]\nurl = ${tomlString(options.repoUrl)}\n# branch = "main"`
+		? `[repo]\nurl = ${JSON.stringify(options.repoUrl)}\n# branch = "main"`
 		: '# [repo]\n# url = "https://github.com/user/repo"\n# branch = "main"';
 	// When re-running against an existing custom docs directory, keep the
 	// rewritten config pointing at the directory where content is scaffolded.
-	const dir = options.docsDir ? `dir = ${tomlString(options.docsDir)}` : '# dir = ".luaudocs"';
-	return `title = ${tomlString(options.title)}
-description = ${tomlString(options.description)}
+	const dir = options.docsDir
+		? `dir = ${JSON.stringify(options.docsDir)}`
+		: '# dir = ".luaudocs"';
+	return `title = ${JSON.stringify(options.title)}
+description = ${JSON.stringify(options.description)}
 
 [source]
-entries = [${options.entries.map(tomlString).join(", ")}]
+entries = [${options.entries.map((entry) => JSON.stringify(entry)).join(", ")}]
 
 # Enables "View source" links on members, "Edit this page" links, and the
 # GitHub icon in the site header. (init fills this in when it detects a
@@ -149,14 +147,13 @@ async function detectRepoUrl(targetDir: string): Promise<string | undefined> {
 	}
 	// Strip credentials so a clone URL containing a token never leaks into
 	// `luaudocs.toml` or generated source links.
-	try {
-		const url = new URL(https);
-		url.username = "";
-		url.password = "";
-		return url.href.replace(/\/$/, "");
-	} catch {
+	if (!URL.canParse(https)) {
 		return undefined;
 	}
+	const url = new URL(https);
+	url.username = "";
+	url.password = "";
+	return url.href.replace(/\/$/, "");
 }
 
 /**
@@ -174,8 +171,8 @@ async function detectBranch(targetDir: string): Promise<string> {
  * Parses an existing `luaudocs.toml` for settings a re-run must preserve: the
  * custom `[docs] dir` target and (when `--force` is not set) whether the
  * surviving config sets `includeReadme`. Throws before writing anything if the
- * existing file is invalid; treating a broken config as missing would scaffold
- * into `.luaudocs/` and pin the workflow to the wrong directory.
+ * existing file is invalid, since treating a broken config as missing would
+ * scaffold into `.luaudocs/` and pin the workflow to the wrong directory.
  */
 function existingConfig(targetDir: string): LuauDocsConfig | undefined {
 	const path = join(targetDir, "luaudocs.toml");
@@ -195,7 +192,7 @@ function existingConfig(targetDir: string): LuauDocsConfig | undefined {
 type Put = (destRel: string, content: string | Buffer) => void;
 
 /**
- * Creates the single file-writing helper for `init`: skips user-owned files
+ * Creates the single file-writing helper for `init`. Skips user-owned files
  * (unless `--force` is set), replaces marker-carrying generated files with
  * editable templates, and tallies created/skipped counts for the summary line.
  * Reading an existing file as UTF-8 for the marker check is safe even when
@@ -206,7 +203,7 @@ function makePut(targetDir: string, force: boolean | undefined) {
 	const put: Put = (destRel, content) => {
 		const dest = join(targetDir, destRel);
 		// A file carrying the generated marker was written by a config-less build,
-		// not by the user; replace it with the editable template.
+		// not by the user, so replace it with the editable template.
 		const existing = existsSync(dest) ? readFileSync(dest, "utf8") : undefined;
 		if (existing !== undefined && !force && !isGeneratedFile(existing)) {
 			console.log(pc.dim(`  skipped (exists)  ${destRel}`));
@@ -224,8 +221,8 @@ function makePut(targetDir: string, force: boolean | undefined) {
 /**
  * Copies a packaged template tree through `put`, substituting `@TOKEN@`
  * placeholders. `templates/site` lands under the docs directory and
- * `templates/project` lands at the project root; both belong to the user once
- * written.
+ * `templates/project` lands at the project root, and both belong to the user
+ * once written.
  */
 function copyTemplateTree(
 	tree: "site" | "project",
@@ -304,7 +301,112 @@ async function scaffold(options: {
 	);
 }
 
-/** Runs `luaudocs init`: optional Moonwave conversion followed by project scaffolding. */
+function finalizeMoonwaveInit(
+	options: InitOptions,
+	source: MoonwaveSource,
+	pages: MoonwavePages,
+	put: Put,
+	existing: LuauDocsConfig | undefined,
+	hadConfig: boolean,
+): void {
+	const { targetDir, force } = options;
+	const existingDocsDir = existing?.docs.dir;
+	const docsDirName = existingDocsDir ?? DEFAULT_DOCS_DIR;
+	// Convert after scaffolding so the navbar and hero can link to the
+	// guide tree's actual first page on disk (whether converted or scaffolded).
+	const guideLink = firstGuidePage(collectGuides(join(targetDir, docsDirName)));
+	// When an existing `luaudocs.toml` is kept (no `--force`), the homepage
+	// follows the surviving config's `includeReadme` setting rather than Moonwave's.
+	const configWritten = !hadConfig || force === true;
+	const conversion = convertMoonwave(source, {
+		fallbackTitle: options.title ?? source.title ?? basename(targetDir),
+		docsDir:
+			existingDocsDir !== undefined && existingDocsDir !== DEFAULT_DOCS_DIR
+				? existingDocsDir
+				: undefined,
+		guideLink,
+		homeReadme: configWritten ? undefined : existing?.docs.includeReadme === true,
+	});
+	// Port Moonwave homepage branding to `index.md` unless `pages/index.md`
+	// already claimed the homepage slot.
+	if (
+		conversion.homeIndexMd !== undefined &&
+		!pages.files.some((page) => page.destRel === "index.md")
+	) {
+		put(join(docsDirName, "index.md"), conversion.homeIndexMd);
+	}
+	const report = [...conversion.report, ...pages.report];
+	if (report.length > 0) {
+		console.log(pc.bold("moonwave conversion:"));
+		for (const line of report) {
+			console.log(line);
+		}
+		console.log("");
+	}
+
+	// Write the converted config after `scaffold` so it overwrites the
+	// starter `luaudocs.toml` when `--force` is set.
+	if (!configWritten) {
+		console.log(
+			pc.yellow(
+				"  skipped (exists)  luaudocs.toml; re-run with --force to apply the conversion",
+			),
+		);
+	} else {
+		writeFileSync(join(targetDir, "luaudocs.toml"), conversion.configToml);
+		console.log(pc.green("  wrote converted   luaudocs.toml"));
+	}
+	const staticDir = join(targetDir, ".moonwave", "static");
+	if (existsSync(staticDir)) {
+		// `force: false` preserves any existing files in `public/` (including `CNAME`).
+		cpSync(staticDir, join(targetDir, docsDirName, "public"), {
+			recursive: true,
+			force: false,
+			errorOnExist: false,
+		});
+		console.log(pc.green(`  copied            .moonwave/static/* -> ${docsDirName}/public/`));
+	}
+}
+
+function prepareMoonwaveInput(
+	targetDir: string,
+	docsDirName: string,
+	put: Put,
+): { source: MoonwaveSource; pages: MoonwavePages } {
+	// Match Moonwave's config lookup order: `moonwave.toml`, then `moonwave.json`.
+	const moonwavePath = ["moonwave.toml", "moonwave.json"]
+		.map((name) => join(targetDir, name))
+		.find(existsSync);
+	if (!moonwavePath) {
+		throw new Error(`--from-moonwave: no moonwave.toml or moonwave.json in ${targetDir}`);
+	}
+	// Parse everything before writing to disk so a malformed config aborts cleanly.
+	const source = readMoonwave(moonwavePath);
+	const pages = collectMoonwavePages(targetDir);
+	for (const page of pages.files) {
+		put(join(docsDirName, page.destRel), page.content);
+	}
+	return { source, pages };
+}
+
+function syncInitialVitepress(targetDir: string): void {
+	// Sync `.vitepress/` once so the site resolves before the first build.
+	// Passing `apiSidebar: undefined` preserves any existing baked API sidebar on
+	// a re-run and writes an empty one in a fresh project.
+	try {
+		const context = createContext(targetDir);
+		printWarnings(
+			syncSite(context, { guides: collectGuides(context.docsDir), apiSidebar: undefined }),
+		);
+	} catch (error) {
+		console.warn(
+			pc.yellow(`could not generate the .vitepress/ machinery: ${(error as Error).message}`),
+		);
+		console.warn(pc.yellow("the next `luaudocs build` will retry"));
+	}
+}
+
+/** Runs `luaudocs init` (optional Moonwave conversion followed by project scaffolding). */
 export async function initProject(options: InitOptions): Promise<void> {
 	const targetDir = options.targetDir;
 	let title = options.title;
@@ -312,42 +414,27 @@ export async function initProject(options: InitOptions): Promise<void> {
 	let source: MoonwaveSource | undefined;
 	let pages: MoonwavePages | undefined;
 
-	const configPath = join(targetDir, "luaudocs.toml");
-	const hadConfig = existsSync(configPath);
+	const hadConfig = existsSync(join(targetDir, "luaudocs.toml"));
 	const { put, counts } = makePut(targetDir, options.force);
-	// Read any existing config before `scaffold` rewrites it under `--force`:
-	// a custom `[docs] dir` must carry over into the converted config, and
+	// Read any existing config before `scaffold` rewrites it under `--force`.
+	// A custom `[docs] dir` must carry over into the converted config, and
 	// `includeReadme` determines whether the converted homepage includes the
 	// README when an existing config is kept.
 	const existing = existingConfig(targetDir);
-	const existingDocsDir = existing?.docs.dir;
-	const docsDirName = existingDocsDir ?? DEFAULT_DOCS_DIR;
+	const docsDirName = existing?.docs.dir ?? DEFAULT_DOCS_DIR;
 
 	if (options.fromMoonwave) {
-		// Match Moonwave's config lookup order: `moonwave.toml`, then `moonwave.json`.
-		const moonwavePath = ["moonwave.toml", "moonwave.json"]
-			.map((name) => join(targetDir, name))
-			.find(existsSync);
-		if (!moonwavePath) {
-			throw new Error(`--from-moonwave: no moonwave.toml or moonwave.json in ${targetDir}`);
-		}
-		// Parse everything before writing to disk so a malformed config aborts cleanly.
-		source = readMoonwave(moonwavePath);
-		pages = collectMoonwavePages(targetDir);
-		for (const page of pages.files) {
-			put(join(docsDirName, page.destRel), page.content);
-		}
+		({ source, pages } = prepareMoonwaveInput(targetDir, docsDirName, put));
 		title = title ?? source.title;
 		description = description ?? source.description;
 	}
 
 	// Converted Moonwave content displaces matching starter templates even under
-	// `--force`: skip any template path claimed by a converted file, the homepage
+	// `--force`. Skip any template path claimed by a converted file, the homepage
 	// when Moonwave home branding is present, and the sample guide + landing page
 	// when real guides were converted (the build's generated hero serves until
 	// the user writes an `index.md`).
 	const claimed = new Set((pages?.files ?? []).map((page) => page.destRel));
-	const pagesClaimIndex = claimed.has("index.md");
 	if (source?.hasHomeBranding) {
 		claimed.add("index.md");
 	}
@@ -366,62 +453,7 @@ export async function initProject(options: InitOptions): Promise<void> {
 	});
 
 	if (source !== undefined && pages !== undefined) {
-		// Convert after scaffolding so the navbar and hero can link to the
-		// guide tree's actual first page on disk (whether converted or scaffolded).
-		const guideLink = firstGuidePage(collectGuides(join(targetDir, docsDirName)));
-		// When an existing `luaudocs.toml` is kept (no `--force`), the homepage
-		// follows the surviving config's `includeReadme` setting rather than Moonwave's.
-		const configWritten = !hadConfig || options.force === true;
-		const conversion = convertMoonwave(source, {
-			fallbackTitle: title ?? basename(targetDir),
-			docsDir:
-				existingDocsDir !== undefined && existingDocsDir !== DEFAULT_DOCS_DIR
-					? existingDocsDir
-					: undefined,
-			guideLink,
-			homeReadme: configWritten ? undefined : existing?.docs.includeReadme === true,
-		});
-		// Port Moonwave homepage branding to `index.md` unless `pages/index.md`
-		// already claimed the homepage slot.
-		if (conversion.homeIndexMd !== undefined && !pagesClaimIndex) {
-			put(join(docsDirName, "index.md"), conversion.homeIndexMd);
-		}
-		const report = [...conversion.report, ...pages.report];
-		if (report.length > 0) {
-			console.log(pc.bold("moonwave conversion:"));
-			for (const line of report) {
-				console.log(line);
-			}
-			console.log("");
-		}
-
-		// Write the converted config after `scaffold` so it overwrites the
-		// starter `luaudocs.toml` when `--force` is set.
-		if (!configWritten) {
-			console.log(
-				pc.yellow(
-					"  skipped (exists)  luaudocs.toml; re-run with --force to apply the conversion",
-				),
-			);
-		} else {
-			writeFileSync(configPath, conversion.configToml);
-			console.log(pc.green("  wrote converted   luaudocs.toml"));
-		}
-	}
-
-	if (options.fromMoonwave) {
-		const staticDir = join(targetDir, ".moonwave", "static");
-		if (existsSync(staticDir)) {
-			// `force: false` preserves any existing files in `public/` (including `CNAME`).
-			cpSync(staticDir, join(targetDir, docsDirName, "public"), {
-				recursive: true,
-				force: false,
-				errorOnExist: false,
-			});
-			console.log(
-				pc.green(`  copied            .moonwave/static/* -> ${docsDirName}/public/`),
-			);
-		}
+		finalizeMoonwaveInit(options, source, pages, put, existing, hadConfig);
 	}
 
 	// Scaffold the project-root tree (the GitHub Pages workflow) after the
@@ -430,28 +462,10 @@ export async function initProject(options: InitOptions): Promise<void> {
 		"@DOCS_DIR@": docsDirName,
 		"@BRANCH@": await detectBranch(targetDir),
 		"@NODE_MAJOR@": NODE_MAJOR,
-		// Pin the CLI version in the scaffold-once workflow so a future breaking
-		// release cannot break deployments on an unrelated push.
-		"@VERSION@": pkg.version,
 	});
 
 	console.log("");
 	console.log(`${pc.bold(String(counts.created))} files created, ${counts.skipped} skipped.`);
-
-	// Sync `.vitepress/` once so the site resolves before the first build.
-	// Passing `apiSidebar: undefined` preserves any existing baked API sidebar on
-	// a re-run and writes an empty one in a fresh project.
-	try {
-		const context = createContext(targetDir);
-		printWarnings(
-			syncSite(context, { guides: collectGuides(context.docsDir), apiSidebar: undefined }),
-		);
-	} catch (error) {
-		console.warn(
-			pc.yellow(`could not generate the .vitepress/ machinery: ${(error as Error).message}`),
-		);
-		console.warn(pc.yellow("the next `luaudocs build` will retry"));
-	}
-
+	syncInitialVitepress(targetDir);
 	console.log(`Next: edit ${pc.cyan("luaudocs.toml")}, then run ${pc.cyan("luaudocs dev")}.`);
 }

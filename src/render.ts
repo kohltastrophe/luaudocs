@@ -1,16 +1,18 @@
 /**
- * Markdown emission, deliberately kept in one file because its pieces must not
- * drift: `pageSteps` yields a page's render order, `mintAnchors` walks the same
- * steps to predict the heading id VitePress will mint for each, and the
- * SymbolTable turns those predictions into links. A drift between the walks
- * fails *silently*: VitePress strips the fragment before its dead-link check,
- * so a wrong anchor ships as a link that scrolls nowhere. test/anchors.test.ts
+ * Markdown emission, kept in one file so its three walks cannot drift:
+ * `pageSteps` yields a page's render order, `mintAnchors` walks the same steps
+ * to predict the heading id VitePress will mint for each, and `SymbolTable`
+ * turns those predictions into links. Drift between the walks would fail
+ * silently because VitePress strips the fragment before its dead-link check,
+ * shipping a wrong anchor as a link that scrolls nowhere. `test/anchors.test.ts`
  * asserts both directions against the real VitePress renderer.
  *
- * Linking policy: never emit a link we cannot resolve. Signature links are
- * recorded as offset spans while the display's segments are joined, so the join
- * IS the offset computation.
+ * Never emits a link that cannot be resolved, and records signature links as
+ * offset spans while joining the display's segments so the join computes the
+ * offsets directly.
  */
+import picomatch from "picomatch";
+import pc from "picocolors";
 import type {
 	Badges,
 	DocModel,
@@ -24,6 +26,8 @@ import type {
 } from "./docmodel";
 import { parseDocModel } from "./docmodel";
 import { repoFileUrl, validateConfig, type LuauDocsConfig } from "./config";
+import { loadDependencies, type LoadedDependency } from "./dependencies";
+import { runExtractor } from "./extract";
 import {
 	BADGE_LINK_ATTRS,
 	encodeHref,
@@ -31,6 +35,7 @@ import {
 	escapeMarkdown,
 	headingSlug,
 	linkDestination,
+	LINKS_TOKEN,
 	mapOutsideCodeSpans,
 	mapOutsideFences,
 	proseHeadings,
@@ -38,6 +43,7 @@ import {
 	sourceLinkAnchor,
 	stripLinks,
 	unwrap,
+	type TrailSegment,
 } from "./markdown";
 import {
 	apiHref,
@@ -49,6 +55,7 @@ import {
 	memberAccess,
 	toPosix,
 	TYPES_HEADING,
+	type BuildContext,
 	type PageFn,
 	type PageModel,
 	type PageProp,
@@ -56,12 +63,19 @@ import {
 	type PageType,
 	type ReexportInfo,
 } from "./pages";
-import { apiSidebar, apiTrails, buildAccessTree, renderApiIndex, type SidebarItem } from "./nav";
-import { LINKS_TOKEN } from "../templates/runtime/signature-links";
-import type { TrailSegment } from "../templates/runtime/markup";
+import {
+	apiSidebar,
+	apiTrails,
+	buildAccessTree,
+	renderApiIndex,
+	type SidebarItem,
+	type TreeNode,
+} from "./nav";
 import robloxNames from "./generated/roblox-names.json";
 
-/** Luau builtins: never linked. */
+export type { LoadedDependency };
+
+/** Luau builtins (never linked). */
 const LUAU_BUILTINS = new Set([
 	"string",
 	"number",
@@ -90,11 +104,11 @@ const ROBLOX_ENUMS = new Set<string>(robloxNames.enums);
 
 interface RenderOptions {
 	symbols: SymbolTable;
-	/** The validated luaudocs.toml, read directly so defaults live in
-	 * config.ts alone and are never duplicated here. */
+	/** The validated `luaudocs.toml`, read directly so defaults live in
+	 * `config.ts` alone and are never duplicated here. */
 	config: LuauDocsConfig;
-	/** Names the extractor could not resolve locally: an `@external` URL or a
-	 * runtime-alias reference, consulted before the Roblox lists. */
+	/** Names the extractor could not resolve locally (an `@external` URL or a
+	 * runtime-alias reference), consulted before the Roblox lists. */
 	externals?: Record<string, string | ExternalRef>;
 	/** Published doc models for dependencies, turning runtime-alias references
 	 * into exact links on the dependency's site. */
@@ -109,20 +123,22 @@ function robloxUrl(name: string): string | undefined {
 	if (enumName !== undefined) {
 		return ROBLOX_ENUMS.has(enumName) ? `${ROBLOX_DOCS}/enums/${enumName}` : undefined;
 	}
-	const kind = ROBLOX_DATATYPES.has(name)
-		? "datatypes"
-		: ROBLOX_CLASSES.has(name)
-			? "classes"
-			: ROBLOX_ENUMS.has(name)
-				? "enums"
-				: undefined;
-	return kind ? `${ROBLOX_DOCS}/${kind}/${name}` : undefined;
+	if (ROBLOX_DATATYPES.has(name)) {
+		return `${ROBLOX_DOCS}/datatypes/${name}`;
+	}
+	if (ROBLOX_CLASSES.has(name)) {
+		return `${ROBLOX_DOCS}/classes/${name}`;
+	}
+	if (ROBLOX_ENUMS.has(name)) {
+		return `${ROBLOX_DOCS}/enums/${name}`;
+	}
+	return undefined;
 }
 
 /**
- * Resolves a name outside the project: the author's `@external` map wins over
- * the Roblox engine lists. Percent-encoded, since an author's URL can contain
- * characters that link destinations cannot carry raw.
+ * Resolves a name outside the project, checking the author's `@external` map
+ * before the Roblox engine lists. Percent-encoded, since an author's URL can
+ * contain characters that link destinations cannot carry raw.
  */
 function externalUrl(name: string, options: RenderOptions): string | undefined {
 	const external = options.externals?.[name];
@@ -140,7 +156,7 @@ function externalUrl(name: string, options: RenderOptions): string | undefined {
 	return undefined;
 }
 
-/** Resolves a reference segment: project symbol ID first, then by-text external fallbacks. */
+/** Resolves a reference segment (project symbol ID first, then by-text external fallbacks). */
 function segHref(seg: { text: string; id?: string }, options: RenderOptions): string | undefined {
 	return seg.id ? options.symbols.linkForId(seg.id) : externalUrl(seg.text, options);
 }
@@ -170,35 +186,34 @@ function pureAliasRef(ty: PageType): string | undefined {
  * ---------------------------------------------------------------- prose links
  */
 
+// `](` and `][` are markdown links, `]:` is a link-reference definition, and a
+// leading `]` means THIS bracket is the label half of a `[text][Ref]` reference
+// link. Allow any number of dotted segments, since a nested class's member is
+// spelled in full (`Color.Linear.fromGamma`).
+const PROSE_REF_RE = /(?<!\])\[([A-Za-z_]\w*(?:[.:][A-Za-z_]\w*)*)\](?![([:])/g;
+
+function rewriteProseLine(line: string, options: RenderOptions): string {
+	return mapOutsideCodeSpans(line, (part) =>
+		part.replace(PROSE_REF_RE, (match, name: string) => {
+			// Try project symbols first. A bare identifier falls back to
+			// `@external` or Roblox, but never a `Class.member` form, which
+			// would fabricate an anchor.
+			const url =
+				options.symbols.linkForName(name) ??
+				(/^[A-Za-z_]\w*$/.test(name) ? externalUrl(name, options) : undefined);
+			return url ? `[\`${name}\`](${linkDestination(url)})` : match;
+		}),
+	);
+}
+
 /**
  * Resolves Moonwave bracket references in prose markdown (`[Class]`,
  * `[Class.member]`, and `[CFrame]`-style Roblox and `@external` names). Skips
  * fenced and indented code blocks, inline code spans, and existing markdown links.
  */
 function linkifyProse(markdown: string, options: RenderOptions): string {
-	const rewriteLine = (line: string): string =>
-		mapOutsideCodeSpans(line, (part) =>
-			part.replace(
-				// `](` and `][` are markdown links, `]:` is a link-reference
-				// definition, and a leading `]` means THIS bracket is the
-				// label half of a `[text][Ref]` reference link. Allow any number
-				// of dotted segments, since a nested class's member is spelled
-				// in full (`Color.Linear.fromGamma`).
-				/(?<!\])\[([A-Za-z_]\w*(?:[.:][A-Za-z_]\w*)*)\](?![([:])/g,
-				(match, name: string) => {
-					// Try project symbols first; a bare identifier falls back to
-					// @external or Roblox, but never a Class.member form, which
-					// would fabricate an anchor.
-					const url =
-						options.symbols.linkForName(name) ??
-						(/^[A-Za-z_]\w*$/.test(name) ? externalUrl(name, options) : undefined);
-					return url ? `[\`${name}\`](${linkDestination(url)})` : match;
-				},
-			),
-		);
-
-	// Indented code is left verbatim like fenced code: a 4-space or tab-indented
-	// line after a blank boundary opens a code block (CommonMark: indented code
+	// Indented code is left verbatim like fenced code. A 4-space or tab-indented
+	// line after a blank boundary opens a code block (per CommonMark, indented code
 	// cannot interrupt a paragraph). The state spans fence boundaries, since a
 	// fence line is a non-blank line that ends any indented run.
 	let prevBlank = true; // text start counts as a blank boundary
@@ -220,7 +235,7 @@ function linkifyProse(markdown: string, options: RenderOptions): string {
 					inIndentedCode = true;
 					return line;
 				}
-				return rewriteLine(line);
+				return rewriteProseLine(line, options);
 			})
 			.join("\n");
 		prevBlank = false;
@@ -232,8 +247,8 @@ function linkifyProse(markdown: string, options: RenderOptions): string {
 /**
  * Merges runs of unlinked segments into one code span so a display whose
  * references resolve nowhere reads as a single code span. Edge whitespace stays
- * outside the span: CommonMark strips spaces that pad both ends of a code span,
- * so `A | B` would otherwise collapse to `A|B`.
+ * outside the span because CommonMark strips spaces that pad both ends of a
+ * code span, which would collapse `A | B` to `A|B`.
  */
 function linkifyInline(type: Inline, options: RenderOptions): string {
 	const parts: string[] = [];
@@ -277,8 +292,8 @@ function badge(type: "info" | "tip" | "warning" | "danger", text: string, cls?: 
 
 /**
  * Structured badge data shared between rendered pages and `llms.txt`. `note`
- * is used on deprecation badges only: pages render it as a standalone warning
- * container (`deprecationNotice`), while `llms.txt` folds it into the label.
+ * is used on deprecation badges only (pages render it as a standalone warning
+ * container via `deprecationNotice`, while `llms.txt` folds it into the label).
  */
 export interface BadgeLabel {
 	type: "info" | "tip" | "warning" | "danger";
@@ -321,7 +336,6 @@ function badgeMarkup(tags: Badges | undefined, visibility?: "public" | "private"
 		.join(" ");
 }
 
-/** A property's badge when it cannot be assigned. */
 export const READ_ONLY_LABEL = "Read Only";
 
 /** "Module" for whole-module mounts, "from X" for members defined in module X. */
@@ -389,7 +403,6 @@ function* introSteps(page: PageModel, section: PageSection): Generator<PageStep>
 	}
 }
 
-/** The member kinds in page order, each under its heading. */
 export const MEMBER_HEADINGS = [
 	{ text: "Properties", kind: "prop" },
 	{ text: "Functions", kind: "function" },
@@ -403,7 +416,7 @@ export const MEMBER_HEADINGS = [
  * headings would be `###`, so nested members sit directly under the section
  * heading in kind order.
  */
-function* memberSteps(page: PageModel, section: PageSection): Generator<PageStep> {
+function* memberSteps(section: PageSection): Generator<PageStep> {
 	const labeled = section.name === "";
 	const container = section.container;
 	for (const { text, kind } of MEMBER_HEADINGS) {
@@ -415,20 +428,9 @@ function* memberSteps(page: PageModel, section: PageSection): Generator<PageStep
 			yield { kind: "heading", level: 2, text, id: `${section.id ?? ""}:${text}` };
 		}
 		for (const member of members) {
-			// A callable module with no comment block of its own promotes its
-			// call member's comment to the module blurb (the page intro and index
-			// summary); repeating it byte-for-byte on the member adds nothing.
-			// Stripped here so rendering and anchor minting see the same doc.
-			const deduped =
-				member.kind !== "prop" &&
-				member.doc !== undefined &&
-				member.doc === page.doc &&
-				member.signature.callee === page.title
-					? { ...member, doc: undefined }
-					: member;
-			yield deduped.kind === "prop"
-				? { kind: "prop", prop: deduped, container }
-				: { kind: "fn", fn: deduped };
+			yield member.kind === "prop"
+				? { kind: "prop", prop: member, container }
+				: { kind: "fn", fn: member };
 		}
 	}
 }
@@ -450,7 +452,6 @@ function declOf(step: PageStep): Decl | undefined {
 	}
 }
 
-/** Yields the entire page in render order. */
 function* pageSteps(page: PageModel): Generator<PageStep> {
 	yield { kind: "title" };
 	if (page.doc) {
@@ -468,18 +469,18 @@ function* pageSteps(page: PageModel): Generator<PageStep> {
 		}
 	}
 	if (primary) {
-		yield* memberSteps(page, primary);
+		yield* memberSteps(primary);
 	}
 	for (const section of nested) {
 		yield* introSteps(page, section);
-		yield* memberSteps(page, section);
+		yield* memberSteps(section);
 	}
 }
 
 /**
- * The `anchors` key holding the slug of the page's own H1. Synthetic, like the
- * heading-step IDs: it names the region wrapping the whole page so an embed
- * can pull in a module's title, description, and members as one block.
+ * The `anchors` key holding the slug of the page's own H1. Like the
+ * heading-step IDs, this synthetic key names the region wrapping the whole page
+ * so an embed can pull in a module's title, description, and members as one block.
  */
 const PAGE_ANCHOR = ":page";
 
@@ -522,8 +523,8 @@ function mintAnchors(page: PageModel): Record<string, string> {
 		// the owner's main doc prose.
 		const decl = declOf(step);
 		if (decl !== undefined) {
-			// Mint from the bare name (what the heading's code span slugifies to):
-			// a nested section's member heading is `### \`fromGamma\``, so a name
+			// Mint from the bare name (what the heading's code span slugifies to).
+			// A nested section's member heading is `### \`fromGamma\``, so a name
 			// shared across two sections collides and the second gets `-1`.
 			mint(decl.name, decl.id);
 			prose(decl.tags?.deprecated?.note);
@@ -568,8 +569,8 @@ interface SymbolTarget {
 
 /**
  * Maps doc-model IDs and human reference spellings to page slugs and anchors.
- * Anchors are read from `PageModel.anchors` rather than recomputed from a name,
- * since only `mintAnchors` knows which declaration won a slug collision.
+ * Reads anchors from `PageModel.anchors` rather than recomputing them from a
+ * name, since only `mintAnchors` knows which declaration won a slug collision.
  */
 class SymbolTable {
 	private byId = new Map<string, SymbolTarget>();
@@ -600,12 +601,33 @@ class SymbolTable {
 			}
 		}
 
-		// Names register in tiers, and ambiguity (with its warning) only occurs
-		// within the same tier. The value surface (pages, sections, and members)
-		// claims spellings first; exported types take remaining names (since a
-		// module and its same-named type read as one entity); and pure re-spelling
-		// aliases (`export type Log = Util.Log`) claim their qualified name while
-		// pointing the bare name at the origin declaration.
+		this.registerValueSurface(pages, warnings);
+		this.registerTypesAndAliases(pages, warnings);
+
+		// Class entries resolve to their section heading (or the page itself for a
+		// primary class), while IDs on skipped pages stay unregistered.
+		for (const module of model.modules) {
+			const page = pageByModule.get(module.id);
+			if (!page) {
+				continue;
+			}
+			for (const cls of module.classes) {
+				this.byId.set(
+					cls.id,
+					isPrimaryClass(cls, module.name)
+						? { page: page.slug }
+						: { page: page.slug, anchor: page.anchors[cls.id] },
+				);
+			}
+		}
+	}
+
+	/**
+	 * Names register in tiers, and ambiguity (with its warning) only occurs
+	 * within the same tier. The value surface (pages, sections, and members)
+	 * claims spellings first.
+	 */
+	private registerValueSurface(pages: PageModel[], warnings: string[]): void {
 		const pageTitles = new Set(pages.map((page) => page.title));
 		for (const page of pages) {
 			this.registerName(page.title, { page: page.slug }, warnings);
@@ -638,7 +660,15 @@ class SymbolTable {
 				}
 			}
 		}
+	}
 
+	/**
+	 * Exported types take remaining names after the value surface (since a
+	 * module and its same-named type read as one entity), while pure re-spelling
+	 * aliases (`export type Log = Util.Log`) claim their qualified name and
+	 * point the bare name at the origin declaration.
+	 */
+	private registerTypesAndAliases(pages: PageModel[], warnings: string[]): void {
 		const valueNames = new Set(this.byName.keys());
 		const aliasOfId = new Map<string, string>();
 		const aliases: Array<{ name: string; target: SymbolTarget; refId: string }> = [];
@@ -654,8 +684,8 @@ class SymbolTable {
 				if (refId !== undefined) {
 					aliasOfId.set(ty.id, refId);
 				}
-				// Only exported types register under their bare name: an unexported
-				// type cannot be named outside its module, so registering it would
+				// Only exported types register under their bare name because an unexported
+				// type cannot be named outside its module, and registering it would
 				// only make an exported name elsewhere ambiguous.
 				if (!ty.exported || valueNames.has(ty.name)) {
 					continue;
@@ -671,36 +701,20 @@ class SymbolTable {
 		const typeNames = new Set(this.byName.keys());
 		const seenAliasOrigin = new Map<string, string>();
 		for (const alias of aliases) {
-			if (!typeNames.has(alias.name)) {
-				let rootId = alias.refId;
-				for (let step = 0; step < 16 && aliasOfId.has(rootId); step += 1) {
-					rootId = aliasOfId.get(rootId)!;
-				}
-				if (seenAliasOrigin.get(alias.name) === rootId) {
-					continue;
-				}
-				seenAliasOrigin.set(alias.name, rootId);
-				// If the origin declaration rendered no anchor of its own (e.g., an
-				// unexported or suppressed type), fall back to the alias's anchor.
-				this.registerName(alias.name, this.byId.get(rootId) ?? alias.target, warnings);
-			}
-		}
-
-		// Class entries resolve to their section heading (or the page itself for a
-		// primary class); IDs on skipped pages stay unregistered.
-		for (const module of model.modules) {
-			const page = pageByModule.get(module.id);
-			if (!page) {
+			if (typeNames.has(alias.name)) {
 				continue;
 			}
-			for (const cls of module.classes) {
-				this.byId.set(
-					cls.id,
-					isPrimaryClass(cls, module.name)
-						? { page: page.slug }
-						: { page: page.slug, anchor: page.anchors[cls.id] },
-				);
+			let rootId = alias.refId;
+			for (let step = 0; step < 16 && aliasOfId.has(rootId); step += 1) {
+				rootId = aliasOfId.get(rootId)!;
 			}
+			if (seenAliasOrigin.get(alias.name) === rootId) {
+				continue;
+			}
+			seenAliasOrigin.set(alias.name, rootId);
+			// If the origin declaration rendered no anchor of its own (e.g., an
+			// unexported or suppressed type), fall back to the alias's anchor.
+			this.registerName(alias.name, this.byId.get(rootId) ?? alias.target, warnings);
 		}
 	}
 
@@ -735,7 +749,7 @@ class SymbolTable {
 		return slug ? apiHref(slug) : undefined;
 	}
 
-	/** Returns a member ID's reader-facing qualified name; see `SymbolTarget.name`. */
+	/** Returns a member ID's reader-facing qualified name (`SymbolTarget.name`). */
 	nameForId(id: string): string | undefined {
 		return this.byId.get(id)?.name;
 	}
@@ -754,14 +768,6 @@ class SymbolTable {
  * --------------------------------------------------------- dependency links
  */
 
-/** A dependency's published doc model (`[source] aliases` with a `model`). */
-export interface LoadedDependency {
-	alias: string;
-	/** Base URL of the dependency's published docs site. */
-	url: string;
-	model: DocModel;
-}
-
 export interface DependencyLinks {
 	/** Resolves a runtime-alias reference to the type's entry on the dependency's
 	 * site, or its module page if the type itself has no entry. Returns `undefined`
@@ -775,6 +781,15 @@ function requirePathOf(moduleId: string): string {
 		.replace(/^\.\//, "")
 		.replace(/\.luau?$/, "")
 		.replace(/(^|\/)init$/, "");
+}
+
+/** Builds page models with predicted heading anchors populated for `SymbolTable`. */
+function buildAnchoredPages(model: DocModel, config: LuauDocsConfig) {
+	const result = buildPages(model, config);
+	for (const page of result.pages) {
+		page.anchors = mintAnchors(page);
+	}
+	return result;
 }
 
 /**
@@ -791,15 +806,14 @@ export function buildDependencyLinks(loaded: LoadedDependency[]): DependencyLink
 	}
 	const byAlias = new Map<string, Dependency>();
 	for (const dep of loaded) {
-		const { pages, warnings, resolveAlias } = buildPages(
+		const { pages, warnings, resolveAlias } = buildAnchoredPages(
 			dep.model,
 			validateConfig({ title: dep.alias }),
 		);
-		for (const page of pages) {
-			page.anchors = mintAnchors(page);
-		}
+		const byId = new Map(dep.model.modules.map((module) => [module.id, module]));
+		const targetOf = (module: Module): Module => byId.get(resolveAlias(module.id)) ?? module;
 		const modules = new Map(
-			dep.model.modules.map((module) => [requirePathOf(module.id), module]),
+			dep.model.modules.map((module) => [requirePathOf(module.id), targetOf(module)]),
 		);
 		// A bare `@alias` require targets the dependency's primary entry module.
 		const entry = dep.model.project.entryPoints[0];
@@ -815,7 +829,7 @@ export function buildDependencyLinks(loaded: LoadedDependency[]): DependencyLink
 	}
 
 	// `@lute/net/client` maps to `lute/net/client.luau` in one repo layout and
-	// `src/net/client.luau` in another: try an exact match first, then the
+	// `src/net/client.luau` in another, so try an exact match first and then the
 	// shortest module path that ends with `/${path}`.
 	const moduleFor = (dep: Dependency, path: string): Module | undefined => {
 		const exact = dep.modules.get(path);
@@ -900,26 +914,13 @@ class Fence {
 
 	/** Appends `<T, U... = D>`, linking any references inside generic defaults. */
 	generics(generics: Generic[]): this {
-		if (generics.length === 0) {
-			return this;
-		}
-		this.text("<");
-		for (const [index, generic] of generics.entries()) {
-			if (index > 0) {
-				this.text(", ");
-			}
-			this.text(`${generic.name}${generic.isPack ? "..." : ""}`);
-			if (generic.default) {
-				this.text(" = ").segs(generic.default);
-			}
-		}
-		return this.text(">");
+		return this.segs(genericSegs(generics));
 	}
 
 	/**
 	 * Emits the fence. The info string carries `luaudocs-links=...` (compact JSON
-	 * with no whitespace) only when at least one reference resolved; otherwise it
-	 * emits a plain `luau` fence.
+	 * with no whitespace) only when at least one reference resolved, or emits a
+	 * plain `luau` fence otherwise.
 	 */
 	render(): string {
 		const info =
@@ -938,10 +939,9 @@ function commentText(doc: string): string {
 
 /**
  * Splices each documented field's doc as a `-- comment` line above the field.
- * Placement is a direct lookup: `field.line` is the extractor's 1-based index
- * into these definition lines. Fields without a line (or whose line was already
- * claimed by an earlier field) are returned as `leftovers` to render as a prose
- * list below the fence.
+ * `field.line` is the extractor's 1-based index into these definition lines.
+ * Fields without a line (or whose line was already claimed by an earlier field)
+ * are returned as `leftovers` to render as a prose list below the fence.
  */
 function spliceFieldDocs(
 	definition: Inline[],
@@ -954,7 +954,7 @@ function spliceFieldDocs(
 		// Line 1 shares its rendered line with the `type X = ` prefix, so it
 		// cannot take a comment line above it.
 		const index = field.line !== undefined && field.line > 1 ? field.line - 1 : -1;
-		// Every field claims its line, including undocumented ones: comments sit
+		// Every field claims its line, including undocumented ones. Comments sit
 		// *above* the line, so if only documented fields claimed lines, `b` in
 		// `a: string, b: number,` would place its doc above `a`.
 		const line = definition[index];
@@ -996,17 +996,27 @@ function propFence(prop: PageProp, containerName: string, options: RenderOptions
 	return fence.render();
 }
 
+function genericSegs(generics: Generic[]): Inline {
+	if (generics.length === 0) {
+		return [];
+	}
+	const segs: Inline = ["<"];
+	for (const [index, generic] of generics.entries()) {
+		if (index > 0) {
+			segs.push(", ");
+		}
+		segs.push(`${generic.name}${generic.isPack ? "..." : ""}`);
+		if (generic.default) {
+			segs.push(" = ", ...generic.default);
+		}
+	}
+	segs.push(">");
+	return segs;
+}
+
 /** Formats `<T, U... = D>` as plain text for `llms.txt`. */
 export function genericsText(generics: Generic[]): string {
-	if (generics.length === 0) {
-		return "";
-	}
-	const parts = generics.map(
-		(generic) =>
-			`${generic.name}${generic.isPack ? "..." : ""}` +
-			(generic.default ? ` = ${inlineText(generic.default)}` : ""),
-	);
-	return `<${parts.join(", ")}>`;
+	return inlineText(genericSegs(generics));
 }
 
 /** Formats `type Name<generics> = <definition>`, recording link spans as segments join. */
@@ -1038,7 +1048,7 @@ function typeFence(
 		}
 		return { fence: fence.render(), leftovers };
 	}
-	// A tag-declared `@interface` with no AST type expression: synthesize the
+	// For a tag-declared `@interface` with no AST type expression, synthesize the
 	// table type from its `@field` entries with field docs as `--` comments.
 	if (fields.length > 0) {
 		fence.text(" = {");
@@ -1088,8 +1098,8 @@ function itemText(doc: string, options: RenderOptions): string {
 /**
  * Formats a heading from H1 page titles down to H3 members.
  *
- * Emits no explicit `{#id}`: VitePress mints the slug from the heading's text
- * tokens and `mintAnchors` predicts that exact slug, so everything appended
+ * Emits no explicit `{#id}` because VitePress mints the slug from the heading's
+ * text tokens and `mintAnchors` predicts that exact slug, so everything appended
  * after `name` must contribute zero text tokens. Self-closing `<Badge text="..." />`
  * tags and the empty source-link anchor render as HTML tokens only, so
  * `### \`Connect\` <Badge .../>` still mints `connect` (whereas a `<Badge>` with
@@ -1102,8 +1112,8 @@ function heading(level: number, name: string, badges: string, source: string): s
 /**
  * Formats the re-export badge (`reexportLabel`), linked to the origin definition.
  *
- * The markdown link wraps the `<Badge>` rather than sitting inside its slot:
- * slot children are heading text tokens, so `<Badge>[from Foo](...)</Badge>`
+ * The markdown link wraps the `<Badge>` rather than sitting inside its slot
+ * because slot children are heading text tokens, so `<Badge>[from Foo](...)</Badge>`
  * would mint `connect-from-foo` instead of `connect`. Wrapping with a markdown
  * link lets VitePress prefix the site base and run its dead-link check while
  * contributing no text tokens (since `<Badge />` is an HTML token). The trailing
@@ -1114,11 +1124,14 @@ function reexportBadge(re: ReexportInfo | undefined, options: RenderOptions): st
 		return "";
 	}
 	const text = reexportLabel(re);
-	const url = (re.targetId ? options.symbols.linkForId(re.targetId) : undefined) ?? re.url;
+	const url =
+		(re.targetId
+			? (options.symbols.linkForId(re.targetId) ?? externalUrl(re.targetId, options))
+			: undefined) ?? re.url;
 	if (url) {
 		return `[${badge("info", text)}](${linkDestination(url)})${BADGE_LINK_ATTRS}`;
 	}
-	// A "Module" badge promises a target page; when the mounted module has no
+	// A "Module" badge promises a target page. When the mounted module has no
 	// page (e.g., an opaque module), omit the badge so the entry reads as a
 	// plain property. Provenance badges ("from X") still carry meaning unlinked.
 	return re.module ? "" : badge("info", text);
@@ -1132,10 +1145,9 @@ const KIND_LABEL = {
 
 /**
  * Formats a member block (heading, deprecation notice, signature fence, prose,
- * and labeled subsections). Member names are wrapped in a code span so
- * identifiers containing markdown syntax (`__index`, `<T>`) never render as
- * emphasis or raw HTML tags; `markdown-it-anchor` strips backticks when
- * computing the heading slug.
+ * and labeled subsections). Wraps member names in a code span so identifiers
+ * containing markdown syntax (`__index`, `<T>`) never render as emphasis or raw
+ * HTML tags, and `markdown-it-anchor` strips backticks when computing the heading slug.
  */
 function memberBlock(
 	decl: Decl,
@@ -1213,8 +1225,8 @@ function renderType(ty: PageType, options: RenderOptions): string {
 /**
  * Renders the **Constructors:** link row for a class section. Constructors
  * often live on another module's page (e.g., a top-level factory), so the
- * symbol table provides both the link and the qualified display name.
- * Unresolvable constructor IDs are omitted.
+ * symbol table provides both the link and the qualified display name. Omits
+ * unresolvable constructor IDs.
  */
 function constructorLinks(section: PageSection, options: RenderOptions): string {
 	const links = section.constructors
@@ -1230,7 +1242,7 @@ function constructorLinks(section: PageSection, options: RenderOptions): string 
 function renderPage(page: PageModel, options: RenderOptions): string {
 	const parts: string[] = [
 		generatedFrontmatter(displayTitle(page), ["outline: [2, 3]"]),
-		// Informational only; nothing parses this comment.
+		// Informational only (nothing parses this comment).
 		`<!-- generated by luaudocs from ${page.moduleId} -->`,
 	];
 
@@ -1315,17 +1327,19 @@ function renderPage(page: PageModel, options: RenderOptions): string {
  */
 
 export interface EmitResult {
-	/** `"Slug.md"` -> page markdown; the API index page is in `apiIndex` instead. */
+	/** `"Slug.md"` -> page markdown (the API index page is in `apiIndex` instead). */
 	pages: Map<string, string>;
 	/**
 	 * `"Slug.md"` (plus `"index.md"`) -> breadcrumb trail segments within the
 	 * API tree. `src/site.ts` prepends `Home` and bakes these for the runtime rule.
 	 */
 	trails: Map<string, TrailSegment[]>;
-	/** `api/index.md` markdown; absent when the model produced no pages. */
+	/** `api/index.md` markdown, omitted when the model produced no pages. */
 	apiIndex?: string;
 	/** The generated API sidebar tree. */
 	sidebar: SidebarItem[];
+	/** Public module access tree (`buildAccessTree(pageModels)`). */
+	accessTree: TreeNode[];
 	/** Organized page models with predicted anchors (used by `llms.ts` and `test/anchors.test.ts`). */
 	pageModels: PageModel[];
 	warnings: string[];
@@ -1337,17 +1351,13 @@ export function emitDocs(
 	config: LuauDocsConfig,
 	dependencies?: DependencyLinks,
 ): EmitResult {
-	const { pages, warnings, resolveAlias } = buildPages(model, config);
-	// Mint anchors before constructing SymbolTable, which reads `page.anchors` directly.
-	for (const page of pages) {
-		page.anchors = mintAnchors(page);
-	}
+	const { pages, warnings, resolveAlias } = buildAnchoredPages(model, config);
 	const symbols = new SymbolTable(model, pages, warnings, resolveAlias);
 	const options: RenderOptions = { symbols, config, externals: model.externals, dependencies };
 
-	// Build one access tree shared by page trails, the API index, and the sidebar.
-	const tree = buildAccessTree(pages);
-	const trails = apiTrails(tree);
+	// Build one access tree shared by page trails, the API index, the sidebar, and `llms.txt`.
+	const accessTree = buildAccessTree(pages);
+	const trails = apiTrails(accessTree);
 
 	const rendered = new Map<string, string>();
 	for (const page of pages) {
@@ -1360,9 +1370,10 @@ export function emitDocs(
 		// Omit the API index when the project produced no module pages.
 		apiIndex:
 			pages.length > 0
-				? renderApiIndex(tree, (markdown) => linkifyProse(markdown, options))
+				? renderApiIndex(accessTree, (markdown) => linkifyProse(markdown, options))
 				: undefined,
-		sidebar: apiSidebar(tree),
+		sidebar: apiSidebar(accessTree),
+		accessTree,
 		pageModels: pages,
 		warnings,
 	};
@@ -1375,4 +1386,129 @@ export function emitDocsFromJson(
 	dependencies?: DependencyLinks,
 ): EmitResult {
 	return emitDocs(parseDocModel(jsonText), config, dependencies);
+}
+
+/*
+ * ------------------------------------------------------------- project render
+ */
+
+/** Prints warnings and returns the count for `--strict` checks. */
+export function printWarnings(warnings: string[]): number {
+	for (const warning of warnings) {
+		console.warn(pc.yellow(warning));
+	}
+	return warnings.length;
+}
+
+function reportDiagnostics(
+	model: DocModel,
+	warnings: string[],
+): { errors: number; warnings: number } {
+	let errors = 0;
+	let warningCount = 0;
+	for (const diagnostic of model.diagnostics) {
+		const location = diagnostic.file
+			? `${diagnostic.file}${diagnostic.line ? `:${diagnostic.line}` : ""}`
+			: "<project>";
+		const line = `${location}: ${diagnostic.severity}[${diagnostic.code}]: ${diagnostic.message}`;
+		if (diagnostic.severity === "error") {
+			errors += 1;
+			console.error(pc.red(line));
+		} else if (diagnostic.severity === "warning") {
+			warningCount += 1;
+			console.warn(pc.yellow(line));
+		} else {
+			console.log(pc.dim(line));
+		}
+	}
+	for (const warning of warnings) {
+		warningCount += 1;
+		console.warn(pc.yellow(`renderer: ${warning}`));
+	}
+	return { errors, warnings: warningCount };
+}
+
+/**
+ * Applies `[source] include` and `exclude` globs to an extracted model in place.
+ * Checks `include !== undefined` rather than `include.length > 0` so an explicit
+ * `include = []` matches nothing. Sets `dot: true` so globs can match paths
+ * under dot-directories, and normalizes paths with `toPosix` for Windows.
+ */
+export function filterModel(
+	model: DocModel,
+	include: string[] | undefined,
+	exclude: string[] | undefined,
+): DocModel {
+	if (include === undefined && !exclude?.length) {
+		return model;
+	}
+	const match = picomatch(include ?? ["**"], { ignore: exclude ?? [], dot: true });
+	model.modules = model.modules.filter((module) => match(toPosix(module.id)));
+	// Drop diagnostics located in filtered-out files (excluding a broken
+	// generated module is the documented way to keep a build green), while
+	// keeping project-level diagnostics (`file === undefined`).
+	model.diagnostics = model.diagnostics.filter(
+		(diagnostic) => diagnostic.file === undefined || match(toPosix(diagnostic.file)),
+	);
+	return model;
+}
+
+async function extractModel(context: BuildContext): Promise<DocModel> {
+	const { config, root } = context;
+	// `[source] entries = []` means a guide-only project with no Luau modules,
+	// so skip spawning the extractor and return an empty model.
+	if (config.source.entries.length === 0) {
+		return { schemaVersion: 1, project: { entryPoints: [] }, modules: [], diagnostics: [] };
+	}
+	const model = await runExtractor({
+		root,
+		entries: config.source.entries,
+		projectFile: config.source.projectFile,
+		aliases: config.source.aliases,
+		reportUndocumented: config.api.reportUndocumented,
+	});
+	return filterModel(model, config.source.include, config.source.exclude);
+}
+
+/**
+ * Cached extract-and-render output. Paired as a single value because rendering
+ * is a pure function of the model and config, so reusing a cached model in
+ * `dev` also reuses its rendered pages.
+ */
+export interface RenderedModel {
+	model: DocModel;
+	result: EmitResult;
+}
+
+async function renderModel(
+	context: BuildContext,
+	skipDependencies = false,
+): Promise<RenderedModel> {
+	const model = await extractModel(context);
+	// Guide-only projects and `luaudocs llms` have no external signature links to resolve.
+	const dependencies =
+		!skipDependencies && model.modules.length > 0
+			? await loadDependencies(context.config, context.root)
+			: { loaded: [], warnings: [] };
+	const result = emitDocs(model, context.config, buildDependencyLinks(dependencies.loaded));
+	result.warnings.unshift(...dependencies.warnings);
+	return { model, result };
+}
+
+export interface RenderedProject extends RenderedModel {
+	counts: { errors: number; warnings: number };
+}
+
+/**
+ * Extracts, renders, and reports diagnostics without writing to disk. Shared by
+ * `runBuild` and `luaudocs llms`. When `rendered` is passed (`dev`'s model
+ * cache), re-reports its diagnostics without re-extracting.
+ */
+export async function renderProject(
+	context: BuildContext,
+	rendered?: RenderedModel,
+	options?: { skipDependencies?: boolean },
+): Promise<RenderedProject> {
+	const { model, result } = rendered ?? (await renderModel(context, options?.skipDependencies));
+	return { model, result, counts: reportDiagnostics(model, result.warnings) };
 }
