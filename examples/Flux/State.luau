@@ -13,7 +13,7 @@ export type State<T> = typeof(setmetatable(
 
 --[[ Creates a state holding `initial`. ]]
 function State.new<T>(initial: T?): State<T>
-	return setmetatable({ value = initial, listeners = {} }, State) :: any
+	return setmetatable({ value = initial, listeners = {} }, State)
 end
 
 --[[ Reports whether `value` is a state. ]]

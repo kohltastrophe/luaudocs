@@ -1,30 +1,30 @@
---- Doc-model assembly: combines the module graph, evaluated surfaces, doc
+--- Doc-model assembly. Combines the module graph, evaluated surfaces, doc
 --- blocks, and tags into the doc model in two passes (`./build` per module,
 --- then `./finalize` across the whole model).
 ---
---- Schema v1 (the contract with the TypeScript renderer; versioned so a
+--- Schema v1 (the contract with the TypeScript renderer, versioned so a
 --- persisted `doc-model.json` from an older schema fails cleanly on the version
 --- check rather than on a missing field):
 ---   { schemaVersion: 1, project: {entryPoints}, modules: [Module],
 ---     externals?: {[name]: url | ExternalRef}, diagnostics: [Diagnostic] }
 ---   externals maps external names that the renderer links by text (omitted when
----     empty): an `@external` declaration maps to its URL string, while a
+---     empty). An `@external` declaration maps to its URL string, while a
 ---     runtime alias (`--alias`), such as a require spelling (`@lute/fs`) or a
 ---     type reached through one (`fs.File`), maps to an `ExternalRef`
 ---     `{ url?, alias, path, name? }`.
 ---   Module { id, name, instancePath: [string], doc?,
 ---            aliasOf?, classes: [Class], members: [Fn | Prop], types: [TypeDecl],
 ---            reexports: [Reexport], source }
----     `aliasOf` marks a passthrough module (`return require(X)`): it names `X`,
----     and this module gets no page of its own (callers link to `X`'s page).
----     A module carries top-level `members` just like a class; each member's
+---     `aliasOf` marks a passthrough module (`return require(X)`), naming `X`
+---     so this module gets no page of its own and callers link to `X`'s page.
+---     A module carries top-level `members` just like a class. Each member's
 ---     `kind` (`"prop" | "function" | "method" | "metamethod"`) selects its
 ---     section heading.
 ---   Class  { id, name, doc?, tags, constructors: [fnId], members: [Fn | Prop],
 ---            within?, source }
 ---   Fn     { id, name, kind, doc?, tags, visibility,
 ---            signature: {callee, segs, params, returns}, errors, source }
----     `callee` is how the function is called (`Flux.compute`, `State:Connect`);
+---     `callee` is how the function is called (`Flux.compute`, `State:Connect`), and
 ---     `segs` holds everything after the callee (`<T>(x: T): T`). Concatenating
 ---     the two reproduces the full signature.
 ---   Prop   { id, name, kind: "prop", type?, doc?, tags, visibility, readonly, source }
@@ -32,8 +32,8 @@
 ---              realm?, doc? }
 ---     Represents a field on a module's surface that came from another module.
 ---     `targetModule` is the final module after resolving require chains and
----     aliases; `targetMember` names a member inside that module (omitted for a
----     whole-module mount); and `targetId` is that definition's doc-model ID
+---     aliases, `targetMember` names a member inside that module (omitted for a
+---     whole-module mount), and `targetId` is that definition's doc-model ID
 ---     (omitted when the target is undocumented).
 ---     For a runtime alias (`--alias`), `targetModule` is the require string
 ---     (`@lute/fs`), `targetId` is omitted, and `url` is the alias's docs URL.
@@ -56,12 +56,12 @@
 ---     names a field not present in `definition`). `docInDisplay` is `true` when
 ---     that line in `definition` already contains a source comment, preventing
 ---     the renderer from splicing the field doc a second time.
----   Seg (every type position): a plain string or `{ text, id? }`. Joining the
+---   Seg (every type position) is a plain string or `{ text, id? }`. Joining the
 ---     text of every segment reproduces the type display verbatim. `definition`
----     is an array of lines of `Seg` (no segment contains a newline) so field
----     comments can be spliced by line index. `id` names a project declaration
----     (`TypeDecl`, `Class`, or `Module`); a reference segment without `id`
----     names an external or engine type that the renderer links by text.
+---     is an array of lines of `Seg` (no segment contains a newline) so the
+---     renderer can splice field comments by line index. `id` names a project
+---     declaration (`TypeDecl`, `Class`, or `Module`). A reference segment
+---     without `id` names an external or engine type that the renderer links by text.
 ---   Generic { name, isPack, default?: [Seg] }.
 ---   Fn's `signature.params`: `[{ name, type?: [Seg], doc? }]`,
 ---     `signature.returns`: `[{ type?: [Seg], doc? }]`, and

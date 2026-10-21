@@ -202,6 +202,22 @@ return function()
 		"typeof(require(...)) synthesized from table type annotation"
 	)
 
+	res = eval(table.concat({
+		"local Proto = { shared = 1 }",
+		"local MT = {}",
+		"MT.__index = Proto",
+		"local M = { own = 2 }",
+		"setmetatable(M :: any, MT)",
+		"table.freeze(M :: any)",
+		"return M",
+	}, "\n"))
+	root = res.result :: any
+	t.eq(
+		{ fieldNames(root), root.frozen },
+		{ { "own", "shared" }, true },
+		"cast setmetatable/freeze and MT.__index = Proto"
+	)
+
 	t.suite("surface: sample-project modules")
 
 	local SAMPLE = util.joinPath(t.projectFixtures, "sample-project", "src")
@@ -211,6 +227,7 @@ return function()
 
 	res = evalFile("init.luau")
 	root = res.result :: any
+	t.check(root.kind == "table", "Sample init.luau returns table")
 	local names = fieldNames(root)
 	t.eq({
 		table.find(names, "Clean"),

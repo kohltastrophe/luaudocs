@@ -1,13 +1,13 @@
---- Type displays as segment arrays: plain text interleaved with reference
---- segments cut from the source slice at the CST's `reference` node positions.
---- The joined segment texts form the display directly, so nothing downstream
---- tracks character offsets: inserting a doc-comment line is a plain array splice.
+--- Represents type displays as segment arrays of plain text interleaved with
+--- reference segments cut at CST `reference` node positions. Joined segment
+--- texts form the display directly, so nothing downstream tracks character
+--- offsets and inserting a doc-comment line is a plain array splice.
 ---
 --- Display transforms apply only to plain string pieces after `canonical` merges
---- adjacent runs across line breaks. That produces the same result as transforming
---- the joined string because a reference segment never contains whitespace or comments.
+--- adjacent runs across line breaks. Reference segments never contain whitespace
+--- or comments.
 ---
---- Generic parameters in scope are demoted to plain text here so type resolution
+--- Demotes generic parameters in scope to plain text here so type resolution
 --- does not need to thread generic scopes.
 
 local parseMod = require("./parse")
@@ -18,8 +18,8 @@ type Parsed = parseMod.Parsed
 type Span = parseMod.Span
 
 --- Either a plain string or a reference candidate. `__name` and `__prefix` are
---- the resolution keys (`finalize` rewrites reference segments to `{ text, id? }`);
---- `__tag` marks tag-authored references, which receive extra resolution fallbacks;
+--- the resolution keys (`finalize` rewrites reference segments to `{ text, id? }`).
+--- `__tag` marks tag-authored references, which receive extra resolution fallbacks.
 --- `__scope` overrides the module a reference resolves in for inferred return
 --- types written in the callee's file rather than the referencing member's file.
 export type Seg = string | { text: string, __name: string, __prefix: string?, __tag: boolean?, __scope: string? }
@@ -51,15 +51,6 @@ function segs.text(list: { Seg }, from: number?): string
 		table.insert(parts, if type(seg) == "string" then seg else seg.text)
 	end
 	return table.concat(parts)
-end
-
---- Flattens a multi-line segment block to a newline-joined string (used by test specs).
-function segs.blockText(lines: { { Seg } }): string
-	local parts = {}
-	for _, line in lines do
-		table.insert(parts, segs.text(line))
-	end
-	return table.concat(parts, "\n")
 end
 
 --- A reference's location starts at its prefix, and its spelled text is
@@ -133,27 +124,35 @@ end
 --- Long-bracket strings are intentionally not recognized here because table
 --- indexers (`{ [string]: T }`) also start with `[` and must not be mistaken for strings.
 local function stripComments(text: string): string
+	if text:find("--", 1, true) == nil then
+		return text
+	end
 	local kept = {}
+	local runStart = 1
 	local i = 1
 	local n = #text
 	while i <= n do
 		local c = text:sub(i, i)
 		if c == '"' or c == "'" then
-			local j = util.closingQuote(text, i)
-			table.insert(kept, text:sub(i, j))
-			i = j + 1
+			i = util.closingQuote(text, i) + 1
 		elseif c == "-" and text:sub(i + 1, i + 1) == "-" then
+			if i > runStart then
+				table.insert(kept, text:sub(runStart, i - 1))
+			end
 			i = util.commentEnd(text, i)
+			runStart = i
 		else
-			table.insert(kept, c)
 			i += 1
 		end
+	end
+	if runStart <= n then
+		table.insert(kept, text:sub(runStart, n))
 	end
 	return table.concat(kept)
 end
 
---- Merges adjacent non-empty string segments so reference segments are separated
---- by at most one string segment. Reference tables are preserved by identity so
+--- Merges adjacent non-empty string segments so at most one string segment
+--- separates reference segments. Preserves reference tables by identity so
 --- resolution updates the same table instances shared between signatures and parameter/return entries.
 function segs.canonical(list: { Seg }): { Seg }
 	local out: { Seg } = {}
@@ -227,7 +226,7 @@ function segs.block(
 		return nil, {}
 	end
 	local lines = cutLines(parsed, typeNode, generics)
-	-- Line 1 starts mid-line (after `= `), so only lines 2..N are dedented, and
+	-- Line 1 starts mid-line (after `= `), so dedent only lines 2..N, and
 	-- never by more than the declaration line's own indentation. That strips
 	-- outer block indentation while preserving the one-level continuation indent
 	-- of a multi-line union or table type.
@@ -270,13 +269,13 @@ function segs.block(
 end
 
 --- Builds a segment list for a type string written in a doc tag (`@param x Foo.Bar`).
---- Since no source CST node exists for tag types, the string is parsed as the
+--- Since no source CST node exists for tag types, parses the string as the
 --- right-hand side of `type _ = <display>`. Tag types are prose and may use
 --- non-Luau shorthands (`number[]`, bare `...`), so parse failures fall back to
 --- a lexical scan that turns identifiers (except `key:` field names) into
 --- candidate references.
 ---
---- Results are memoized because each cache miss runs the Luau parser; `fromTag`
+--- Memoizes results because each cache miss runs the Luau parser; `fromTag`
 --- returns fresh clones so per-module resolution can mutate reference segments safely.
 local tagCache: { [string]: { Seg } } = {}
 
@@ -452,15 +451,17 @@ function segs.generics(
 ): ({ { name: string, isPack: boolean, default: { Seg }? } }, { [string]: boolean })
 	local names: { [string]: boolean } = {}
 	local nodes: { { node: any, isPack: boolean } } = {}
-	for _, list in { { genericsList, false }, { packsList, true } } do
-		for _, pair in (list[1] :: any) or {} do
+	local function addList(list: { { node: any } }?, isPack: boolean)
+		for _, pair in list or {} do
 			local node = pair.node
 			if node ~= nil and node.name ~= nil then
 				names[node.name.text] = true
-				table.insert(nodes, { node = node, isPack = list[2] :: any })
+				table.insert(nodes, { node = node, isPack = isPack })
 			end
 		end
 	end
+	addList(genericsList, false)
+	addList(packsList, true)
 	local out = {}
 	for _, entry in nodes do
 		table.insert(out, {

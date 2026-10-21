@@ -28,12 +28,12 @@ export type Parsed = {
 
 local parse = {}
 
---- `visit` returns false to stop descending into the node it was handed.
---- Lute's CST shares nodes, so `seen` keeps the walk from looping;
---- `location` is skipped because it is a 4-number span table no caller needs to visit.
+--- Walks CST nodes rooted at `root`. `visit` returns `false` to skip descending
+--- into a node. `seen` prevents cycles on shared CST nodes, and `location`
+--- span tables are skipped.
 function parse.walkNodes(root: any, visit: (node: any) -> boolean?)
 	local seen = {}
-	local function walk(node: any)
+	local function walkCst(node: any)
 		if type(node) ~= "table" or seen[node] then
 			return
 		end
@@ -43,11 +43,11 @@ function parse.walkNodes(root: any, visit: (node: any) -> boolean?)
 		end
 		for key, v in node do
 			if key ~= "location" and type(v) == "table" then
-				walk(v)
+				walkCst(v)
 			end
 		end
 	end
-	walk(root)
+	walkCst(root)
 end
 
 --- Lute spells a table-type entry's discriminator as `tag` on some nodes and `kind`
@@ -57,7 +57,7 @@ function parse.isTypeProperty(entry: any): boolean
 end
 
 --- Steps past parentheses and explicit type instantiations (`f<<T>>`) to the
---- wrapped expression; `includeCast` also steps through `:: T` assertions.
+--- wrapped expression. When `includeCast` is true, also steps through `:: T` assertions.
 function parse.unwrapExpr(node: any, includeCast: boolean?): any
 	while node ~= nil do
 		if node.tag == "group" then
@@ -95,7 +95,7 @@ function parse.unwrapType(node: any): any
 end
 
 --- Lute sets an explicit typepack default's `.location` to its opening `(`
---- alone; `closeParens` holds the real end of the span.
+--- alone, while `closeParens` holds the real end of the span.
 function parse.typeSpan(typeNode: any): Span?
 	if typeNode == nil or typeNode.location == nil then
 		return nil
@@ -177,7 +177,7 @@ local function describeParseError(raw: string): (string, number?)
 	return table.concat(lines, "\n"), first
 end
 
---- Returns `(Parsed, nil)` or `(nil, errorMessage, line?)`; never both.
+--- Parses `source` and returns `(Parsed, nil)` or `(nil, errorMessage, line?)`.
 function parse.parse(source: string): (Parsed?, string?, number?)
 	local ok, result = pcall(parser.parse, source)
 	if not ok then

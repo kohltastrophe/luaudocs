@@ -1,7 +1,6 @@
---- Shared helpers for the extractor: the diagnostic collector every stage
---- reports through (Lute has no stderr write API, so diagnostics travel inside
---- the doc-model JSON), path helpers (`relPath` normalizes separators to `/`
---- across platforms to match the renderer's `toPosix`), and string/line utilities.
+--- Shared helpers for the extractor, including the diagnostic collector,
+--- cross-platform path helpers (`relPath` normalizes separators to `/`), and
+--- string/line utilities.
 
 local fs = require("@std/fs")
 local pathlib = require("@std/path")
@@ -25,8 +24,7 @@ export type Collector = {
 	info: (self: Collector, code: string, message: string, file: string?, line: number?) -> (),
 }
 
---- Diagnostics are emitted into the doc-model JSON; on unexpected or malformed
---- constructs, the extractor records a diagnostic and degrades gracefully.
+--- Creates a diagnostic collector that records diagnostics for the doc-model JSON.
 function util.diagnostics(): Collector
 	local collector = { list = {} } :: Collector
 	function collector.add(self, severity, code, message, file, line)
@@ -61,8 +59,7 @@ function util.normPath(p: string): string
 	return tostring(pathlib.normalize(p))
 end
 
---- Always `/`-separated: results become module IDs in the doc-model JSON and
---- source-link URLs rather than OS filesystem paths.
+--- Returns a `/`-separated relative path for module IDs and source-link URLs.
 function util.relPath(from: string, to: string): string
 	return (tostring(pathlib.relative(from, to)):gsub("\\", "/"))
 end
@@ -94,7 +91,7 @@ function util.stem(p: string): string
 	return stripped
 end
 
---- `fs.type` throws when `p` does not exist; wrapping it in `pcall` returns `nil` for missing paths.
+--- Returns the filesystem entry kind for `p`, or `nil` when `p` does not exist.
 function util.pathType(p: string): string?
 	local ok, kind = pcall(fs.type, p)
 	return if ok then kind else nil
@@ -155,21 +152,22 @@ end
 function util.commonIndent(lines: { string }): string?
 	local prefix: string? = nil
 	for _, line in lines do
-		if util.trim(line) ~= "" then
-			local indent = line:match("^[ \t]*") :: string
-			if prefix == nil then
-				prefix = indent
-			else
-				local limit = math.min(#prefix, #indent)
-				local shared = 0
-				while shared < limit and prefix:sub(shared + 1, shared + 1) == indent:sub(shared + 1, shared + 1) do
-					shared += 1
-				end
-				prefix = prefix:sub(1, shared)
+		if util.trim(line) == "" then
+			continue
+		end
+		local indent = line:match("^[ \t]*") :: string
+		if prefix == nil then
+			prefix = indent
+		else
+			local limit = math.min(#prefix, #indent)
+			local shared = 0
+			while shared < limit and prefix:sub(shared + 1, shared + 1) == indent:sub(shared + 1, shared + 1) do
+				shared += 1
 			end
-			if prefix == "" then
-				break
-			end
+			prefix = prefix:sub(1, shared)
+		end
+		if prefix == "" then
+			break
 		end
 	end
 	return prefix
@@ -195,7 +193,8 @@ function util.joinDesc(lines: { string }): string
 	return table.concat(util.trimEmptyLines(lines), "\n")
 end
 
---- Clamped to the last index when the string literal opening at `i` never closes.
+--- Returns the index of the closing quote for the string literal opening at `i`,
+--- clamped to `#text` when unclosed.
 function util.closingQuote(text: string, i: number): number
 	local quote = text:sub(i, i)
 	local n = #text

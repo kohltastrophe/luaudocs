@@ -13,6 +13,7 @@ return function()
 	local root = util.joinPath(t.fixtures, "diags")
 	local g, diag = t.buildGraph(root, "main.luau")
 	model.assemble(g, diag, { entryPoints = { "main.luau" } })
+	t.check(#diag.list > 0, "diags fixture emits diagnostics")
 
 	-- messages are not pinned (one carries an absolute path); the identity of
 	-- a diagnostic is its code, severity, and location

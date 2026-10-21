@@ -9,10 +9,10 @@
 --- external rather than unresolved, and the optional URL points to where its
 --- modules are documented.
 ---
---- Emits doc-model JSON to stdout; the schema lives in ./model. Diagnostics are
---- embedded in the JSON, and all error gating lives in the TS CLI
---- (`luaudocs build [--strict]`), which reads them.
---- Exit codes: 0 ok · 2 usage/config error.
+--- Emits doc-model JSON to stdout (schema in `./model`). Diagnostics travel
+--- inside the JSON, and all error gating lives in the TypeScript CLI
+--- (`luaudocs build [--strict]`).
+--- Exit codes: 0 ok, 2 usage/config error.
 
 local process = require("@std/process")
 local fs = require("@std/fs")
@@ -78,7 +78,7 @@ if root == nil then
 	fail("--root is required")
 end
 if #entries == 0 then
-	-- The caller always passes at least one `--entry`; an empty `[source] entries`
+	-- The caller always passes at least one `--entry`. An empty `[source] entries`
 	-- config means a guide-only site, which never spawns the extractor.
 	fail("--entry is required")
 end

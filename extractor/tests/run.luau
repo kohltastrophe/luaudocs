@@ -27,4 +27,8 @@ for _, spec in specs do
 end
 
 local ok = harness.report()
-process.exit(if ok then 0 else 1)
+if not ok then
+	process.exit(1)
+end
+assert(ok)
+process.exit(0)

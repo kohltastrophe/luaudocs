@@ -1,4 +1,4 @@
---- Pass 1 (per module in graph order): builds the `Module` entry, its root
+--- Pass 1 (per module in graph order). Builds the `Module` entry, its root
 --- container and members, type declarations (`@field` merging, `@interface`
 --- enrichment, and the `classType` idiom), orphan classes, floating placing
 --- blocks (Moonwave manual mode), and `@external` declarations. Also registers
@@ -21,33 +21,35 @@ local build = {}
 --- Scans every doc block in the module for `@external` declarations (including
 --- blocks attached to classes or the module itself).
 local function collectExternals(ctx: Ctx, mod: ModuleData)
-	for _, block in (mod.blocks or {}) :: any do
-		if block.doc then
-			local doc = members.parseTags(ctx, block)
-			for _, ext in doc.externals do
-				local existing = ctx.externals[ext.name]
-				if existing ~= nil and existing ~= ext.url then
-					ctx.diag:warn(
-						"duplicate-external",
-						string.format(
-							"@external %s: already mapped to %s; this one is ignored",
-							ext.name,
-							tostring(existing)
-						),
-						mod.id,
-						block.contentLine + ext.lineOffset - 1
-					)
-				elseif existing == nil then
-					ctx.externals[ext.name] = ext.url
-				end
+	local blocks = mod.blocks or {}
+	for _, block in blocks do
+		if not block.doc then
+			continue
+		end
+		local doc = members.parseTags(ctx, block)
+		for _, ext in doc.externals do
+			local existing = ctx.externals[ext.name]
+			if existing ~= nil and existing ~= ext.url then
+				ctx.diag:warn(
+					"duplicate-external",
+					string.format(
+						"@external %s: already mapped to %s; this one is ignored",
+						ext.name,
+						tostring(existing)
+					),
+					mod.id,
+					block.contentLine + ext.lineOffset - 1
+				)
+			elseif existing == nil then
+				ctx.externals[ext.name] = ext.url
 			end
 		end
 	end
 end
 
 --- Builds a synthetic `TypeDecl` for a floating `@interface` or `@type` block
---- that has no backing Luau `type` declaration. For `@interface`, `definition`
---- is omitted so the renderer synthesizes a table type from `fields`.
+--- that has no backing Luau `type` declaration. Omits `definition` for
+--- `@interface` so the renderer synthesizes a table type from `fields`.
 local function interfaceDecl(ctx: Ctx, mod: ModuleData, doc: ParsedDoc, sourceSpan: any): any
 	local placing = doc.placing :: tagsMod.Placing
 	local name = placing.name
@@ -132,9 +134,103 @@ local function buildFloatingMember(
 	})
 end
 
+--- Merges `@field` tags into table-type fields. Tag types and descriptions
+--- override AST ones, and `@field` entries absent from the AST walk append to
+--- the end (matching `lineFacts` when the field exists in the display).
+local function mergeTypeFieldTags(
+	fields: { any }?,
+	tyDoc: ParsedDoc,
+	lineFacts: { [string]: any },
+	genericNames: { [string]: boolean }
+): { any }?
+	if #tyDoc.fields == 0 then
+		return fields
+	end
+	local merged: { any } = fields or {}
+	for _, f in tyDoc.fields do
+		local existing = members.byName(merged, f.name)
+		if existing ~= nil then
+			existing.desc = f.desc or existing.desc
+			if f.type ~= nil then
+				existing.type = members.tagType(f.type, genericNames)
+			end
+		else
+			local at = lineFacts[f.name]
+			table.insert(merged, {
+				name = f.name,
+				type = members.tagType(f.type, genericNames),
+				desc = f.desc,
+				line = if at ~= nil then at.line else nil,
+				docInDisplay = if at ~= nil and at.docInDisplay then true else nil,
+			})
+		end
+	end
+	return merged
+end
+
+local function buildSingleTypeDecl(ctx: Ctx, mod: ModuleData, ty: any, tyDoc: ParsedDoc, parsedFile: any): any
+	local claimIndex: any = mod.claimIndex
+	local trailingIndex: any = mod.trailingIndex
+	local generics, genericNames = segs.generics(parsedFile, ty.stat.generics, ty.stat.genericPacks)
+	local typeName = if tyDoc.placing ~= nil
+			and (tyDoc.placing.kind == "type" or tyDoc.placing.kind == "interface")
+		then tyDoc.placing.name
+		else ty.name
+	local rawFields, lineFacts, displayBlock = segs.fields(
+		parsedFile,
+		ty.stat.type,
+		claimIndex,
+		trailingIndex,
+		genericNames,
+		if ty.stat.location ~= nil then ty.stat.location.beginLine else nil
+	)
+	local isTypeofAlias = ty.stat.type ~= nil and ty.stat.type.tag == "typeof"
+	local fields = mergeTypeFieldTags(rawFields, tyDoc, lineFacts, genericNames)
+
+	-- For a `type function`, extract its parameter list for the signature
+	-- fence instead of slicing `stat.type` (which is the `type` keyword token).
+	local typefnParams: any = nil
+	if ty.kind == "typefunction" and ty.stat.body ~= nil then
+		local parts: { any } = {}
+		segs.pushParamList(parts, (segs.paramEntries(parsedFile, ty.stat.body, genericNames)))
+		typefnParams = parts
+	end
+	local definition: any = nil
+	if ty.kind ~= "typefunction" then
+		definition = displayBlock or { { "unknown" } }
+		-- When an `@interface` with `@field` tags is bound to a `typeof(...)`
+		-- alias, clear `definition` so the renderer synthesizes a table type
+		-- from `fields` instead of printing `typeof(...)`.
+		if isTypeofAlias and #tyDoc.fields > 0 and tyDoc.placing ~= nil and tyDoc.placing.kind == "interface" then
+			definition = nil
+		end
+	end
+	return {
+		-- Mint the ID from the AST name (`ty.name`) so type references
+		-- resolve even when a `@type` / `@interface` tag renames the display.
+		id = members.memberId(mod.id, "type", nil, ty.name),
+		name = typeName,
+		exported = ty.exported,
+		kind = if ty.kind ~= "typefunction"
+				and tyDoc.placing ~= nil
+				and tyDoc.placing.kind == "interface"
+			then "interface"
+			else ty.kind,
+		generics = generics,
+		definition = definition,
+		params = typefnParams,
+		fields = members.toModelFields(fields),
+		doc = members.placingDoc(tyDoc),
+		tags = members.buildBadges(tyDoc),
+		visibility = members.visibilityOf(typeName, tyDoc, ty.exported),
+		source = members.span(mod.id, ty.stat.location),
+		__within = tyDoc.within,
+	}
+end
+
 --- Builds `TypeDecl` entries for the module. `rootInterfaceDoc` is an
 --- `@interface` or `@type` block that was attached to the module's `return`
---- statement; it enriches the matching type declaration or becomes a synthetic
+--- statement. It enriches the matching type declaration or becomes a synthetic
 --- declaration if no AST type matches.
 local function buildTypeDecls(
 	ctx: Ctx,
@@ -143,8 +239,8 @@ local function buildTypeDecls(
 	fullProcessing: boolean,
 	rootInterfaceDoc: ParsedDoc?
 )
-	local surface = mod.surface :: any
-	local parsedFile = mod.parsed :: any
+	local surface: any = mod.surface
+	local parsedFile: any = mod.parsed
 
 	-- Track which type names actually emit a `TypeDecl` so skipped declarations
 	-- can be pruned from `ctx.typesByModule` after the loop.
@@ -167,93 +263,19 @@ local function buildTypeDecls(
 		if not fullProcessing and tyDoc.within == nil and tyDoc.placing == nil then
 			continue
 		end
-		local generics, genericNames = segs.generics(parsedFile, ty.stat.generics, ty.stat.genericPacks)
 		local typeName = if tyDoc.placing ~= nil
 				and (tyDoc.placing.kind == "type" or tyDoc.placing.kind == "interface")
 			then tyDoc.placing.name
 			else ty.name
-		local enrich = if rootInterfaceDoc ~= nil and (rootInterfaceDoc.placing :: any).name == typeName
-			then rootInterfaceDoc
-			else nil
+		local rootPlacing = if rootInterfaceDoc ~= nil then rootInterfaceDoc.placing else nil
+		local enrich = if rootPlacing ~= nil and rootPlacing.name == typeName then rootInterfaceDoc else nil
 		if enrich ~= nil then
 			rootInterfaceDoc = nil
 			if tyDoc == members.EMPTY_DOC or (#tyDoc.fields == 0 and #enrich.fields > 0) then
 				tyDoc = enrich
 			end
 		end
-		local fields, lineFacts, displayBlock = segs.fields(
-			parsedFile,
-			ty.stat.type,
-			mod.claimIndex :: any,
-			mod.trailingIndex :: any,
-			genericNames,
-			if ty.stat.location ~= nil then ty.stat.location.beginLine else nil
-		)
-		local isTypeofAlias = ty.stat.type ~= nil and ty.stat.type.tag == "typeof"
-		-- Merge `@field` tags into table-type fields: tag types/descriptions
-		-- override AST ones, and `@field` entries not found in the AST walk are
-		-- appended (matching `lineFacts` when the field exists in the display).
-		if #tyDoc.fields > 0 then
-			local merged: { any } = (fields :: any) or {}
-			for _, f in tyDoc.fields do
-				local existing = members.byName(merged, f.name)
-				if existing ~= nil then
-					existing.desc = f.desc or existing.desc
-					if f.type ~= nil then
-						existing.type = members.tagType(f.type, genericNames)
-					end
-				else
-					local at = lineFacts[f.name]
-					table.insert(merged, {
-						name = f.name,
-						type = members.tagType(f.type, genericNames),
-						desc = f.desc,
-						line = if at ~= nil then at.line else nil,
-						docInDisplay = if at ~= nil and at.docInDisplay then true else nil,
-					})
-				end
-			end
-			fields = merged
-		end
-		-- For a `type function`, extract its parameter list for the signature
-		-- fence instead of slicing `stat.type` (which is the `type` keyword token).
-		local typefnParams: any = nil
-		if ty.kind == "typefunction" and ty.stat.body ~= nil then
-			local parts: { any } = {}
-			segs.pushParamList(parts, (segs.paramEntries(parsedFile, ty.stat.body, genericNames)))
-			typefnParams = parts
-		end
-		local definition: any = nil
-		if ty.kind ~= "typefunction" then
-			definition = displayBlock or { { "unknown" } }
-			-- When an `@interface` with `@field` tags is bound to a `typeof(...)`
-			-- alias, clear `definition` so the renderer synthesizes a table type
-			-- from `fields` instead of printing `typeof(...)`.
-			if isTypeofAlias and #tyDoc.fields > 0 and tyDoc.placing ~= nil and tyDoc.placing.kind == "interface" then
-				definition = nil
-			end
-		end
-		local decl = {
-			-- Mint the ID from the AST name (`ty.name`) so type references
-			-- resolve even when a `@type` / `@interface` tag renames the display.
-			id = members.memberId(mod.id, "type", nil, ty.name),
-			name = typeName,
-			exported = ty.exported,
-			kind = if ty.kind ~= "typefunction"
-					and tyDoc.placing ~= nil
-					and tyDoc.placing.kind == "interface"
-				then "interface"
-				else ty.kind,
-			generics = generics,
-			definition = definition,
-			params = typefnParams,
-			fields = members.toModelFields(fields),
-			doc = members.placingDoc(tyDoc),
-			tags = members.buildBadges(tyDoc),
-			visibility = members.visibilityOf(typeName, tyDoc, ty.exported),
-			source = members.span(mod.id, ty.stat.location),
-			__within = tyDoc.within,
-		}
+		local decl = buildSingleTypeDecl(ctx, mod, ty, tyDoc, parsedFile)
 		table.insert(entry.types, decl)
 		emitted[ty.name] = true
 
@@ -285,13 +307,264 @@ local function buildTypeDecls(
 	end
 end
 
+--- Harvests documented metamethod functions from `setmetatable(root, MT)`.
+local function harvestMetamethods(ctx: Ctx, mod: ModuleData, sym: any, containerName: string, sink: any)
+	local mt = sym.metatable
+	-- Skip self-metatables (`setmetatable(M, M)`), whose fields were already
+	-- walked on `M`.
+	if mt ~= nil and mt.kind == "table" and members.symKey(mt) ~= members.symKey(sym) then
+		local mtView = { kind = "table", span = mt.span, fields = {} }
+		for _, f in mt.fields do
+			if surfaceMod.isMetamethod(f.name) and f.value.kind == "function" then
+				table.insert(mtView.fields, f)
+			end
+		end
+		if #mtView.fields > 0 then
+			-- Pass `sym` as `ownerSym` because `self` inside a metamethod
+			-- refers to the table the metatable is attached to.
+			members.buildMembers(ctx, mod, containerName, mtView, sink, sym)
+		end
+	end
+end
+
+--- Declares a class on `entry.classes`, warning and dropping same-module
+--- duplicates that would mint the exact same `<mod>#class.<name>` ID.
+local function declareClass(ctx: Ctx, mod: ModuleData, entry: any, name: string, doc: ParsedDoc, span: any): any?
+	if members.byName(entry.classes, name) ~= nil then
+		ctx.diag:warn(
+			"duplicate-class",
+			string.format("@class %s is already declared in this module; ignoring the duplicate", name),
+			mod.id,
+			if span ~= nil then span.beginLine else nil
+		)
+		return nil
+	end
+	local class = members.newContainer(ctx, mod, name, doc, span, nil)
+	table.insert(entry.classes, class)
+	return class
+end
+
+--- Discovers local class tables that were not returned directly on the module
+--- surface (e.g., `local Signal = {}` when the module returns a constructor
+--- function or a table of constructors):
+---   1. Local tables with an explicit `--- @class` doc block.
+---   2. Implicit classes: self-indexing local tables (`Impl.__index = Impl`)
+---      attached by a constructor (`return setmetatable(_, Impl)`) or by a
+---      metatable type alias (`typeof(setmetatable(_, Impl))` or
+---      `setmetatable<_, typeof(Impl)>`), named after the first matching type
+---      alias or the local variable.
+local function discoverOrphanClasses(ctx: Ctx, mod: ModuleData, entry: any, surface: any, result: any)
+	-- symKey -> naming type alias (string), or `false` for constructor-only attachment
+	local attached: { [any]: any } = {}
+	members.eachMember(entry, function(member, _owner)
+		local sym = member.__constructsSym
+		local key = members.symKey(sym)
+		if key ~= nil and attached[key] == nil then
+			attached[key] = false
+		end
+	end)
+	for _, ty in surface.types do
+		local classLocal = members.setmetatableTypeClassLocal(ty.stat.type)
+		local sym = if classLocal ~= nil then surface.env[classLocal] else nil
+		local key = members.symKey(sym)
+		if key ~= nil and not attached[key] then
+			attached[key] = ty.name
+		end
+	end
+
+	local resultKey = members.symKey(result)
+	local orphanClasses = {}
+	for cstLocal, value in surface.env do
+		local key = members.symKey(value)
+		if value.kind == "table" and key ~= resultKey and ctx.containerOfSym[key] == nil then
+			local doc = if value.defDoc ~= nil then members.parseTags(ctx, value.defDoc) else members.EMPTY_DOC
+			local orphanName = tagsMod.className(doc)
+			local naming = attached[key]
+			if orphanName == nil and naming ~= nil and surfaceMod.isSelfIndexing(value) then
+				orphanName = if naming ~= false then naming else cstLocal.name.text
+			end
+			if orphanName ~= nil and not doc.flags.ignore then
+				table.insert(orphanClasses, { value = value, doc = doc, name = orphanName })
+			end
+		end
+	end
+	-- Sort by source line (and name on ties) before deduplicating `SymValue`
+	-- keys so iteration order over `surface.env` never affects the output.
+	table.sort(orphanClasses, function(a, b)
+		local la = if a.value.span ~= nil then a.value.span.beginLine else 0
+		local lb = if b.value.span ~= nil then b.value.span.beginLine else 0
+		if la ~= lb then
+			return la < lb
+		end
+		return a.name < b.name
+	end)
+	local seenSyms = {}
+	-- Track `SymValue` keys of members owned by an orphan class so top-level
+	-- re-exposures (`return { new = Impl.new }`) can be deduplicated below.
+	local orphanOwned: { [any]: boolean } = {}
+	for _, orphan in orphanClasses do
+		local key = members.symKey(orphan.value)
+		if seenSyms[key] or ctx.containerOfSym[key] ~= nil then
+			continue
+		end
+		seenSyms[key] = true
+		local class = declareClass(ctx, mod, entry, orphan.name, orphan.doc, orphan.value.span)
+		if orphan.value.defDoc ~= nil then
+			members.forwardTagDiagnostics(ctx, mod.id, orphan.value.defDoc, orphan.doc)
+		end
+		if class == nil then
+			continue
+		end
+		ctx.containerOfSym[key] = class
+		if ctx.containersByName[orphan.name] == entry then
+			ctx.containersByName[orphan.name] = class
+		end
+		members.buildMembers(ctx, mod, orphan.name, orphan.value, members.sinks(class, entry))
+		for _, member in class.members do
+			orphanOwned[member.__valueSym] = true
+		end
+	end
+	-- Remove module-level members that merely re-expose a function already
+	-- owned by an orphan class (`return { new = Impl.new }`).
+	for i = #entry.members, 1, -1 do
+		local key = entry.members[i].__valueSym
+		if key ~= nil and orphanOwned[key] then
+			table.remove(entry.members, i)
+		end
+	end
+end
+
+local function processFloatingBlocks(ctx: Ctx, mod: ModuleData, entry: any, rootContainer: any)
+	for _, block in mod.blocks or {} do
+		-- Visit unclaimed doc blocks, as well as blocks claimed by unexported
+		-- local statements whose tag diagnostics were never forwarded (e.g.,
+		-- `--- @function f` above a local helper that never joined the surface).
+		if not block.doc or (block.claimed and ctx.forwardedBlocks[block]) then
+			continue
+		end
+		local doc = members.parseTags(ctx, block)
+		if doc.placing ~= nil then
+			members.forwardTagDiagnostics(ctx, mod.id, block, doc)
+			if not doc.flags.ignore then
+				buildFloatingMember(ctx, mod, entry, block, doc, rootContainer)
+			end
+		elseif not block.claimed and (#doc.params > 0 or doc.within ~= nil) then
+			ctx.diag:info(
+				"orphaned-doc-block",
+				"doc block is not attached to any statement",
+				mod.id,
+				block.span.beginLine
+			)
+		end
+	end
+end
+
+local function buildRootSurface(
+	ctx: Ctx,
+	mod: ModuleData,
+	entry: any,
+	result: any,
+	rootDoc: ParsedDoc,
+	classDoc: ParsedDoc,
+	className: string?,
+	rootIsInterfaceDoc: boolean,
+	floatingClassSpan: any
+): any
+	local rootContainer: any = entry
+
+	if result ~= nil and result.kind == "table" then
+		local rootName = className or mod.name
+		entry.name = rootName
+		local containerDoc = if className == nil and not rootIsInterfaceDoc then rootDoc else classDoc
+		if surfaceMod.classify(result, className ~= nil) then
+			local class = members.newContainer(ctx, mod, rootName, containerDoc, result.span, nil)
+			ctx.containerOfSym[members.symKey(result)] = class
+			rootContainer = class
+			local sinks = members.sinks(class, entry)
+			members.buildMembers(ctx, mod, rootName, result, sinks)
+			harvestMetamethods(ctx, mod, result, rootName, sinks)
+			table.insert(entry.classes, 1, class)
+		else
+			members.registerContainer(ctx, rootName, entry)
+			ctx.containerOfSym[members.symKey(result)] = entry
+			local out = members.sinks(entry, entry)
+			members.buildMembers(ctx, mod, rootName, result, out)
+			harvestMetamethods(ctx, mod, result, rootName, out)
+		end
+	elseif result ~= nil and result.kind == "function" then
+		-- Pass `""` as `containerName` for callable modules so the member ID
+		-- and callee use the bare module name rather than `Mod.Mod`.
+		local fn =
+			members.buildFn(ctx, mod, "", members.pseudoField(mod.name, result, false, result.span), rootDoc, nil)
+		table.insert(entry.members, fn)
+		members.registerContainer(ctx, mod.name, entry)
+	else
+		members.registerContainer(ctx, mod.name, entry)
+	end
+
+	-- Register a root or floating `@class` on a callable/non-table module so
+	-- `@within` members targeting that class have a container to land on.
+	if className ~= nil and (result == nil or result.kind ~= "table") then
+		declareClass(
+			ctx,
+			mod,
+			entry,
+			className,
+			classDoc,
+			floatingClassSpan or (if result ~= nil then result.span else nil)
+		)
+	end
+
+	return rootContainer
+end
+
+local function resolveModuleDocs(
+	ctx: Ctx,
+	mod: ModuleData,
+	result: any,
+	fullProcessing: boolean
+): (ParsedDoc, ParsedDoc, string?, boolean, any)
+	-- A floating `@class X` names the module's root container (Moonwave style)
+	-- when the returned table does not carry its own `@class` doc block.
+	local rootHasOwnClass = result ~= nil
+		and result.defDoc ~= nil
+		and tagsMod.className(members.parseTags(ctx, result.defDoc)) ~= nil
+	local floatingClassDoc: ParsedDoc? = nil
+	local floatingClassSpan: any = nil
+	if not rootHasOwnClass then
+		local block, parsed = graphMod.floatingClassBlock(mod)
+		if block ~= nil and parsed ~= nil then
+			floatingClassDoc = parsed
+			floatingClassSpan = block.span
+			block.claimed = true
+			members.forwardTagDiagnostics(ctx, mod.id, block, parsed)
+		end
+	end
+
+	local rootDoc = if fullProcessing and result ~= nil
+		then members.parseBlock(ctx, mod.id, result.defDoc)
+		else members.EMPTY_DOC
+	-- An `@interface` or `@type` block attached to the returned statement
+	-- documents a type declaration rather than the module container.
+	local rootIsInterfaceDoc = rootDoc.placing ~= nil
+		and (rootDoc.placing.kind == "interface" or rootDoc.placing.kind == "type")
+
+	local rootClassName = tagsMod.className(rootDoc)
+	local classDoc: ParsedDoc = if rootClassName ~= nil
+		then rootDoc
+		elseif floatingClassDoc ~= nil then floatingClassDoc
+		else members.EMPTY_DOC
+	local className = tagsMod.className(classDoc)
+	return rootDoc, classDoc, className, rootIsInterfaceDoc, floatingClassSpan
+end
+
 --- Builds `mod`'s `Module` entry and appends it to `ctx.modules`.
 function build.run(ctx: Ctx, mod: ModuleData)
-	-- Pre-populate `ctx.typesByModule[mod.id]`; `buildTypeDecls` prunes any
-	-- declarations it skips.
+	-- Pre-populate `ctx.typesByModule[mod.id]` (`buildTypeDecls` prunes any
+	-- declarations it skips).
 	local types: { [string]: string } = {}
 	if mod.surface ~= nil then
-		for _, ty in (mod.surface :: any).types do
+		for _, ty in mod.surface.types do
 			types[ty.name] = members.memberId(mod.id, "type", nil, ty.name)
 		end
 	end
@@ -317,31 +590,14 @@ function build.run(ctx: Ctx, mod: ModuleData)
 	if mod.parsed == nil or mod.surface == nil then
 		return
 	end
-	local surface = mod.surface :: any
-	local result = surface.result
-
-	-- A floating `@class X` names the module's root container (Moonwave style)
-	-- when the returned table does not carry its own `@class` doc block.
-	local rootHasOwnClass = result ~= nil
-		and (result :: any).defDoc ~= nil
-		and tagsMod.className(members.parseTags(ctx, (result :: any).defDoc)) ~= nil
-	local floatingClassDoc: ParsedDoc? = nil
-	local floatingClassSpan: any = nil
-	if not rootHasOwnClass then
-		local block = graphMod.floatingClassBlock(mod, function(b)
-			return members.parseTags(ctx, b)
-		end)
-		if block ~= nil then
-			floatingClassDoc = members.parseTags(ctx, block)
-			floatingClassSpan = block.span
-			block.claimed = true
-			members.forwardTagDiagnostics(ctx, mod.id, block, floatingClassDoc :: ParsedDoc)
-		end
-	end
-
+	local surface: any = mod.surface
+	local result: any = surface.result
 	-- Modules reached only via local `require`s (`not mod.surfaced`) contribute
 	-- `@within` declarations and types to other pages without getting a page of their own.
 	local fullProcessing = mod.surfaced
+
+	local rootDoc, classDoc, className, rootIsInterfaceDoc, floatingClassSpan =
+		resolveModuleDocs(ctx, mod, result, fullProcessing)
 
 	if fullProcessing and result ~= nil then
 		if result.kind == "require" then
@@ -357,12 +613,9 @@ function build.run(ctx: Ctx, mod: ModuleData)
 		end
 	end
 
-	local rootDoc = if fullProcessing and result ~= nil
-		then members.parseBlock(ctx, mod.id, result.defDoc)
-		else members.EMPTY_DOC
-	local moduleDoc: ParsedDoc? = nil
 	if fullProcessing then
-		local moduleDocBlock = comments.moduleDoc(mod.blocks :: any, surface.firstStatLine)
+		local moduleDocBlock = comments.moduleDoc(mod.blocks or {}, surface.firstStatLine)
+		local moduleDoc: ParsedDoc? = nil
 		if moduleDocBlock ~= nil then
 			local parsedModuleDoc = members.parseBlock(ctx, mod.id, moduleDocBlock)
 			if parsedModuleDoc.placing == nil then
@@ -370,21 +623,6 @@ function build.run(ctx: Ctx, mod: ModuleData)
 				moduleDocBlock.claimed = true
 			end
 		end
-	end
-
-	-- An `@interface` or `@type` block attached to the returned statement
-	-- documents a type declaration rather than the module container.
-	local rootIsInterfaceDoc = rootDoc.placing ~= nil
-		and (rootDoc.placing.kind == "interface" or rootDoc.placing.kind == "type")
-
-	local rootClassName = tagsMod.className(rootDoc)
-	local classDoc: ParsedDoc = if rootClassName ~= nil
-		then rootDoc
-		elseif floatingClassDoc ~= nil then floatingClassDoc
-		else members.EMPTY_DOC
-	local className = tagsMod.className(classDoc)
-	local hasClassTag = className ~= nil
-	if fullProcessing then
 		entry.doc = if moduleDoc ~= nil and moduleDoc.desc ~= ""
 			then moduleDoc.desc
 			elseif classDoc.desc ~= "" then classDoc.desc
@@ -392,228 +630,30 @@ function build.run(ctx: Ctx, mod: ModuleData)
 			else nil
 	end
 
-	local rootContainer: any = entry
+	local rootContainer: any = if fullProcessing
+		then buildRootSurface(
+			ctx,
+			mod,
+			entry,
+			result,
+			rootDoc,
+			classDoc,
+			className,
+			rootIsInterfaceDoc,
+			floatingClassSpan
+		)
+		else entry
 
-	--- Harvests documented metamethod functions from `setmetatable(root, MT)`.
-	local function harvestMetamethods(sym: any, containerName: string, sink: any)
-		local mt = (sym :: any).metatable
-		-- Skip self-metatables (`setmetatable(M, M)`), whose fields were already
-		-- walked on `M`.
-		if mt ~= nil and mt.kind == "table" and members.symKey(mt) ~= members.symKey(sym) then
-			local mtView = { kind = "table", span = mt.span, fields = {} }
-			for _, f in mt.fields do
-				if surfaceMod.isMetamethod(f.name) and f.value.kind == "function" then
-					table.insert(mtView.fields, f)
-				end
-			end
-			if #mtView.fields > 0 then
-				-- Pass `sym` as `ownerSym` because `self` inside a metamethod
-				-- refers to the table the metatable is attached to.
-				members.buildMembers(ctx, mod, containerName, mtView, sink, sym)
-			end
-		end
-	end
-
-	if fullProcessing and result ~= nil and result.kind == "table" then
-		local rootName = className or mod.name
-		entry.name = rootName
-		local containerDoc = classDoc
-		if not hasClassTag and not rootIsInterfaceDoc then
-			containerDoc = rootDoc
-		end
-		if surfaceMod.classify(result, hasClassTag) then
-			local class = members.newContainer(ctx, mod, rootName, containerDoc, result.span, nil)
-			ctx.containerOfSym[members.symKey(result)] = class
-			rootContainer = class
-			local sinks = members.sinks(class, entry)
-			members.buildMembers(ctx, mod, rootName, result, sinks)
-			harvestMetamethods(result, rootName, sinks)
-			table.insert(entry.classes, 1, class)
-		else
-			members.registerContainer(ctx, rootName, entry)
-			ctx.containerOfSym[members.symKey(result)] = entry
-			local out = members.sinks(entry, entry)
-			members.buildMembers(ctx, mod, rootName, result, out)
-			harvestMetamethods(result, rootName, out)
-		end
-	elseif fullProcessing and result ~= nil and result.kind == "function" then
-		-- Pass `""` as `containerName` for callable modules so the member ID
-		-- and callee use the bare module name rather than `Mod.Mod`.
-		local fn =
-			members.buildFn(ctx, mod, "", members.pseudoField(mod.name, result, false, result.span), rootDoc, nil)
-		table.insert(entry.members, fn)
-		members.registerContainer(ctx, mod.name, entry)
-	elseif fullProcessing then
-		members.registerContainer(ctx, mod.name, entry)
-	end
-
-	--- Declares a class on `entry.classes`, warning and dropping same-module
-	--- duplicates that would mint the exact same `<mod>#class.<name>` ID.
-	local function declareClass(name: string, doc: ParsedDoc, span: any): any?
-		if members.byName(entry.classes, name) ~= nil then
-			ctx.diag:warn(
-				"duplicate-class",
-				string.format("@class %s is already declared in this module; ignoring the duplicate", name),
-				mod.id,
-				if span ~= nil then span.beginLine else nil
-			)
-			return nil
-		end
-		local class = members.newContainer(ctx, mod, name, doc, span, nil)
-		table.insert(entry.classes, class)
-		return class
-	end
-
-	-- Register a root or floating `@class` on a callable/non-table module so
-	-- `@within` members targeting that class have a container to land on.
-	if fullProcessing and className ~= nil and (result == nil or result.kind ~= "table") then
-		declareClass(className, classDoc, floatingClassSpan or (if result ~= nil then (result :: any).span else nil))
-	end
-
-	-- In a non-surfaced sidecar module, any code members carrying `@within` are
-	-- built and queued in `ctx.pendingMoves` to relocate onto their target page.
 	if not fullProcessing and result ~= nil and result.kind == "table" then
-		for _, field in (result :: any).fields do
-			local block = members.docBlockOf(field)
-			local doc: ParsedDoc? = if block ~= nil then members.parseTags(ctx, block) else nil
-			if doc ~= nil and doc.within ~= nil and not doc.flags.ignore then
-				local value = field.value
-				local mounted = surfaceMod.unguard(value)
-				local member: any = nil
-				if value.kind == "function" then
-					member = members.buildFn(ctx, mod, entry.name, field, doc, nil, result)
-				elseif mounted.kind ~= "require" and mounted.kind ~= "import" and value.kind ~= "table" then
-					member = members.buildProp(ctx, mod, entry.name, field, doc, nil, result)
-				end
-				if member ~= nil then
-					member.__valueSym = members.symKey(value)
-					members.forwardTagDiagnostics(ctx, mod.id, block, doc)
-					table.insert(ctx.pendingMoves, {
-						member = member,
-						targetName = doc.within :: string,
-						fromModule = mod.id,
-					})
-				end
-			end
-		end
+		members.buildMembers(ctx, mod, entry.name, result, nil)
 	end
 
-	-- Discover local class tables that were not returned directly on the module
-	-- surface (e.g., `local Signal = {}` when the module returns a constructor
-	-- function or a table of constructors):
-	--   1. Local tables with an explicit `--- @class` doc block.
-	--   2. Implicit classes: self-indexing local tables (`Impl.__index = Impl`)
-	--      attached by a constructor (`return setmetatable(_, Impl)`) or by a
-	--      metatable type alias (`typeof(setmetatable(_, Impl))` or
-	--      `setmetatable<_, typeof(Impl)>`), named after the first matching type
-	--      alias or the local variable.
 	if fullProcessing then
-		-- symKey -> naming type alias (string), or `false` for constructor-only attachment
-		local attached: { [any]: any } = {}
-		members.eachMember(entry, function(member, _owner)
-			local sym = member.__constructsSym
-			local key = members.symKey(sym)
-			if key ~= nil and attached[key] == nil then
-				attached[key] = false
-			end
-		end)
-		for _, ty in surface.types do
-			local classLocal = members.setmetatableTypeClassLocal(ty.stat.type)
-			local sym = if classLocal ~= nil then surface.env[classLocal] else nil
-			local key = members.symKey(sym)
-			if key ~= nil and not attached[key] then
-				attached[key] = ty.name
-			end
-		end
-
-		local resultKey = members.symKey(result)
-		local orphanClasses = {}
-		for cstLocal, value in surface.env do
-			local key = members.symKey(value)
-			if value.kind == "table" and key ~= resultKey and ctx.containerOfSym[key] == nil then
-				local doc = if value.defDoc ~= nil then members.parseTags(ctx, value.defDoc) else members.EMPTY_DOC
-				local orphanName = tagsMod.className(doc)
-				local naming = attached[key]
-				if orphanName == nil and naming ~= nil and surfaceMod.isSelfIndexing(value) then
-					orphanName = if naming ~= false then naming else cstLocal.name.text
-				end
-				if orphanName ~= nil then
-					table.insert(orphanClasses, { value = value, doc = doc, name = orphanName })
-				end
-			end
-		end
-		-- Sort by source line (and name on ties) before deduplicating `SymValue`
-		-- keys so iteration order over `surface.env` never affects the output.
-		table.sort(orphanClasses, function(a, b)
-			local la = if a.value.span ~= nil then a.value.span.beginLine else 0
-			local lb = if b.value.span ~= nil then b.value.span.beginLine else 0
-			if la ~= lb then
-				return la < lb
-			end
-			return a.name < b.name
-		end)
-		local seenSyms = {}
-		-- Track `SymValue` keys of members owned by an orphan class so top-level
-		-- re-exposures (`return { new = Impl.new }`) can be deduplicated below.
-		local orphanOwned: { [any]: boolean } = {}
-		for _, orphan in orphanClasses do
-			local key = members.symKey(orphan.value)
-			if seenSyms[key] then
-				continue
-			end
-			seenSyms[key] = true
-			-- Re-check `containerOfSym` in case an earlier orphan's `buildMembers`
-			-- registered this table as a nested class (`Outer.Widget = Inner`).
-			if ctx.containerOfSym[key] ~= nil then
-				continue
-			end
-			local class = declareClass(orphan.name, orphan.doc, orphan.value.span)
-			if orphan.value.defDoc ~= nil then
-				members.forwardTagDiagnostics(ctx, mod.id, orphan.value.defDoc, orphan.doc)
-			end
-			if class == nil then
-				continue
-			end
-			ctx.containerOfSym[key] = class
-			if ctx.containersByName[orphan.name] == entry then
-				ctx.containersByName[orphan.name] = class
-			end
-			members.buildMembers(ctx, mod, orphan.name, orphan.value, members.sinks(class, entry))
-			for _, member in class.members do
-				orphanOwned[member.__valueSym] = true
-			end
-		end
-		-- Remove module-level members that merely re-expose a function already
-		-- owned by an orphan class (`return { new = Impl.new }`).
-		for i = #entry.members, 1, -1 do
-			local key = entry.members[i].__valueSym
-			if key ~= nil and orphanOwned[key] then
-				table.remove(entry.members, i)
-			end
-		end
+		discoverOrphanClasses(ctx, mod, entry, surface, result)
 	end
 
 	buildTypeDecls(ctx, mod, entry, fullProcessing, if rootIsInterfaceDoc then rootDoc else nil)
-
-	for _, block in mod.blocks :: any do
-		-- Visit unclaimed doc blocks, as well as blocks claimed by unexported
-		-- local statements whose tag diagnostics were never forwarded (e.g.,
-		-- `--- @function f` above a local helper that never joined the surface).
-		if block.doc and (not block.claimed or not ctx.forwardedBlocks[block]) then
-			local doc = members.parseTags(ctx, block)
-			if doc.placing ~= nil then
-				members.forwardTagDiagnostics(ctx, mod.id, block, doc)
-				buildFloatingMember(ctx, mod, entry, block, doc, rootContainer)
-			elseif not block.claimed and (#doc.params > 0 or doc.within ~= nil) then
-				ctx.diag:info(
-					"orphaned-doc-block",
-					"doc block is not attached to any statement",
-					mod.id,
-					block.span.beginLine
-				)
-			end
-		end
-	end
+	processFloatingBlocks(ctx, mod, entry, rootContainer)
 end
 
 return build

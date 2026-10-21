@@ -1,24 +1,20 @@
---- Code-signal badge detection: inspects source code for signals a doc block
---- did not state explicitly, so `@yields`, `@readonly`, and the realm tags are
---- only needed when the code itself gives no signal. Functions are inspected via
---- their AST body; properties have no body, so their realm comes from any guard
---- expression they are mounted behind (`IsServer() and ...`) and their readonly
---- flag comes from the container's frozen state or `read` type modifier.
+--- Inspects source code for behavioral badge signals (`@yields`, `@readonly`,
+--- and realm tags) when a doc block does not state them explicitly. Functions
+--- are inspected via their AST body. Properties derive their realm from any
+--- guard expression (`IsServer() and ...`) and their readonly flag from the
+--- container's frozen state or `read` type modifier.
 ---
---- All detection rules are intentionally conservative: a false badge is worse
---- than a missing badge, so only unambiguous signals count and anything mixed
---- or uncertain stays unbadged.
+--- All detection rules are conservative. A false badge is worse than a missing
+--- badge, so only unambiguous signals count and mixed signals stay unbadged.
 ---
 --- The two AST walks treat nested closures differently:
----   * `yields` skips nested closures: a `task.wait` inside a callback yields
----     whatever thread invokes the callback, not the caller of the outer function.
----   * `realm` descends into nested closures: a handler connected to
+---   * `yields` skips nested closures because `task.wait` inside a callback
+---     yields the thread that invokes the callback, not the outer caller.
+---   * `realm` descends into nested closures because a handler connected to
 ---     `OnServerEvent` still marks the enclosing function as server code.
---- Both walks follow statically resolvable calls: top-level locals, fields of
---- surfaced tables, `self` methods on the owning class table, `__call`
---- metatables, the function passed to `pcall`/`xpcall`, and (when the module
---- graph is available) requires, member imports, and passthroughs into other
---- modules. A resolved target's body takes precedence over naming conventions.
+--- Both walks follow statically resolvable calls across locals, surfaced table
+--- fields, `self` methods, `__call` metatables, `pcall`/`xpcall` arguments, and
+--- cross-module requires. A resolved target's body takes precedence over naming conventions.
 
 local engineMod = require("./engine")
 local inferMod = require("./infer")
@@ -41,9 +37,8 @@ local YIELDING_CALLS: { [string]: boolean } = {
 	["coroutine.yield"] = true,
 }
 
---- Returns true for method names that yield: core engine methods (`Wait`,
---- `WaitForChild`, `InvokeServer`, and `InvokeClient`), methods ending in
---- `Async`, or methods listed in `ENGINE.yieldingMethods`.
+--- Returns true for method names that yield (core engine methods, `*Async`
+--- methods, or names listed in `ENGINE.yieldingMethods`).
 local function isYieldingMethod(name: string): boolean
 	if name == "Wait" or name == "WaitForChild" or name == "InvokeServer" or name == "InvokeClient" then
 		return true
@@ -84,12 +79,12 @@ local MEMBER_REALM: { [string]: string } = {
 	OnServerInvoke = "server",
 }
 
---- Follows `require`, `import`, and passthrough chains until reaching a local
---- `SymValue`. `world` is the module graph; without it, resolution stops at the
---- module boundary. Returns `(value, owningModule)`.
+--- Follows `require`, `import`, and passthrough chains to a local `SymValue`.
+--- Stops at the module boundary when `world` is `nil`. Returns `(value, owningModule)`.
 local function resolveAcross(world: any?, mod: any, value: any): (any, any)
 	local seen: { [any]: boolean } = {}
 	while value ~= nil do
+		value = surfaceMod.unguard(value)
 		if value.kind == "require" then
 			if world == nil or seen[value] then
 				return nil, nil
@@ -97,11 +92,12 @@ local function resolveAcross(world: any?, mod: any, value: any): (any, any)
 			seen[value] = true
 			local targetId = mod.requireTargets[value]
 			local target = if targetId ~= nil then world.byId[targetId] else nil
-			if target == nil or target.surface == nil then
+			local targetSurface = if target ~= nil then target.surface else nil
+			if targetSurface == nil then
 				return nil, nil
 			end
 			mod = target
-			value = (target.surface :: any).result
+			value = targetSurface.result
 		elseif value.kind == "import" then
 			-- Guard `import` nodes in `seen` as well so two modules re-exporting
 			-- each other's fields cannot loop forever.
@@ -130,8 +126,8 @@ local function resolveAcross(world: any?, mod: any, value: any): (any, any)
 	return nil, nil
 end
 
---- Returns the CST local definition node for `fnNode`'s `self` receiver: either
---- the implicit colon-method `self` or an explicit first parameter named `self`.
+--- Returns the CST local definition node for `fnNode`'s `self` receiver (either
+--- the implicit colon-method `self` or an explicit first parameter named `self`).
 --- Comparing CST binding identity ensures a local `local self = ...` inside the
 --- body is not mistaken for the method receiver.
 local function selfDefOf(fnNode: any): any
@@ -141,23 +137,19 @@ local function selfDefOf(fnNode: any): any
 	if fnNode.self ~= nil then
 		return fnNode.self
 	end
-	local first = if fnNode.parameters ~= nil and fnNode.parameters[1] ~= nil then fnNode.parameters[1].node else nil
-	if first ~= nil and first.name ~= nil and first.name.text == "self" then
-		return first
-	end
-	return nil
+	return if surfaceMod.isSelfMethod(fnNode) then fnNode.parameters[1].node else nil
 end
 
---- Resolves an expression to `(symValue, owningModule)`: a top-level local, the
---- function's `self` parameter (resolved to `ownerSym`), or a field chain off
---- either, following cross-module requires along the way.
+--- Resolves an expression to `(symValue, owningModule)` across top-level locals,
+--- `self` (resolved to `ownerSym`), field chains, and cross-module requires.
 local function resolveValue(world: any?, mod: any, ownerSym: any, selfDef: any, expr: any): (any, any)
 	expr = parseMod.unwrapExpr(expr, true)
-	if expr == nil or mod == nil or mod.surface == nil then
+	local surface = if mod ~= nil then mod.surface else nil
+	if expr == nil or surface == nil then
 		return nil, nil
 	end
 	if expr.tag == "local" then
-		local bound = (mod.surface :: any).env[expr["local"]]
+		local bound = surface.env[expr["local"]]
 		if bound == nil and selfDef ~= nil and expr["local"] == selfDef then
 			bound = ownerSym
 		end
@@ -200,8 +192,8 @@ local function resolveCallTarget(world: any?, mod: any, ownerSym: any, selfDef: 
 	if value.kind == "function" then
 		return value.fnNode, owner, valueMod
 	end
-	if value.kind == "table" and value.metatable ~= nil and (value.metatable :: any).kind == "table" then
-		local mt = value.metatable :: any
+	local mt = value.metatable
+	if value.kind == "table" and mt ~= nil and mt.kind == "table" then
 		local field = surfaceMod.fieldOf(mt, "__call")
 		if field ~= nil and field.value.kind == "function" then
 			return field.value.fnNode, value, valueMod
@@ -224,9 +216,15 @@ end
 --- Both caches are keyed by `(fnNode, ownerSym)` because `self` resolves
 --- against `ownerSym`, so a single function value shared between two containers
 --- can produce different results under each.
+local WEAK_KEYS = { __mode = "k" }
 local NO_OWNER = {} -- sentinel owner key for functions with no owning table
-local yieldCache: { [any]: { [any]: boolean } } = setmetatable({}, { __mode = "k" }) :: any
-local realmCache: { [any]: { [any]: { [string]: boolean } } } = setmetatable({}, { __mode = "k" }) :: any
+
+local function weakTable(): any
+	return setmetatable({}, WEAK_KEYS)
+end
+
+local yieldCache: { [any]: { [any]: boolean } } = weakTable()
+local realmCache: { [any]: { [any]: { [string]: boolean } } } = weakTable()
 
 local function cacheGet(cache: { [any]: any }, fnNode: any, ownerSym: any): any
 	local byOwner = cache[fnNode]
@@ -236,13 +234,13 @@ end
 local function cachePut(cache: { [any]: any }, fnNode: any, ownerSym: any, answer: any)
 	local byOwner = cache[fnNode]
 	if byOwner == nil then
-		byOwner = setmetatable({}, { __mode = "k" }) :: any
+		byOwner = weakTable()
 		cache[fnNode] = byOwner
 	end
 	byOwner[ownerSym or NO_OWNER] = answer
 end
 
-type Callee = { expr: any, asValue: boolean? }
+type Callee = { expr: any, namedYield: boolean? }
 type FnSummary = {
 	yields: boolean,
 	realms: { [string]: boolean },
@@ -250,7 +248,56 @@ type FnSummary = {
 	realmCallees: { Callee },
 }
 
-local summaryCache: { [any]: FnSummary } = setmetatable({}, { __mode = "k" }) :: any
+local summaryCache: { [any]: FnSummary } = weakTable()
+
+local function mergeSubSummary(summary: FnSummary, sub: FnSummary, inClosure: boolean)
+	if not inClosure and sub.yields then
+		summary.yields = true
+	end
+	for r in sub.realms do
+		summary.realms[r] = true
+	end
+	for _, c in sub.yieldCallees do
+		if not inClosure then
+			table.insert(summary.yieldCallees, c)
+		end
+	end
+	for _, c in sub.realmCallees do
+		table.insert(summary.realmCallees, c)
+	end
+end
+
+local function recordNodeRealms(mod: any, summary: FnSummary, node: any)
+	local tag = node.tag
+	if tag == "indexname" then
+		local name = if node.index ~= nil then node.index.text else nil
+		if name ~= nil then
+			local realm = MEMBER_REALM[name]
+			if realm ~= nil then
+				summary.realms[realm] = true
+			end
+			if ENGINE ~= nil and ENGINE.pluginMembers[name] == true then
+				summary.realms.plugin = true
+			end
+			local baseExpr = node.expression
+			if baseExpr ~= nil and baseExpr.tag == "global" and baseExpr.name.text == "game" then
+				local svc = SERVICE_REALM[name]
+				if svc ~= nil then
+					summary.realms[svc] = true
+				end
+			end
+		end
+	elseif tag == "local" and node["local"] ~= nil then
+		local surface = mod.surface
+		local bound = if surface ~= nil then surface.env[node["local"]] else nil
+		local svc = if bound ~= nil and bound.service ~= nil then SERVICE_REALM[bound.service :: string] else nil
+		if svc ~= nil then
+			summary.realms[svc] = true
+		end
+	elseif tag == "global" and node.name ~= nil and node.name.text == "plugin" then
+		summary.realms.plugin = true
+	end
+end
 
 --- Walks `fnNode.body` once to collect direct yield/realm signals and callee
 --- expressions, partitioning callees inside nested closures (which contribute to
@@ -277,21 +324,7 @@ local function summarizeFn(mod: any, fnNode: any): FnSummary
 			return
 		end
 		if expr.tag == "function" then
-			local sub = summarizeFn(mod, expr)
-			if not inClosure and sub.yields then
-				summary.yields = true
-			end
-			for r in sub.realms do
-				summary.realms[r] = true
-			end
-			for _, c in sub.yieldCallees do
-				if not inClosure then
-					table.insert(summary.yieldCallees, c)
-				end
-			end
-			for _, c in sub.realmCallees do
-				table.insert(summary.realmCallees, c)
-			end
+			mergeSubSummary(summary, summarizeFn(mod, expr), inClosure)
 			return
 		end
 		if path == nil then
@@ -300,20 +333,17 @@ local function summarizeFn(mod: any, fnNode: any): FnSummary
 		if not inClosure then
 			if path ~= nil and YIELDING_CALLS[path] then
 				summary.yields = true
-			elseif
-				expr.tag == "indexname"
+			end
+			local namedYield = expr.tag == "indexname"
 				and (asValue == true or expr.accessor.text == ":")
 				and isYieldingMethod(expr.index.text)
-			then
-				summary.yields = true
-			end
-			table.insert(summary.yieldCallees, { expr = expr, asValue = asValue })
+			table.insert(summary.yieldCallees, { expr = expr, namedYield = namedYield })
 		end
-		table.insert(summary.realmCallees, { expr = expr, asValue = asValue })
+		table.insert(summary.realmCallees, { expr = expr })
 	end
 
 	local seen: { [any]: boolean } = {}
-	local function walk(node: any, inClosure: boolean)
+	local function walkBody(node: any, inClosure: boolean)
 		if type(node) ~= "table" or seen[node] or node.kind == "token" then
 			return
 		end
@@ -321,32 +351,6 @@ local function summarizeFn(mod: any, fnNode: any): FnSummary
 		local tag = node.tag
 		if tag == "function" or tag == "localfunction" then
 			inClosure = true
-		elseif tag == "indexname" then
-			local name = if node.index ~= nil then node.index.text else nil
-			if name ~= nil then
-				local realm = MEMBER_REALM[name]
-				if realm ~= nil then
-					summary.realms[realm] = true
-				end
-				if ENGINE ~= nil and ENGINE.pluginMembers[name] == true then
-					summary.realms.plugin = true
-				end
-				local baseExpr = node.expression
-				if baseExpr ~= nil and baseExpr.tag == "global" and baseExpr.name.text == "game" then
-					local svc = SERVICE_REALM[name]
-					if svc ~= nil then
-						summary.realms[svc] = true
-					end
-				end
-			end
-		elseif tag == "local" and node["local"] ~= nil then
-			local bound = (mod.surface :: any).env[node["local"]]
-			local svc = if bound ~= nil and bound.service ~= nil then SERVICE_REALM[bound.service :: string] else nil
-			if svc ~= nil then
-				summary.realms[svc] = true
-			end
-		elseif tag == "global" and node.name ~= nil and node.name.text == "plugin" then
-			summary.realms.plugin = true
 		elseif tag == "call" then
 			local func = node.func
 			local path = if func ~= nil then surfaceMod.calleePath(func) else nil
@@ -362,21 +366,23 @@ local function summarizeFn(mod: any, fnNode: any): FnSummary
 			end
 			checkCall(func, path, nil, inClosure)
 			checkCall(protectedCallee(node, path), nil, true, inClosure)
+		else
+			recordNodeRealms(mod, summary, node)
 		end
 		for key, v in node do
 			if key ~= "location" and type(v) == "table" then
-				walk(v, inClosure)
+				walkBody(v, inClosure)
 			end
 		end
 	end
 
-	walk(fnNode.body, false)
+	walkBody(fnNode.body, false)
 	summaryCache[fnNode] = summary
 	return summary
 end
 
 --- Detects whether `fnNode` yields. `world` is the module graph (`nil` in
---- single-file tests, stopping resolution at `require` boundaries); `ownerSym`
+--- single-file tests, stopping resolution at `require` boundaries). `ownerSym`
 --- is the surfaced table that owns `fnNode` and is what `self` resolves against.
 function detect.yields(world: any?, mod: any, fnNode: any, ownerSym: any): boolean
 	if mod == nil or mod.surface == nil or fnNode == nil then
@@ -405,7 +411,12 @@ function detect.yields(world: any?, mod: any, fnNode: any, ownerSym: any): boole
 		local selfDef = selfDefOf(curFn)
 		for _, c in summary.yieldCallees do
 			local target, targetOwner, targetMod = resolveCallTarget(world, curMod, curOwner, selfDef, c.expr)
-			if target ~= nil and visit(targetMod, target, targetOwner) then
+			if target ~= nil then
+				if visit(targetMod, target, targetOwner) then
+					cachePut(yieldCache, curFn, curOwner, true)
+					return true
+				end
+			elseif c.namedYield then
 				cachePut(yieldCache, curFn, curOwner, true)
 				return true
 			end
@@ -467,7 +478,7 @@ function detect.propRealm(value: any): { string }?
 end
 
 local NO_TABLE_ENTRIES: { [string]: any } = {}
-local tableEntriesCache: { [any]: { [string]: any } } = setmetatable({}, { __mode = "k" }) :: any
+local tableEntriesCache: { [any]: { [string]: any } } = weakTable()
 
 --- Returns the map of property entries in the container's own table type
 --- annotation or cast (following at most one same-module type alias hop, such
@@ -481,10 +492,8 @@ local function ownerTableEntries(mod: any, typeNode: any): { [string]: any }
 		return cached
 	end
 	local out: { [string]: any } = {}
-	local tbl = surfaceMod.unwrapTableType(
-		typeNode,
-		if mod ~= nil and mod.surface ~= nil then (mod.surface :: any).types else nil
-	)
+	local surface = if mod ~= nil then mod.surface else nil
+	local tbl = surfaceMod.unwrapTableType(typeNode, if surface ~= nil then surface.types else nil)
 	if tbl ~= nil then
 		for _, entry in tbl.entries do
 			if parseMod.isTypeProperty(entry) and entry.key ~= nil then
@@ -517,7 +526,7 @@ function detect.propReadonly(mod: any, ownerSym: any, name: string): boolean
 	return entry ~= nil and entry.access ~= nil and entry.access.text == "read"
 end
 
---- Detects realm badges for `fnNode`; parameters match `detect.yields`.
+--- Detects realm badges for `fnNode`, using the same parameters as `detect.yields`.
 function detect.realm(world: any?, mod: any, fnNode: any, ownerSym: any): { string }?
 	if mod == nil or mod.surface == nil or fnNode == nil then
 		return nil

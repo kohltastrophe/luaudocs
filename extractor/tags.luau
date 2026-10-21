@@ -1,21 +1,18 @@
---- Moonwave-compatible tag grammar over doc-block content lines.
+--- Parses Moonwave-compatible tags from doc-block content lines.
 ---
---- A line is a tag line iff it matches `@word ...` AND `word` is one of the 24
---- known Moonwave tags; anything else (`@Kohl`, `@2x`, emails) stays prose, as
---- does anything inside a markdown code fence. Prose before the first tag is
---- the description; lines after a tag continue that tag's description when the
---- tag accepts continuation (`@param`, `@return`, etc.) and rejoin the block
---- description otherwise (supporting Moonwave's `@class X` + prose-below pattern).
+--- A line is a tag line if it matches `@word ...` for one of the 24 known
+--- Moonwave tags. Anything else (`@Kohl`, `@2x`, emails, or lines inside a code
+--- fence) stays prose. Prose before the first tag is the description. Lines
+--- after a continuable tag (`@param`, `@return`, etc.) continue that tag's
+--- description, while lines after other tags rejoin the block description.
 ---
---- `@__index` is accepted and ignored because implementation tables are detected
---- automatically. `@external Name URL` is a data tag that links external type
---- names to their documentation URLs.
+--- Accepts and ignores `@__index` because implementation tables are detected
+--- automatically. `@external Name URL` links external type names to their
+--- documentation URLs.
 ---
---- Type/description splitting follows Moonwave (`@param name Type -- desc`);
---- with no separator, the entire remainder is the type. LuauDocs extensions:
---- the type may be omitted (`@param name -- desc`) because types are read from
---- annotations, a single ` - ` also works as a separator (JSDoc style), and a
---- trailing colon on the parameter or field name is stripped.
+--- Splits `Type -- desc` (or `Type - desc`), or treats the entire remainder as
+--- the type when no separator is present. Authors may omit the type
+--- (`@param name -- desc`), and trailing colons on parameter or field names are stripped.
 
 local util = require("./util")
 
@@ -25,8 +22,10 @@ export type ParamDoc = { name: string, type: string?, desc: string? }
 export type ReturnDoc = { type: string?, desc: string? }
 export type ErrorDoc = { type: string, desc: string? }
 
+export type PlacingKind = "class" | "prop" | "type" | "function" | "method" | "interface"
+
 export type Placing = {
-	kind: "class" | "prop" | "type" | "function" | "method" | "interface",
+	kind: PlacingKind,
 	name: string,
 }
 
@@ -71,13 +70,13 @@ for _, realm in REALM_FLAGS do
 end
 
 --- Tag names that declare a member or container; each key matches its `Placing.kind`.
-local PLACING_TAGS = {
-	class = true,
-	prop = true,
-	type = true,
-	["function"] = true,
-	method = true,
-	interface = true,
+local PLACING_TAGS: { [string]: PlacingKind } = {
+	class = "class",
+	prop = "prop",
+	type = "type",
+	["function"] = "function",
+	method = "method",
+	interface = "interface",
 }
 
 local DATA_TAGS = {
@@ -110,7 +109,7 @@ local CONTINUABLE = {
 }
 
 local function isKnown(name: string): boolean
-	return FLAG_TAGS[name] == true or PLACING_TAGS[name] == true or DATA_TAGS[name] == true or IGNORED_TAGS[name] ~= nil
+	return FLAG_TAGS[name] == true or PLACING_TAGS[name] ~= nil or DATA_TAGS[name] == true or IGNORED_TAGS[name] ~= nil
 end
 
 local tags = {}
@@ -126,7 +125,7 @@ function tags.realmList(flags: { [string]: boolean }): { string }?
 	return if #realm > 0 then realm else nil
 end
 
---- Splits `Type -- desc` (or JSDoc `Type - desc`); with no separator, the entire string is the type.
+--- Splits `Type -- desc` (or JSDoc `Type - desc`). With no separator, the entire string is the type.
 local function splitTypeDesc(rest: string): (string?, string?)
 	rest = util.trim(rest)
 	if rest == "" then
@@ -165,25 +164,31 @@ type Entry = {
 	lineOffset: number,
 }
 
-function tags.parse(content: { string }): ParsedDoc
-	local doc: ParsedDoc = {
-		desc = "",
-		placing = nil,
-		placingType = nil,
-		placingDesc = nil,
-		within = nil,
-		params = {},
-		returns = {},
-		errors = {},
-		fields = {},
-		flags = {},
-		deprecated = nil,
-		since = nil,
-		customTags = {},
-		externals = {},
-		diagnostics = {},
-	}
+type ReportFn = (code: string, message: string, lineOffset: number, severity: "info"?) -> ()
 
+local function mergeDesc(base: string?, entry: Entry): string?
+	local extra = util.joinDesc(entry.descLines)
+	if extra == "" then
+		return base
+	end
+	if base == nil then
+		return extra
+	end
+	return base .. "\n" .. extra
+end
+
+--- Parses the shared `@param`/`@field` shape (`name Type -- desc`), stripping
+--- any trailing colon on `name`. Returns `nil` when `entry` has no name.
+local function parseNamedEntry(entry: Entry): (string?, string?, string?)
+	local name, rest = util.trim(entry.arg):match("^(%S+)%s*(.*)$")
+	if name == nil then
+		return nil, nil, nil
+	end
+	local typeStr, desc = splitTypeDesc(rest :: string)
+	return ((name :: string):gsub(":$", "")), typeStr, mergeDesc(desc, entry)
+end
+
+local function collectEntries(content: { string }, report: ReportFn): (string, { Entry })
 	local proseLines: { string } = {}
 	local entries: { Entry } = {}
 	local current: Entry? = nil
@@ -192,10 +197,6 @@ function tags.parse(content: { string }): ParsedDoc
 	local fenceMarker = ""
 	local inIndentedCode = false
 	local prevBlank = true -- block start counts as a blank boundary
-
-	local function report(code: string, message: string, lineOffset: number, severity: "info"?)
-		table.insert(doc.diagnostics, { code = code, message = message, lineOffset = lineOffset, severity = severity })
-	end
 
 	local function sink(line: string)
 		if current ~= nil then
@@ -220,7 +221,6 @@ function tags.parse(content: { string }): ParsedDoc
 		end
 		if inFence then
 			sink(line)
-			-- A closing fence must match the opening fence's character and be at least as long.
 			if fence ~= nil and fence:sub(1, 1) == fenceMarker:sub(1, 1) and #fence >= #fenceMarker then
 				inFence = false
 			end
@@ -233,11 +233,6 @@ function tags.parse(content: { string }): ParsedDoc
 			continue
 		end
 
-		-- In CommonMark, an indented code block cannot interrupt a paragraph, so
-		-- a 4-space-indented line only opens a code block after a blank line.
-		-- That keeps `@words` inside indented code examples from parsing as tags
-		-- while still allowing `@interface` followed immediately by indented
-		-- `.field` lines.
 		local codeIndent = not blank and (#indent >= 4 or indent:find("\t", 1, true) ~= nil)
 		if inIndentedCode then
 			if blank or codeIndent then
@@ -251,10 +246,6 @@ function tags.parse(content: { string }): ParsedDoc
 			continue
 		end
 
-		-- A blank line ends a continuable tag's description so the following
-		-- paragraph rejoins the block description. `@interface` `.field` lines
-		-- still match across blank lines because `sawInterface` stays true for
-		-- the rest of the block.
 		if blank then
 			current = nil
 		end
@@ -288,147 +279,153 @@ function tags.parse(content: { string }): ParsedDoc
 		sink(line)
 	end
 
-	doc.desc = util.joinDesc(proseLines)
+	return util.joinDesc(proseLines), entries
+end
 
-	local function mergeDesc(base: string?, entry: Entry): string?
-		local extra = util.joinDesc(entry.descLines)
-		if extra == "" then
-			return base
+local function applyPlacingEntry(doc: ParsedDoc, entry: Entry, kind: PlacingKind, arg: string, report: ReportFn)
+	local declName: string? = nil
+	local rest: string? = nil
+	if kind == "method" or kind == "function" then
+		-- `Class:method` is the colon-accessor spelling of a qualified name.
+		local qualifier, colonName, colonRest = arg:match("^([%w_%.]+):([%w_]+)%s*(.*)$")
+		if qualifier ~= nil then
+			declName = qualifier .. "." .. colonName
+			rest = colonRest
 		end
-		if base == nil then
-			return extra
-		end
-		return base .. "\n" .. extra
 	end
-
-	--- Parses the shared `@param`/`@field` shape (`name Type -- desc`), stripping
-	--- any trailing colon on `name`. Returns `nil` when `entry` has no name.
-	local function parseNamedEntry(entry: Entry): (string?, string?, string?)
-		local name, rest = util.trim(entry.arg):match("^(%S+)%s*(.*)$")
-		if name == nil then
-			return nil, nil, nil
-		end
+	if declName == nil then
+		declName, rest = arg:match("^([%w_%.]+):?%s*(.*)$")
+	end
+	if declName == nil then
+		report("malformed-tag", "@" .. kind .. " requires a name", entry.lineOffset)
+		return
+	end
+	local memberName = declName
+	local qualifiedWithin: string? = nil
+	-- `@class` keeps dotted names intact; member placing tags split `Class.name`.
+	if kind ~= "class" then
+		local short, within = splitQualified(declName)
+		memberName = short
+		qualifiedWithin = within
+	end
+	if doc.placing ~= nil then
+		report(
+			"duplicate-placing-tag",
+			string.format("@%s conflicts with earlier @%s %s; ignoring", entry.name, doc.placing.kind, doc.placing.name),
+			entry.lineOffset
+		)
+		return
+	end
+	doc.placing = { kind = kind, name = memberName }
+	if qualifiedWithin ~= nil then
+		doc.within = doc.within or qualifiedWithin
+	end
+	if kind == "prop" or kind == "type" then
 		local typeStr, desc = splitTypeDesc(rest :: string)
-		return ((name :: string):gsub(":$", "")), typeStr, mergeDesc(desc, entry)
+		doc.placingType = typeStr
+		doc.placingDesc = mergeDesc(desc, entry)
 	end
+end
 
-	--- Sets `doc.placing`, or returns `false` if a placing tag was already seen
-	--- so the caller also discards the duplicate tag's type, description, and owner.
-	local function setPlacing(entry: Entry, kind: string, name: string): boolean
-		if doc.placing ~= nil then
-			report(
-				"duplicate-placing-tag",
-				string.format(
-					"@%s conflicts with earlier @%s %s; ignoring",
-					entry.name,
-					doc.placing.kind,
-					doc.placing.name
-				),
-				entry.lineOffset
-			)
-			return false
+local function applyEntry(doc: ParsedDoc, entry: Entry, report: ReportFn)
+	local name = entry.name
+	local arg = util.trim(entry.arg)
+	local placingKind = PLACING_TAGS[name]
+
+	if FLAG_TAGS[name] then
+		doc.flags[name] = true
+		if arg ~= "" then
+			report("unknown-tag-arg", string.format("@%s takes no arguments (got %q)", name, arg), entry.lineOffset)
 		end
-		doc.placing = { kind = kind :: any, name = name }
-		return true
+	elseif placingKind ~= nil then
+		applyPlacingEntry(doc, entry, placingKind, arg, report)
+	elseif name == "within" then
+		local owner = arg:match("^([%w_%.]+)")
+		if owner == nil then
+			report("malformed-tag", "@within requires a class name", entry.lineOffset)
+		else
+			doc.within = owner
+		end
+	elseif name == "field" or name == "param" then
+		local entryName, typeStr, desc = parseNamedEntry(entry)
+		if entryName == nil then
+			report("malformed-tag", "@" .. name .. " requires a name", entry.lineOffset)
+		else
+			local list = if name == "field" then doc.fields else doc.params
+			table.insert(list, { name = entryName, type = typeStr, desc = desc })
+		end
+	elseif name == "return" then
+		local typeStr, desc = splitTypeDesc(arg)
+		table.insert(doc.returns, { type = typeStr, desc = mergeDesc(desc, entry) })
+	elseif name == "error" then
+		local typeStr, desc = splitTypeDesc(arg)
+		table.insert(doc.errors, { type = typeStr or "unknown", desc = mergeDesc(desc, entry) })
+	elseif name == "deprecated" then
+		local version = arg:match("^([^%s]+)")
+		-- `@deprecated -- note` starts with the separator: no version string.
+		if version ~= nil and version:sub(1, 1) == "-" then
+			version = nil
+		end
+		local _, desc = splitTypeDesc(arg)
+		doc.deprecated = { version = version, desc = mergeDesc(desc, entry) }
+	elseif name == "since" then
+		doc.since = if arg ~= "" then arg else nil
+	elseif name == "external" then
+		local extName, url = arg:match("^(%S+)%s+(%S+)")
+		if extName == nil or url == nil then
+			report("malformed-tag", "@external requires a name and a URL", entry.lineOffset)
+		else
+			table.insert(doc.externals, { name = extName, url = url, lineOffset = entry.lineOffset })
+		end
+	elseif name == "tag" then
+		-- `@tag name -- comment` strips the trailing comment like other data
+		-- tags; with no separator, the entire argument is the tag value.
+		local value = splitTypeDesc(arg)
+		if value ~= nil and value ~= "" then
+			table.insert(doc.customTags, value)
+		end
 	end
+end
 
+function tags.parse(content: { string }): ParsedDoc
+	local doc: ParsedDoc = {
+		desc = "",
+		placing = nil,
+		placingType = nil,
+		placingDesc = nil,
+		within = nil,
+		params = {},
+		returns = {},
+		errors = {},
+		fields = {},
+		flags = {},
+		deprecated = nil,
+		since = nil,
+		customTags = {},
+		externals = {},
+		diagnostics = {},
+	}
+	local function report(code: string, message: string, lineOffset: number, severity: "info"?)
+		table.insert(doc.diagnostics, { code = code, message = message, lineOffset = lineOffset, severity = severity })
+	end
+	local desc, entries = collectEntries(content, report)
+	doc.desc = desc
 	for _, entry in entries do
-		local name = entry.name
-		local arg = util.trim(entry.arg)
-
-		if FLAG_TAGS[name] then
-			doc.flags[name] = true
-			if arg ~= "" then
-				report("unknown-tag-arg", string.format("@%s takes no arguments (got %q)", name, arg), entry.lineOffset)
-			end
-		elseif PLACING_TAGS[name] then
-			local declName: string? = nil
-			local rest: string? = nil
-			if name == "method" or name == "function" then
-				-- `Class:method` is the colon-accessor spelling of a qualified name.
-				local qualifier, colonName, colonRest = arg:match("^([%w_%.]+):([%w_]+)%s*(.*)$")
-				if qualifier ~= nil then
-					declName = qualifier .. "." .. colonName
-					rest = colonRest
-				end
-			end
-			if declName == nil then
-				declName, rest = arg:match("^([%w_%.]+):?%s*(.*)$")
-			end
-			if declName == nil then
-				report("malformed-tag", "@" .. name .. " requires a name", entry.lineOffset)
-			else
-				local memberName = declName
-				local qualifiedWithin: string? = nil
-				-- `@class` keeps dotted names intact; member placing tags split `Class.name`.
-				if name ~= "class" then
-					local short, within = splitQualified(declName)
-					memberName = short
-					qualifiedWithin = within
-				end
-				if setPlacing(entry, name, memberName) then
-					if qualifiedWithin ~= nil then
-						doc.within = doc.within or qualifiedWithin
-					end
-					if name == "prop" or name == "type" then
-						local typeStr, desc = splitTypeDesc(rest :: string)
-						doc.placingType = typeStr
-						doc.placingDesc = mergeDesc(desc, entry)
-					end
-				end
-			end
-		elseif name == "within" then
-			local owner = arg:match("^([%w_%.]+)")
-			if owner == nil then
-				report("malformed-tag", "@within requires a class name", entry.lineOffset)
-			else
-				doc.within = owner
-			end
-		elseif name == "field" or name == "param" then
-			local entryName, typeStr, desc = parseNamedEntry(entry)
-			if entryName == nil then
-				report("malformed-tag", "@" .. name .. " requires a name", entry.lineOffset)
-			else
-				local list = if name == "field" then doc.fields else doc.params
-				table.insert(list, { name = entryName, type = typeStr, desc = desc })
-			end
-		elseif name == "return" then
-			local typeStr, desc = splitTypeDesc(arg)
-			table.insert(doc.returns, { type = typeStr, desc = mergeDesc(desc, entry) })
-		elseif name == "error" then
-			local typeStr, desc = splitTypeDesc(arg)
-			table.insert(doc.errors, { type = typeStr or "unknown", desc = mergeDesc(desc, entry) })
-		elseif name == "deprecated" then
-			local version = arg:match("^([^%s]+)")
-			-- `@deprecated -- note` starts with the separator: no version string.
-			if version ~= nil and version:sub(1, 1) == "-" then
-				version = nil
-			end
-			local _, desc = splitTypeDesc(arg)
-			doc.deprecated = { version = version, desc = mergeDesc(desc, entry) }
-		elseif name == "since" then
-			doc.since = if arg ~= "" then arg else nil
-		elseif name == "external" then
-			local extName, url = arg:match("^(%S+)%s+(%S+)")
-			if extName == nil or url == nil then
-				report("malformed-tag", "@external requires a name and a URL", entry.lineOffset)
-			else
-				table.insert(doc.externals, { name = extName, url = url, lineOffset = entry.lineOffset })
-			end
-		elseif name == "tag" then
-			-- `@tag name -- comment` strips the trailing comment like other data
-			-- tags; with no separator, the entire argument is the tag value.
-			local value = splitTypeDesc(arg)
-			if value ~= nil and value ~= "" then
-				table.insert(doc.customTags, value)
-			end
-		end
+		applyEntry(doc, entry, report)
 	end
-
 	return doc
 end
 
---- Returns the class name declared by `@class`, if any.
+--- Parses and caches a `DocBlock`'s tags (`ParsedDoc` is immutable once parsed).
+function tags.parseBlock(block: any): ParsedDoc
+	local cached = block.parsed
+	if cached == nil then
+		cached = tags.parse(block.content)
+		block.parsed = cached
+	end
+	return cached
+end
+
 function tags.className(doc: ParsedDoc): string?
 	local placing = doc.placing
 	return if placing ~= nil and placing.kind == "class" then placing.name else nil

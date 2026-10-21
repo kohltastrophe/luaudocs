@@ -1,13 +1,9 @@
---- Value-based type inference for members without an explicit type annotation,
---- cast, or `@prop` type. For example, a property assigned `RunService:IsClient()`
---- infers as `boolean` even without `: boolean`.
+--- Infers property types from assigned values when no explicit annotation,
+--- cast, or `@prop` type is present.
 ---
---- Only unambiguous inferences belong here: a rendered inferred type looks
---- identical to a declared type, so a plausible guess is worse than omitting
---- the type. Arithmetic (`a + b` could be `Vector3` or `number`) is excluded,
---- engine method lookups apply only to known engine receivers, and instance
---- paths stop at the first `.X` step (`script.Name` could be a string property
---- or a child Instance).
+--- Only unambiguous inferences belong here because an inferred type renders
+--- identically to a declared type. Arithmetic (`a + b`), non-engine receivers,
+--- and dotted instance paths (`script.Name`) are left untyped.
 ---
 --- Cross-module call return types are inferred in `model/finalize.luau`, where
 --- the full module graph's surfaces are available.
@@ -172,7 +168,7 @@ function infer.fromValue(value: SymValue): { Seg }?
 		if value.metatable ~= nil then
 			return nil
 		end
-		return if value.isEmptyLiteral and #(value.fields :: any) == 0 then { "{}" } else nil
+		return if value.isEmptyLiteral and (value.fields == nil or #value.fields == 0) then { "{}" } else nil
 	end
 	if value.kind ~= "opaque" then
 		return nil
@@ -203,6 +199,15 @@ function infer.fromValue(value: SymValue): { Seg }?
 		return nil
 	end
 	return fromStaticPath(value.callee, calleeValue ~= nil)
+end
+
+--- Infers the type segments for a known property on a Roblox service
+--- (such as `Players.LocalPlayer` -> `Player`).
+function infer.fromServiceMember(service: string?, member: string?): { Seg }?
+	if service == "Players" and member == "LocalPlayer" then
+		return { ref("Player") }
+	end
+	return nil
 end
 
 return infer

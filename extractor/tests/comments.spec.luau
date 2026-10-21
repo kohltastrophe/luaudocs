@@ -22,8 +22,8 @@ return function()
 	-- doc-ness is the only classification: `--!` and the chatter below it join
 	-- into one inert non-doc run, while the `---` lines form their own block
 	t.eq(#blocks, 3, "three blocks (non-doc run, doc run, doc)")
-	t.eq(blocks[1].doc, false, "hot + chatter run is not doc")
-	t.eq(blocks[2].doc, true, "doc run is doc")
+	t.check(not blocks[1].doc, "hot + chatter run is not doc")
+	t.check(blocks[2].doc, "doc run is doc")
 	t.eq(blocks[2].content, { "Module doc A", "Module doc B" }, "doc run content, delimiters stripped")
 	t.eq(blocks[2].span.endLine + 1, 6, "doc run attach line (blank line below -> floats)")
 	t.eq(blocks[3].content, { "Attached to M" }, "attached doc content")

@@ -1,4 +1,4 @@
---- Shared assembly context and member builders: the `Ctx` threaded through
+--- Shared assembly context and member builders. Holds the `Ctx` threaded through
 --- every pass, shared helpers (IDs, source spans, badges, visibility, and
 --- memoized doc-block parsing), and the member builders (signatures, functions,
 --- properties, containers, and the recursive walk over a table `SymValue`'s fields).
@@ -43,7 +43,7 @@ export type Ctx = {
 	externals: { [string]: ExternalEntry },
 	-- Pending `@within` relocations. A member without `__valueSym` is a
 	-- tag-declared stub (with no backing code) that can merge into any existing
-	-- member of the same name; a code-backed member can only merge into an alias
+	-- member of the same name, whereas a code-backed member can only merge into an alias
 	-- of the same `SymValue`. `targetContainer` pins a floating member without
 	-- `@within` to its own module's root container rather than a same-named
 	-- container in another module.
@@ -55,7 +55,6 @@ export type Ctx = {
 			targetContainer: any?,
 		}
 	},
-	docCache: { [any]: ParsedDoc }, -- doc block -> its ParsedDoc
 	forwardedBlocks: { [any]: boolean }, -- blocks whose tag diagnostics have already been reported
 	-- Module graph set by `model.assemble` so `detect` can follow calls across
 	-- modules (absent in isolated unit tests).
@@ -72,7 +71,6 @@ function members.newCtx(diag: Collector): Ctx
 		typesByModule = {},
 		externals = {},
 		pendingMoves = {},
-		docCache = {},
 		forwardedBlocks = {},
 	}
 end
@@ -138,7 +136,7 @@ function members.visibilityOf(name: string, doc: ParsedDoc, exempt: boolean?): s
 	return if name:sub(1, 1) == "_" then "private" else "public"
 end
 
---- Formats a doc-model ID: `<moduleId>#<kind>.<qualified name>`, where the
+--- Formats a doc-model ID (`<moduleId>#<kind>.<qualified name>`), where the
 --- qualified name is `Container.member` for members and the bare name for
 --- classes and types.
 function members.memberId(modId: string, kind: string, container: string?, name: string): string
@@ -146,7 +144,7 @@ function members.memberId(modId: string, kind: string, container: string?, name:
 	return modId .. "#" .. kind .. "." .. qualified
 end
 
---- Luau reserved keywords (`continue` is contextual, so it is excluded):
+--- Luau reserved keywords (`continue` is contextual, so it is excluded).
 --- `T.end` is a syntax error, so bracket access `T["end"]` is required.
 --- Mirrors `LUAU_KEYWORDS` in `src/pages.ts`.
 local LUAU_KEYWORDS: { [string]: boolean } = {}
@@ -247,7 +245,6 @@ function members.placingDoc(doc: ParsedDoc): string?
 	return members.mergeDescs(if doc.desc ~= "" then doc.desc else nil, doc.placingDesc)
 end
 
---- Finds the first entry in `list` with `entry.name == name`.
 function members.byName(list: { any }, name: string): any?
 	for _, entry in list do
 		if entry.name == name then
@@ -295,25 +292,19 @@ function members.forwardTagDiagnostics(ctx: Ctx, modId: string, block: any, doc:
 end
 
 --- Parses and caches a doc block's tags (`ParsedDoc` is immutable once parsed).
-function members.parseTags(ctx: Ctx, block: any): ParsedDoc
-	local cached = ctx.docCache[block]
-	if cached == nil then
-		cached = tagsMod.parse(block.content)
-		ctx.docCache[block] = cached
-	end
-	return cached
+function members.parseTags(_ctx: Ctx, block: any): ParsedDoc
+	return tagsMod.parseBlock(block)
 end
 
 function members.parseBlock(ctx: Ctx, modId: string, block: any?): ParsedDoc
 	if block == nil then
 		return EMPTY_DOC
 	end
-	local doc = members.parseTags(ctx, block)
+	local doc = tagsMod.parseBlock(block)
 	members.forwardTagDiagnostics(ctx, modId, block, doc)
 	return doc
 end
 
---- Wraps `segs.fromTag` for optional tag type strings.
 function members.tagType(display: string?, generics: { [string]: boolean }?): { Seg }?
 	return if display ~= nil then segs.fromTag(display, generics) else nil
 end
@@ -377,6 +368,100 @@ function members.signatureSegs(sig: any): { Seg }
 	return segs.canonical(segs.signature(sig.__generics or {}, sig.params, returnTail(sig)))
 end
 
+local function resolveTagType(rawType: any, genericNames: { [string]: boolean }?): { Seg }?
+	return if type(rawType) == "string" then members.tagType(rawType, genericNames) else rawType
+end
+
+--- Merges `@param` tags (or a tag stub's `signature.params`) into `params` by
+--- parameter name. Tag types override AST types when `overrideType` is true
+--- (or fill `nil` parameter types when merging a `@within` stub), and unmatched
+--- `@param` tags append when `hasCodeParams` is false or emit `param-mismatch`.
+function members.mergeParamTags(
+	params: { any },
+	paramTags: { any },
+	hasCodeParams: boolean,
+	fnName: string,
+	file: string,
+	line: number?,
+	diag: Collector,
+	overrideType: boolean,
+	genericNames: { [string]: boolean }?
+)
+	for _, tagParam in paramTags do
+		local docText = tagParam.desc or tagParam.doc
+		local found = members.byName(params, tagParam.name)
+		if found ~= nil then
+			-- Keep any trailing comment doc when `@param` only supplies a type override.
+			found.doc = docText or found.doc
+			if tagParam.type ~= nil and (overrideType or found.type == nil) then
+				found.type = resolveTagType(tagParam.type, genericNames)
+			end
+		elseif not hasCodeParams then
+			table.insert(params, {
+				name = tagParam.name,
+				type = resolveTagType(tagParam.type, genericNames),
+				doc = docText,
+			})
+		else
+			diag:warn(
+				"param-mismatch",
+				string.format("@param %s does not match any parameter of %s", tagParam.name, fnName),
+				file,
+				line
+			)
+		end
+	end
+end
+
+--- Merges `@return` tags (or a tag stub's `signature.returns`) by position.
+--- Appends extra `@return` tags when the function has no return annotation, or
+--- warns on `return-count-mismatch`.
+function members.mergeReturnTags(
+	returns: { any },
+	returnTags: { any },
+	hasReturnAnnotation: boolean,
+	fnName: string,
+	file: string,
+	line: number?,
+	diag: Collector,
+	overrideType: boolean?,
+	genericNames: { [string]: boolean }?
+): boolean
+	local tagReturns = false
+	for i, tagReturn in returnTags do
+		local docText = tagReturn.desc or tagReturn.doc
+		local target = returns[i]
+		if target ~= nil then
+			target.doc = docText or target.doc
+			if tagReturn.type ~= nil and (overrideType or target.type == nil) then
+				target.type = resolveTagType(tagReturn.type, genericNames)
+				tagReturns = true
+			end
+		elseif #returns == 0 or not hasReturnAnnotation then
+			local row: any = {
+				type = resolveTagType(tagReturn.type, genericNames),
+				doc = docText,
+			}
+			if next(row) == nil then
+				-- Mark empty `@return` rows so `emit` encodes `{}` instead of `[]`.
+				emitMod.record(row)
+			end
+			table.insert(returns, row)
+			if tagReturn.type ~= nil then
+				tagReturns = true
+			end
+		else
+			diag:warn(
+				"return-count-mismatch",
+				string.format("@return #%d exceeds the annotated returns of %s", i, fnName),
+				file,
+				line
+			)
+		end
+	end
+	return tagReturns
+end
+
 local function buildSignature(
 	ctx: Ctx,
 	mod: ModuleData,
@@ -389,7 +474,8 @@ local function buildSignature(
 	dropSelf: boolean?
 ): any
 	local qualified = if containerName == "" then name else containerName .. "." .. name
-	local parsedFile = mod.parsed :: any
+	local parsedFile: any = mod.parsed
+	local trailingIndex: any = mod.trailingIndex
 	local generics: { any } = {}
 	local genericNames: { [string]: boolean } = {}
 	if fnNode ~= nil then
@@ -409,7 +495,7 @@ local function buildSignature(
 		for i, param in params do
 			local line = paramLines[i]
 			if line ~= nil and line ~= sigLine and line ~= retLine and (i == #params or paramLines[i + 1] ~= line) then
-				param.doc = comments.trailingText(mod.trailingIndex :: any, line)
+				param.doc = comments.trailingText(trailingIndex, line)
 			end
 		end
 		if dropSelf and params[1] ~= nil and params[1].name == "self" then
@@ -423,63 +509,28 @@ local function buildSignature(
 		table.insert(returns, { type = segs.inline(parsedFile, node, genericNames) })
 	end
 
-	-- Merge `@param` tags by parameter name: explicit tag types override AST
-	-- types, and unmatched `@param` tags append when there is no AST function
-	-- or emit a `param-mismatch` warning when there is one.
-	for _, tagParam in doc.params do
-		local found = members.byName(params, tagParam.name)
-		if found ~= nil then
-			-- Keep any trailing comment doc when `@param` only supplies a type override.
-			found.doc = tagParam.desc or found.doc
-			if tagParam.type ~= nil then
-				found.type = members.tagType(tagParam.type, genericNames)
-			end
-		elseif fnNode == nil then
-			table.insert(params, {
-				name = tagParam.name,
-				type = members.tagType(tagParam.type, genericNames),
-				doc = tagParam.desc,
-			})
-		else
-			ctx.diag:warn(
-				"param-mismatch",
-				string.format("@param %s does not match any parameter of %s", tagParam.name, qualified),
-				mod.id,
-				memberLine
-			)
-		end
-	end
-
-	-- Merge `@return` tags by position; append extra `@return` tags when the
-	-- function has no return annotation, or warn on `return-count-mismatch`.
-	local tagReturns = false
-	for i, tagReturn in doc.returns do
-		tagReturns = tagReturns or tagReturn.type ~= nil
-		local target = returns[i]
-		if target ~= nil then
-			target.doc = tagReturn.desc
-			if tagReturn.type ~= nil then
-				target.type = members.tagType(tagReturn.type, genericNames)
-			end
-		elseif #returns == 0 or returnAnnotation == nil then
-			local row: any = {
-				type = members.tagType(tagReturn.type, genericNames),
-				doc = tagReturn.desc,
-			}
-			if next(row) == nil then
-				-- Mark empty `@return` rows so `emit` encodes `{}` instead of `[]`.
-				emitMod.record(row)
-			end
-			table.insert(returns, row)
-		else
-			ctx.diag:warn(
-				"return-count-mismatch",
-				string.format("@return #%d exceeds the annotated returns of %s", i, qualified),
-				mod.id,
-				memberLine
-			)
-		end
-	end
+	members.mergeParamTags(
+		params,
+		doc.params,
+		fnNode ~= nil,
+		qualified,
+		mod.id,
+		memberLine,
+		ctx.diag,
+		true,
+		genericNames
+	)
+	local tagReturns = members.mergeReturnTags(
+		returns,
+		doc.returns,
+		returnAnnotation ~= nil,
+		qualified,
+		mod.id,
+		memberLine,
+		ctx.diag,
+		true,
+		genericNames
+	)
 
 	-- Keep `callee` separate from `segs` so re-exports can swap the callee name
 	-- without rebuilding the parameter/return display.
@@ -507,7 +558,7 @@ end
 
 --- Returns the CST local binding for the second argument of `setmetatable(x, Class)`
 --- when it is a local variable reference.
-function members.setmetatableClassLocal(callNode: any): any?
+local function setmetatableClassLocal(callNode: any): any?
 	callNode = parseMod.unwrapExpr(callNode, true)
 	if callNode == nil or callNode.tag ~= "call" then
 		return nil
@@ -524,7 +575,7 @@ function members.setmetatableClassLocal(callNode: any): any?
 	return second["local"]
 end
 
---- Returns the class local referenced by a metatable type alias in either idiom:
+--- Returns the class local referenced by a metatable type alias in either
 --- `typeof(setmetatable(_, Class))` or `setmetatable<_, typeof(Class)>`.
 function members.setmetatableTypeClassLocal(typeNode: any): any?
 	typeNode = parseMod.unwrapType(typeNode)
@@ -532,7 +583,7 @@ function members.setmetatableTypeClassLocal(typeNode: any): any?
 		return nil
 	end
 	if typeNode.tag == "typeof" then
-		return members.setmetatableClassLocal(typeNode.expression)
+		return setmetatableClassLocal(typeNode.expression)
 	end
 	if typeNode.tag ~= "reference" or typeNode.prefix ~= nil or typeNode.name == nil then
 		return nil
@@ -565,24 +616,23 @@ local function constructedSym(mod: ModuleData, fnNode: any): any?
 		return nil
 	end
 	local retExpr = parseMod.unwrapExpr(first.node, true)
-	local classLocal = members.setmetatableClassLocal(retExpr)
+	local classLocal = setmetatableClassLocal(retExpr)
 	if classLocal == nil and retExpr ~= nil and retExpr.tag == "local" then
 		for _, stat in stats do
 			if stat.tag == "local" and stat.values ~= nil then
 				for i, varPair in stat.variables do
 					if varPair.node == retExpr["local"] and stat.values[i] ~= nil then
-						classLocal = members.setmetatableClassLocal(stat.values[i].node)
+						classLocal = setmetatableClassLocal(stat.values[i].node)
 						break
 					end
 				end
 			end
 		end
 	end
-	if classLocal == nil then
+	if classLocal == nil or mod.surface == nil then
 		return nil
 	end
-	local env = (mod.surface :: any).env
-	return env[classLocal]
+	return mod.surface.env[classLocal]
 end
 
 function members.buildFn(
@@ -599,10 +649,11 @@ function members.buildFn(
 	local isMetamethod = surfaceMod.isMetamethod(name)
 	local placingKind = if doc.placing ~= nil then doc.placing.kind else nil
 	local fnNode = field.value.fnNode
+	local isSelf = not isColon and surfaceMod.isSelfMethod(fnNode)
 	local kind = "function"
 	if isMetamethod then
 		kind = "metamethod"
-	elseif isColon or placingKind == "method" or surfaceMod.isSelfMethod(fnNode) then
+	elseif isColon or placingKind == "method" or isSelf then
 		kind = "method"
 	end
 	if placingKind == "function" then
@@ -611,7 +662,7 @@ function members.buildFn(
 	local accessor = if kind == "method" then ":" else "."
 	-- Dot-defined methods with an explicit `self` parameter (`function T.f(self: T, ...)`)
 	-- display with `:` syntax (`T:f(...)`) and omit `self` from the parameter list.
-	local dropSelf = kind == "method" and not isColon and surfaceMod.isSelfMethod(fnNode)
+	local dropSelf = kind == "method" and isSelf
 	local memberLine = field.defSpan and field.defSpan.beginLine
 	local visibility = members.visibilityOf(name, doc, isMetamethod)
 
@@ -669,11 +720,11 @@ function members.buildProp(
 ): any
 	local name = field.name
 	local visibility = members.visibilityOf(name, doc)
-	local parsedFile = mod.parsed :: any
+	local parsedFile: any = mod.parsed
 
 	-- Prefer `@prop` tag types, then explicit AST type annotations/casts (falling
 	-- back to the owning table's type annotation when unannotated or cast to a
-	-- placeholder `:: any`), and finally literal/constructor value inference.
+	-- placeholder `any`), and finally literal/constructor value inference.
 	local typeNode = field.declaredType or field.value.castType or field.value.annotation
 	local isAny = typeNode ~= nil
 		and typeNode.tag == "reference"
@@ -773,33 +824,102 @@ end
 --- Returns the highest-priority doc block for a field: a later `function M.f`
 --- definition block, the table field's own block, or the assigned local's block.
 function members.docBlockOf(field: any): any?
-	return field.defDoc or field.fieldDoc or (field.value :: any).defDoc
+	return field.defDoc or field.fieldDoc or field.value.defDoc
 end
 
---- Builds members from `sym.fields` into `out`. `ownerSym` overrides the table
---- that `self` and readonly detection resolve against (used when harvesting
---- metamethods from a metatable attached to `ownerSym`).
-function members.buildMembers(ctx: Ctx, mod: ModuleData, containerName: string, sym: any, out: any, ownerSym: any?)
+local function tryAddReexport(
+	ctx: Ctx,
+	mod: ModuleData,
+	containerName: string,
+	field: any,
+	doc: ParsedDoc,
+	secondaryDesc: string?,
+	owner: any,
+	out: any,
+	mounted: any
+): boolean
+	if mounted.kind ~= "require" and mounted.kind ~= "import" then
+		return false
+	end
+	-- Emit a re-export when the target module resolved (or matched a
+	-- configured runtime alias), or fall through to `buildProp`.
+	local isImport = mounted.kind == "import"
+	local base = if isImport then mounted.base else mounted
+	local targetModule = if base ~= nil then mod.requireTargets[base] else nil
+	local external = if base ~= nil then mod.externalRequires[base] else nil
+	if external == nil and targetModule == nil then
+		return false
+	end
+	local value = field.value
+	table.insert(out.reexports, {
+		id = members.memberId(mod.id, "reexport", out.within, field.name),
+		name = field.name,
+		within = out.within,
+		targetModule = if external ~= nil then external.spelling else targetModule,
+		targetMember = if isImport then table.concat(mounted.path or {}, ".") else nil,
+		url = if external ~= nil then external.url else nil,
+		doc = if doc.desc ~= "" then doc.desc else nil,
+		realm = tagsMod.realmList(doc.flags) or detectMod.propRealm(value),
+		__external = if external ~= nil then true else nil,
+		__path = if external == nil and isImport then mounted.path else nil,
+		__line = if external == nil then field.keySpan.beginLine else nil,
+		__sink = if external == nil and isImport then out.members else nil,
+		__prop = if external == nil and isImport
+			then members.buildProp(ctx, mod, containerName, field, doc, secondaryDesc, owner)
+			else nil,
+	})
+	if external ~= nil and ctx.externals[external.spelling] == nil then
+		ctx.externals[external.spelling] = { url = external.url, alias = external.alias, path = external.path }
+	end
+	return true
+end
+
+--- Builds members from `sym.fields` into `out` (or queues only `@within`
+--- members into `ctx.pendingMoves` when `out` is `nil` for a non-surfaced
+--- sidecar module). `ownerSym` overrides the table that `self` and readonly
+--- detection resolve against (used when harvesting metamethods from a
+--- metatable attached to `ownerSym`).
+function members.buildMembers(ctx: Ctx, mod: ModuleData, containerName: string, sym: any, out: any?, ownerSym: any?)
 	local owner = ownerSym or sym
-	for _, field in sym.fields do
+	for _, field in sym.fields or {} do
 		-- Skip string keys containing dots (`M["A.b"]`), which would collide
 		-- with nested container member IDs (`M.A.b`).
 		if field.name:find(".", 1, true) ~= nil then
 			continue
 		end
+		local value = field.value
+		-- Unwrap realm-guarded mounts (`IsServer() and require(X)`) so they
+		-- emit as re-exports with a realm badge.
+		local mounted = surfaceMod.unguard(value)
 		local block = members.docBlockOf(field)
+		if out == nil then
+			if block == nil then
+				continue
+			end
+			local sidecarDoc = members.parseTags(ctx, block)
+			if sidecarDoc.within == nil then
+				continue
+			end
+			if
+				not sidecarDoc.flags.ignore
+				and value.kind ~= "function"
+				and (value.kind == "table" or mounted.kind == "require" or mounted.kind == "import")
+			then
+				continue
+			end
+		end
 		local doc = members.parseBlock(ctx, mod.id, block)
 		if block == nil and mod.claimIndex ~= nil then
 			local ownerEntry = detectMod.ownerFieldEntry(mod, owner, field.name)
 			local entryBlock = if ownerEntry ~= nil and ownerEntry.key ~= nil
-				then (mod.claimIndex :: any)[ownerEntry.key.location.beginLine]
+				then mod.claimIndex[ownerEntry.key.location.beginLine]
 				else nil
 			if entryBlock ~= nil then
 				doc = members.parseTags(ctx, entryBlock)
 			end
 		end
 		local secondaryDesc: string? = nil
-		if field.defDoc ~= nil and field.fieldDoc ~= nil then
+		if out ~= nil and field.defDoc ~= nil and field.fieldDoc ~= nil then
 			local fieldParsed = members.parseBlock(ctx, mod.id, field.fieldDoc)
 			secondaryDesc = fieldParsed.desc
 		end
@@ -807,52 +927,19 @@ function members.buildMembers(ctx: Ctx, mod: ModuleData, containerName: string, 
 			continue
 		end
 
-		local member: any = nil
-		local value = field.value
-		-- Unwrap realm-guarded mounts (`IsServer() and require(X)`) so they
-		-- emit as re-exports with a realm badge.
-		local mounted = surfaceMod.unguard(value)
-
-		if mounted.kind == "require" or mounted.kind == "import" then
-			-- Emit a re-export when the target module resolved (or matched a
-			-- configured runtime alias); otherwise fall through to `buildProp`.
-			local isImport = mounted.kind == "import"
-			local base = if isImport then mounted.base else mounted
-			local targetModule = if base ~= nil then mod.requireTargets[base] else nil
-			local external = if base ~= nil then mod.externalRequires[base] else nil
-			if external ~= nil or targetModule ~= nil then
-				table.insert(out.reexports, {
-					id = members.memberId(mod.id, "reexport", out.within, field.name),
-					name = field.name,
-					within = out.within,
-					targetModule = if external ~= nil then external.spelling else targetModule,
-					targetMember = if isImport then table.concat(mounted.path :: any, ".") else nil,
-					url = if external ~= nil then external.url else nil,
-					doc = if doc.desc ~= "" then doc.desc else nil,
-					realm = tagsMod.realmList(doc.flags) or detectMod.propRealm(value),
-					__external = if external ~= nil then true else nil,
-					__path = if external == nil and isImport then mounted.path else nil,
-					__line = if external == nil then field.keySpan.beginLine else nil,
-					__sink = if external == nil and isImport then out.members else nil,
-					__prop = if external == nil and isImport
-						then members.buildProp(ctx, mod, containerName, field, doc, secondaryDesc, owner)
-						else nil,
-				})
-				if external ~= nil and ctx.externals[external.spelling] == nil then
-					ctx.externals[external.spelling] =
-						{ url = external.url, alias = external.alias, path = external.path }
-				end
-				continue
-			end
+		if out ~= nil and tryAddReexport(ctx, mod, containerName, field, doc, secondaryDesc, owner, out, mounted) then
+			continue
 		end
 
+		local member: any = nil
 		if value.kind == "function" then
 			if block == nil and surfaceMod.isMetamethod(field.name) then
 				continue -- skip undocumented metamethods (`__index`, `__newindex`, etc.)
 			end
 			member = members.buildFn(ctx, mod, containerName, field, doc, secondaryDesc, owner)
 		elseif
-			value.kind == "table"
+			out ~= nil
+			and value.kind == "table"
 			and field.declaredType == nil
 			and value.castType == nil
 			and value.annotation == nil
@@ -882,12 +969,14 @@ function members.buildMembers(ctx: Ctx, mod: ModuleData, containerName: string, 
 		-- aliases of the same value from collisions between two distinct definitions.
 		member.__valueSym = members.symKey(value)
 
-		if doc.within ~= nil and doc.within ~= containerName then
+		if doc.within ~= nil and (out == nil or doc.within ~= containerName) then
 			table.insert(ctx.pendingMoves, { member = member, targetName = doc.within, fromModule = mod.id })
 			continue
 		end
 
-		table.insert(out.members, member)
+		if out ~= nil then
+			table.insert(out.members, member)
+		end
 	end
 end
 

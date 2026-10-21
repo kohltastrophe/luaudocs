@@ -6,6 +6,8 @@ local surfaceMod = require("../surface")
 local utilMod = require("../util")
 local requiresMod = require("../requires")
 local graphMod = require("../graph")
+local segsMod = require("../segs")
+local membersMod = require("../model/members")
 
 --- Deep structural equality (arrays + maps), for `eq` alone. `seen` pairs each
 --- table with the one it is compared against, so cyclic values (a surfaced
@@ -116,6 +118,8 @@ function harness.ok(cond: any, label: string?)
 	end
 end
 
+harness.check = harness.ok
+
 --- Records a spec that threw before finishing. The runner keeps going, so one
 --- bad spec does not discard every other result.
 function harness.crash(name: string, err: any)
@@ -133,10 +137,10 @@ end
 
 --- `harness.parse` plus the two comment indexes every doc-comment entry point
 --- needs, so a spec spells only the selector it cares about.
-function harness.parseWithComments(src: string): (any, any, any)
+function harness.parseWithComments(src: string): (any, any, any, any)
 	local parsed = harness.parse(src)
-	local claimIndex = commentsMod.claimIndex(commentsMod.segment(parsed))
-	return parsed, claimIndex, commentsMod.trailingIndex(parsed)
+	local blocks = commentsMod.segment(parsed)
+	return parsed, commentsMod.claimIndex(blocks), commentsMod.trailingIndex(parsed), blocks
 end
 
 --- `surface.evaluate` over `parseWithComments`: the one-module evaluation the
@@ -158,13 +162,15 @@ end
 
 --- Picking one entry out of a doc-model list (modules, classes, members,
 --- types, fields). Every whole-fixture spec reads its assertions this way.
-function harness.byName(list: { any }, name: string): any
-	for _, entry in list do
-		if entry.name == name then
-			return entry
-		end
+harness.byName = membersMod.byName
+
+--- Flattens a multi-line segment block to a newline-joined string.
+function harness.blockText(lines: { { segsMod.Seg } }): string
+	local parts = {}
+	for _, line in lines do
+		table.insert(parts, segsMod.text(line))
 	end
-	return nil
+	return table.concat(parts, "\n")
 end
 
 function harness.byId(list: { any }, id: string): any

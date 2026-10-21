@@ -1,6 +1,6 @@
 local t = require("./harness")
 local util = require("../util")
-local comments = require("../comments")
+local graph = require("../graph")
 local surface = require("../surface")
 local tags = require("../tags")
 local segs = require("../segs")
@@ -64,10 +64,7 @@ local function assembleInline(specs: { { id: string, src: string, surfaced: bool
 	local diag = util.diagnostics()
 	local g: any = { modules = {}, byId = {}, byAbs = {} }
 	for _, s in specs do
-		local parsed = t.parse(s.src)
-		local blocks = comments.segment(parsed)
-		local claimIndex = comments.claimIndex(blocks)
-		local trailingIndex = comments.trailingIndex(parsed)
+		local parsed, claimIndex, trailingIndex, blocks = t.parseWithComments(s.src)
 		local surf = surface.evaluate(parsed, claimIndex, trailingIndex)
 		local requireTargets: { [any]: string } = {}
 		local localModules: { [string]: string } = {}
@@ -79,23 +76,9 @@ local function assembleInline(specs: { { id: string, src: string, surfaced: bool
 			requireTargets[sym] = targetId
 			return targetId
 		end
-		local function walkSym(v: any)
-			if v == nil then
-				return
-			end
-			if v.kind == "require" then
-				linkReq(v)
-			elseif v.kind == "import" then
-				walkSym(v.base)
-			elseif v.kind == "function" then
-				walkSym(v.returnedRequire)
-			elseif v.kind == "table" then
-				for _, f in v.fields do
-					walkSym(f.value)
-				end
-			end
+		for _, reqSym in graph.collectSurfacedRequires(surf.result) do
+			linkReq(reqSym)
 		end
-		walkSym(surf.result)
 		for name, sym in surf.requireLocals do
 			local targetId = linkReq(sym)
 			if targetId ~= nil then
@@ -378,6 +361,13 @@ return function()
 				"\tinit: () -> (),",
 				"}",
 				"export type Foo<T> = Sub.Foo<T>",
+				"export type Bar = Sub.Bar",
+				"export type MaybeFoo<T> = Sub.Foo<T>?",
+				"export type function Inspect(box: Sub.Foo<string>)",
+				"\treturn box",
+				"end",
+				"--- @prop hidden number",
+				"--- @ignore",
 				"local M: M = { x = 1, init = nil :: any }",
 				"M.Clock = table.freeze({ now = Clock.now })",
 				"M.LocalPlayer = Util.Service.Players.LocalPlayer",
@@ -397,6 +387,7 @@ return function()
 				"\t--- boxed value",
 				"\tvalue: T,",
 				"}",
+				"export type Bar<T = string> = { item: T }",
 				"return Sub",
 			}, "\n"),
 		},
@@ -429,11 +420,28 @@ return function()
 	)
 
 	local fooType = byName(mMod.types, "Foo")
-	t.eq({ fooType.doc, segs.blockText(fooType.definition), fooType.fields }, {
+	local barType = byName(mMod.types, "Bar")
+	local maybeFoo = byName(mMod.types, "MaybeFoo")
+	local inspectFn = byName(mMod.types, "Inspect")
+	t.eq({
+		fooType.doc,
+		t.blockText(fooType.definition),
+		fooType.fields,
+		barType.generics[1].name,
+		wireSegs(barType.generics[1].default),
+		wireSegs(maybeFoo.definition[1]),
+		wireSegs(inspectFn.params),
+		byName(mMod.members, "hidden"),
+	}, {
 		"A generic box.",
 		"{\n\t--- boxed value\n\tvalue: T,\n}",
 		{ { name = "value", type = { "T" }, doc = "boxed value", line = 3, docInDisplay = true } },
-	}, "expandRespelledTypes inlines definition, fields, and doc from non-surfaced Sub")
+		"T",
+		{ { text = "string" } },
+		{ { text = "Sub.Foo", id = "M.luau#type.Foo" }, "<T>?" },
+		{ "(", "box", ": ", { text = "Sub.Foo", id = "M.luau#type.Foo" }, "<", { text = "string" }, ">", ")" },
+		nil,
+	}, "expandRespelledTypes, composite Sub.Foo<T>?, type function params, and floating @ignore")
 
 	local lpProp = byName(mMod.members, "LocalPlayer")
 	t.eq(
@@ -601,7 +609,7 @@ return function()
 		widen.kind,
 		widen.definition,
 		segs.text(widen.params),
-		segs.blockText(phase.definition),
+		t.blockText(phase.definition),
 		changed.doc,
 		changed.docInDisplay,
 		byName(renameOptions.fields, "silent").doc,

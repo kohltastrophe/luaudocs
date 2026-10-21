@@ -1,14 +1,14 @@
---- Public-surface discovery: symbolically evaluates a module chunk's statements
+--- Public-surface discovery. Symbolically evaluates a module chunk's statements
 --- and resolves what the module returns, without executing anything.
---- Also owns OOP-class classification over the surfaced tables (classify,
---- isMetamethod), which only means anything next to SymValue.
+--- Also owns OOP-class classification (`classify`, `isMetamethod`) over the
+--- evaluated `SymValue` tables.
 ---
---- The environment maps CstLocal *identity* -> SymValue; the parser links every
---- local reference to its binding via `expr.local`, so it handles shadowing for
---- us. Top-level statements are evaluated, and so are `if`/`elseif`/`else` and
---- `do` bodies (a conditional mount is still public surface); loops and
---- function bodies are not. Only the chunk's own trailing `return` defines the
---- surface: an early return inside a branch is ignored.
+--- Maps CstLocal *identity* -> SymValue. The parser links every local reference
+--- to its binding via `expr.local`, handling shadowing automatically. Evaluates
+--- top-level statements along with `if`/`elseif`/`else` and `do` bodies (a
+--- conditional mount is still public surface), while skipping loops and function
+--- bodies. Only the chunk's own trailing `return` defines the surface, ignoring
+--- early returns inside branches.
 
 local parseMod = require("./parse")
 local comments = require("./comments")
@@ -23,6 +23,8 @@ export type SymValue = {
 	fields: { SymField }?,
 	fieldIndex: { [string]: number }?,
 	metatable: SymValue?,
+	indexTarget: SymValue?, -- `MT.__index = Proto` when `Proto ~= MT`
+	origin: SymValue?, -- underlying `SymValue` before a `::` cast clone
 	frozen: boolean?, -- passed through table.freeze (shallow, like the freeze)
 	selfIndexing: boolean?, -- `T.__index = T` was assigned (the field itself is not surfaced)
 	isEmptyLiteral: boolean?, -- spelled `{}`, whatever was assigned into it later
@@ -58,8 +60,8 @@ export type SymValue = {
 export type SymField = {
 	name: string,
 	value: SymValue,
-	--- defined as `function T:name()`: decides `:` vs `.` in the rendered
-	--- callee, and one colon method makes its table a class
+	--- Defined as `function T:name()`. Decides `:` vs `.` in the rendered
+	--- callee, and one colon method makes its table a class.
 	isColonMethod: boolean,
 	declaredType: any?, -- CstType from `:: T` on the field value
 	fieldDoc: DocBlock?, -- block above the table-literal field
@@ -228,7 +230,6 @@ local function indexValue(base: SymValue, indexText: string, expr: any): SymValu
 	return opaque(expr)
 end
 
---- Looks up a named field on a table `SymValue` via `fieldIndex`.
 function surface.fieldOf(sym: SymValue, name: string): SymField?
 	local idx = (sym.fieldIndex :: { [string]: number })[name]
 	return if idx ~= nil then (sym.fields :: { SymField })[idx] else nil
@@ -260,7 +261,7 @@ local function setField(target: SymValue, name: string, field: SymField)
 	local index = target.fieldIndex :: { [string]: number }
 	local existing = index[name]
 	if existing ~= nil then
-		-- Keep the original field position; later definition data wins and docs merge.
+		-- Keep the original field position while letting later definition data win and docs merge.
 		local prev = fields[existing]
 		field.fieldDoc = field.fieldDoc or prev.fieldDoc
 		field.defDoc = field.defDoc or prev.defDoc
@@ -276,7 +277,7 @@ local function evalTable(ctx: Ctx, expr: any): SymValue
 	local value = newTable(expr.location)
 	value.isEmptyLiteral = #expr.entries == 0
 	-- A pure list of a single literal kind is the only unnamed table shape whose
-	-- element type (`{ string }`, `{ number }`) we can infer; any record or mixed
+	-- element type (`{ string }`, `{ number }`) we can infer. Any record or mixed
 	-- entry disqualifies it.
 	local itemKind: string? = nil
 	local readable = true
@@ -301,7 +302,7 @@ local function evalTable(ctx: Ctx, expr: any): SymValue
 			if entryKind ~= "list" then
 				readable = false
 			elseif readable then
-				-- Do not evaluate a nested table literal inside a list: doing so
+				-- Do not evaluate a nested table literal inside a list, as doing so
 				-- would claim the doc block above its first field, which never
 				-- belongs to an unnamed list item.
 				if unwrapExpr(entry.value).tag == "table" then
@@ -342,6 +343,150 @@ local function evalTable(ctx: Ctx, expr: any): SymValue
 	return value
 end
 
+local function evalConditionalExpr(ctx: Ctx, expr: any): SymValue
+	local thenVal = evalExpr(ctx, expr.thenExpr)
+	local elseVal = evalExpr(ctx, expr.elseExpr)
+	local elseifs = expr.elseifs or {}
+	-- `if cond then X else nil`: the `--!strict` spelling of `cond and X`.
+	if
+		#elseifs == 0
+		and elseVal.kind == "literal"
+		and elseVal.valueKind == "nil"
+		and not (thenVal.kind == "literal" and thenVal.valueKind == "nil")
+	then
+		local result = opaque(expr)
+		result.guard = evalExpr(ctx, expr.condition)
+		result.guarded = thenVal
+		return result
+	end
+	if thenVal.kind == "literal" and thenVal.valueKind ~= "nil" then
+		local kind = thenVal.valueKind
+		local same = elseVal.kind == "literal" and elseVal.valueKind == kind
+		for _, branch in elseifs do
+			if not same then
+				break
+			end
+			local bVal = evalExpr(ctx, branch.thenExpr)
+			same = bVal.kind == "literal" and bVal.valueKind == kind
+		end
+		if same then
+			return { kind = "literal", valueKind = kind, span = expr.location }
+		end
+	end
+	return opaque(expr)
+end
+
+local function evalOperatorExpr(ctx: Ctx, expr: any): SymValue
+	if expr.operator.text == "and" then
+		-- Preserving both halves lets realm detection read `guard` while
+		-- type and surface resolution read `guarded`.
+		local result = opaque(expr)
+		result.guard = evalExpr(ctx, expr.lhsOperand)
+		result.guarded = evalExpr(ctx, expr.rhsOperand)
+		return result
+	end
+	-- Unary negation preserves a numeric literal's type. Binary `-` is
+	-- subtraction, which `OPERATOR_RESULTS` intentionally omits.
+	if expr.tag == "unary" and expr.operator.text == "-" then
+		local operand = evalExpr(ctx, expr.operand)
+		if operand.kind == "literal" and operand.valueKind == "number" then
+			return { kind = "literal", valueKind = "number", span = expr.location }
+		end
+		return opaque(expr)
+	end
+	-- Only operators whose result type is fixed by Luau regardless of
+	-- metamethods belong in `OPERATOR_RESULTS`. Arithmetic and `..` are
+	-- excluded because `a + b` can produce a `Vector3` as readily as a `number`.
+	local valueKind = OPERATOR_RESULTS[expr.operator.text]
+	if valueKind == nil then
+		return opaque(expr)
+	end
+	return { kind = "literal", valueKind = valueKind, span = expr.location }
+end
+
+local function evalCallExpr(ctx: Ctx, expr: any): SymValue
+	local callee = calleePath(expr.func)
+	local args = {}
+	for _, pair in expr.arguments do
+		table.insert(args, pair.node)
+	end
+	if callee == "require" then
+		return evalRequireCall(ctx, args[1], expr.location)
+	elseif callee == "setmetatable" then
+		local target = evalExpr(ctx, args[1])
+		if target.kind == "table" then
+			local mt = evalExpr(ctx, args[2])
+			target.metatable = mt
+			if target.origin ~= nil then
+				target.origin.metatable = mt
+			end
+		end
+		return target
+	elseif callee == "table.freeze" then
+		local target = evalExpr(ctx, args[1])
+		if target.kind == "table" then
+			target.frozen = true
+			if target.origin ~= nil then
+				target.origin.frozen = true
+			end
+		end
+		return target
+	elseif callee == "game:GetService" then
+		-- Record the service name so `detect` can recognize locals bound to
+		-- realm-specific services like `RunService` or `ServerStorage`.
+		local arg = args[1]
+		if arg ~= nil and arg.tag == "string" then
+			return { kind = "opaque", callee = callee, service = arg.token.text, span = expr.location }
+		end
+	elseif callee == "table.clone" then
+		-- `table.clone` produces a distinct table with its own `fields` and
+		-- `fieldIndex` so members added to the clone do not leak onto the original.
+		local original = evalExpr(ctx, args[1])
+		if original.kind == "table" then
+			local copy = table.clone(original)
+			copy.fields = table.clone(original.fields :: { SymField })
+			copy.fieldIndex = table.clone(original.fieldIndex :: { [string]: number })
+			copy.span = expr.location
+			-- `table.clone` returns an unfrozen table even when cloning a frozen one.
+			copy.frozen = nil
+			return copy
+		end
+		return original
+	end
+	-- Methods on an engine receiver either extend an instance path
+	-- (`script.X:WaitForChild("Name")`) or call an engine Instance method.
+	local calleeValue: SymValue? = nil
+	local func = unwrapExpr(expr.func)
+	if func ~= nil and func.tag == "indexname" then
+		local method = func.index.text
+		local base = unguard(evalExpr(ctx, func.expression))
+		if func.accessor.text == ":" then
+			if
+				(method == "WaitForChild" or method == "FindFirstChild")
+				and base.kind == "ipath"
+				and args[1] ~= nil
+				and args[1].tag == "string"
+			then
+				local segs = table.clone(base.segs :: { string })
+				table.insert(segs, args[1].token.text)
+				return { kind = "ipath", segs = segs, dotted = base.dotted, span = expr.location }
+			end
+			if base.kind == "ipath" or base.service ~= nil or base.callee == "game" then
+				-- The receiver is an engine Instance, so its method return type
+				-- can be looked up directly in `engine.luau`.
+				return { kind = "opaque", callee = callee, engineMethod = method, span = expr.location }
+			end
+		end
+		-- Index into the already-evaluated `base` rather than walking `func` a second time.
+		calleeValue = indexValue(base, method, func)
+	elseif func ~= nil then
+		calleeValue = evalExpr(ctx, func)
+	end
+	local result = opaque(expr, callee)
+	result.calleeValue = calleeValue
+	return result
+end
+
 evalExpr = function(ctx: Ctx, expr: any): SymValue
 	if expr == nil then
 		return opaque(nil)
@@ -364,69 +509,18 @@ evalExpr = function(ctx: Ctx, expr: any): SymValue
 			span = expr.location,
 		}
 	elseif tag == "conditional" then
-		local thenVal = evalExpr(ctx, expr.thenExpr)
-		local elseVal = evalExpr(ctx, expr.elseExpr)
-		local elseifs = expr.elseifs or {}
-		-- `if cond then X else nil`: the `--!strict` spelling of `cond and X`.
-		if
-			#elseifs == 0
-			and elseVal.kind == "literal"
-			and elseVal.valueKind == "nil"
-			and not (thenVal.kind == "literal" and thenVal.valueKind == "nil")
-		then
-			local result = opaque(expr)
-			result.guard = evalExpr(ctx, expr.condition)
-			result.guarded = thenVal
-			return result
-		end
-		if thenVal.kind == "literal" and thenVal.valueKind ~= "nil" then
-			local kind = thenVal.valueKind
-			local same = elseVal.kind == "literal" and elseVal.valueKind == kind
-			for _, branch in elseifs do
-				if not same then
-					break
-				end
-				local bVal = evalExpr(ctx, branch.thenExpr)
-				same = bVal.kind == "literal" and bVal.valueKind == kind
-			end
-			if same then
-				return { kind = "literal", valueKind = kind, span = expr.location }
-			end
-		end
-		return opaque(expr)
+		return evalConditionalExpr(ctx, expr)
 	elseif tag == "unary" or tag == "binary" then
-		if expr.operator.text == "and" then
-			-- Preserving both halves lets realm detection read `guard` while
-			-- type and surface resolution read `guarded`.
-			local result = opaque(expr)
-			result.guard = evalExpr(ctx, expr.lhsOperand)
-			result.guarded = evalExpr(ctx, expr.rhsOperand)
-			return result
-		end
-		-- Unary negation preserves a numeric literal's type; binary `-` is
-		-- subtraction, which `OPERATOR_RESULTS` intentionally omits.
-		if tag == "unary" and expr.operator.text == "-" then
-			local operand = evalExpr(ctx, expr.operand)
-			if operand.kind == "literal" and operand.valueKind == "number" then
-				return { kind = "literal", valueKind = "number", span = expr.location }
-			end
-			return opaque(expr)
-		end
-		-- Only operators whose result type is fixed by Luau regardless of
-		-- metamethods belong in `OPERATOR_RESULTS`. Arithmetic and `..` are
-		-- excluded because `a + b` can produce a `Vector3` as readily as a `number`.
-		local valueKind = OPERATOR_RESULTS[expr.operator.text]
-		if valueKind == nil then
-			return opaque(expr)
-		end
-		return { kind = "literal", valueKind = valueKind, span = expr.location }
+		return evalOperatorExpr(ctx, expr)
 	elseif tag == "group" or tag == "instantiate" then
 		return evalExpr(ctx, expr.expression or expr.expr)
 	elseif tag == "cast" then
 		-- Shallow-clone so `castType` annotates only this use site without
 		-- mutating a shared `SymValue`, while keeping `fields` shared so later
 		-- field assignments on either reference remain visible.
-		local wrapped = table.clone(evalExpr(ctx, expr.operand))
+		local inner = evalExpr(ctx, expr.operand)
+		local wrapped = table.clone(inner)
+		wrapped.origin = inner.origin or inner
 		wrapped.castType = expr.annotation
 		return wrapped
 	elseif tag == "function" then
@@ -435,85 +529,13 @@ evalExpr = function(ctx: Ctx, expr: any): SymValue
 		local base = unguard(evalExpr(ctx, expr.expression))
 		return indexValue(base, expr.index.text, expr)
 	elseif tag == "call" then
-		local callee = calleePath(expr.func)
-		local args = {}
-		for _, pair in expr.arguments do
-			table.insert(args, pair.node)
-		end
-		if callee == "require" then
-			return evalRequireCall(ctx, args[1], expr.location)
-		elseif callee == "setmetatable" then
-			local target = evalExpr(ctx, args[1])
-			if target.kind == "table" then
-				target.metatable = evalExpr(ctx, args[2])
-			end
-			return target
-		elseif callee == "table.freeze" then
-			local target = evalExpr(ctx, args[1])
-			if target.kind == "table" then
-				target.frozen = true
-			end
-			return target
-		elseif callee == "game:GetService" then
-			-- Record the service name so `detect` can recognize locals bound to
-			-- realm-specific services like `RunService` or `ServerStorage`.
-			local arg = args[1]
-			if arg ~= nil and arg.tag == "string" then
-				return { kind = "opaque", callee = callee, service = arg.token.text, span = expr.location }
-			end
-		elseif callee == "table.clone" then
-			-- `table.clone` produces a distinct table with its own `fields` and
-			-- `fieldIndex` so members added to the clone do not leak onto the original.
-			local original = evalExpr(ctx, args[1])
-			if original.kind == "table" then
-				local copy = table.clone(original)
-				copy.fields = table.clone(original.fields :: { SymField })
-				copy.fieldIndex = table.clone(original.fieldIndex :: { [string]: number })
-				copy.span = expr.location
-				-- `table.clone` returns an unfrozen table even when cloning a frozen one.
-				copy.frozen = nil
-				return copy
-			end
-			return original
-		end
-		-- Methods on an engine receiver either extend an instance path
-		-- (`script.X:WaitForChild("Name")`) or call an engine Instance method.
-		local calleeValue: SymValue? = nil
-		local func = unwrapExpr(expr.func)
-		if func ~= nil and func.tag == "indexname" then
-			local method = func.index.text
-			local base = unguard(evalExpr(ctx, func.expression))
-			if func.accessor.text == ":" then
-				if
-					(method == "WaitForChild" or method == "FindFirstChild")
-					and base.kind == "ipath"
-					and args[1] ~= nil
-					and args[1].tag == "string"
-				then
-					local segs = table.clone(base.segs :: { string })
-					table.insert(segs, args[1].token.text)
-					return { kind = "ipath", segs = segs, dotted = base.dotted, span = expr.location }
-				end
-				if base.kind == "ipath" or base.service ~= nil or base.callee == "game" then
-					-- The receiver is an engine Instance, so its method return type
-					-- can be looked up directly in `engine.luau`.
-					return { kind = "opaque", callee = callee, engineMethod = method, span = expr.location }
-				end
-			end
-			-- Index into the already-evaluated `base` rather than walking `func` a second time.
-			calleeValue = indexValue(base, method, func)
-		elseif func ~= nil then
-			calleeValue = evalExpr(ctx, func)
-		end
-		local result = opaque(expr, callee)
-		result.calleeValue = calleeValue
-		return result
+		return evalCallExpr(ctx, expr)
 	end
 	return opaque(expr)
 end
 
 --- Returns true for expressions that re-bind an existing value (`Foo`, `M.sub`)
---- rather than defining a new one; they evaluate to the original's shared `SymValue`.
+--- rather than defining a new one. They evaluate to the original's shared `SymValue`.
 local function isRebindExpr(node: any): boolean
 	node = unwrapExpr(node)
 	return node ~= nil and (node.tag == "local" or node.tag == "indexname")
@@ -546,6 +568,170 @@ local function bindLocal(ctx: Ctx, cstLocal: any, value: SymValue, doc: DocBlock
 	end
 end
 
+local function processLocalStat(ctx: Ctx, stat: any)
+	local doc = comments.claim(ctx.claimIndex, parseMod.effectiveStartLine(stat))
+	local values = stat.values or {}
+	for i, varPair in stat.variables do
+		local cstLocal = varPair.node
+		local valuePair = values[i]
+		local value = if valuePair ~= nil then evalExpr(ctx, valuePair.node) else opaque(nil)
+		-- An alias re-bind (`local F = Foo`) returns the original's own
+		-- `SymValue`. Do not overwrite its docs or stamp the alias local's
+		-- type annotation onto the shared value.
+		if
+			cstLocal.annotation ~= nil
+			and value.annotation == nil
+			and not isRebindExpr(if valuePair ~= nil then valuePair.node else nil)
+		then
+			value.annotation = cstLocal.annotation
+		end
+		if value.span == nil then
+			value.span = stat.location
+		end
+		bindLocal(ctx, cstLocal, value, doc, i == 1)
+	end
+end
+
+local function processFunctionStat(ctx: Ctx, stat: any)
+	local doc = comments.claim(ctx.claimIndex, parseMod.effectiveStartLine(stat))
+	local nameExpr = stat.name
+	if nameExpr ~= nil and nameExpr.tag == "indexname" then
+		local target, fieldName, accessor = resolveIndexChain(ctx, nameExpr)
+		if target ~= nil then
+			setField(target, fieldName :: string, {
+				name = fieldName :: string,
+				value = newFunction(ctx, stat.func, nil, stat.location),
+				isColonMethod = accessor == ":",
+				defDoc = doc,
+				keySpan = nameExpr.index.location or stat.location,
+				defSpan = stat.location,
+			})
+		end
+	elseif nameExpr ~= nil and nameExpr.tag == "local" then
+		ctx.env[nameExpr["local"]] = newFunction(ctx, stat.func, doc, stat.location)
+	end
+end
+
+local function processAssignStat(ctx: Ctx, stat: any)
+	local doc = comments.claim(ctx.claimIndex, parseMod.effectiveStartLine(stat))
+	local values = stat.values or {}
+	-- Evaluate all right-hand sides before mutating any left-hand bindings
+	-- so parallel assignments like `a, b = b, a` read the pre-statement state.
+	local rhsValues: { SymValue } = {}
+	for i in stat.variables do
+		local valuePair = values[i]
+		rhsValues[i] = if valuePair ~= nil then evalExpr(ctx, valuePair.node) else opaque(nil)
+	end
+	for i, varPair in stat.variables do
+		local lhs = varPair.node
+		local valuePair = values[i]
+		local rhs = rhsValues[i]
+		if lhs.tag == "local" then
+			bindLocal(ctx, lhs["local"], rhs, doc, i == 1)
+		elseif lhs.tag == "indexname" then
+			local target, fieldName = resolveIndexChain(ctx, lhs)
+			-- `__index` is metatable machinery, not a public member. Surfacing
+			-- it would make `T.__index = T` list the class as a field of itself.
+			-- Record `selfIndexing = true` instead (see `isSelfIndexing`).
+			if target ~= nil and fieldName == "__index" then
+				if rhs.kind == "table" and rhs.fields == target.fields then
+					target.selfIndexing = true
+				elseif rhs.kind == "table" or rhs.kind == "opaque" then
+					target.indexTarget = rhs
+				end
+			elseif target ~= nil then
+				local rhsNode = if valuePair ~= nil then unwrapExpr(valuePair.node) else nil
+				local declaredType = if rhsNode ~= nil and rhsNode.tag == "cast" then rhsNode.annotation else nil
+				setField(target, fieldName :: string, {
+					name = fieldName :: string,
+					value = rhs,
+					isColonMethod = false,
+					declaredType = declaredType,
+					defDoc = if i == 1 then doc else nil,
+					trailingDesc = comments.trailingText(ctx.trailingIndex, lhs.index.location.beginLine),
+					keySpan = lhs.index.location,
+					defSpan = stat.location,
+				})
+			end
+		end
+	end
+end
+
+local function postProcessResult(ctx: Ctx, result: SymValue, evalFactoryBody: (statements: any) -> SymValue?)
+	-- Delegate fields from `setmetatable(M, { __index = Proto })` when `Proto`
+	-- is another table or a local factory call (`local Registry = new()`).
+	local mt = result.metatable
+	if mt ~= nil and mt.kind == "table" then
+		local idxField = surface.fieldOf(mt, "__index")
+		local proto = if idxField ~= nil then idxField.value else mt.indexTarget
+		if
+			proto ~= nil
+			and proto.kind == "opaque"
+			and proto.calleeValue ~= nil
+			and proto.calleeValue.kind == "function"
+		then
+			local body = proto.calleeValue.fnNode and proto.calleeValue.fnNode.body
+			if body ~= nil then
+				proto = evalFactoryBody(body.statements) or proto
+			end
+		end
+		if proto ~= nil and proto.kind == "table" and proto.fields ~= result.fields then
+			for _, f in proto.fields :: { SymField } do
+				if surface.fieldOf(result, f.name) == nil then
+					setField(result, f.name, f)
+				end
+			end
+		end
+	end
+	-- Synthesize module mounts declared as `Key: typeof(require(...))` on the
+	-- returned table's type annotation (lazy `__index` module tables).
+	local ann = surface.unwrapTableType(result.annotation or result.castType, ctx.types)
+	if ann ~= nil then
+		for _, entry in ann.entries do
+			if
+				parseMod.isTypeProperty(entry)
+				and entry.key ~= nil
+				and surface.fieldOf(result, entry.key.text) == nil
+			then
+				local valType = parseMod.unwrapType(entry.value)
+				local reqSym = if valType ~= nil and valType.tag == "typeof"
+					then evalRequireExpr(ctx, valType.expression or valType.expr)
+					else nil
+				if reqSym ~= nil then
+					setField(result, entry.key.text, {
+						name = entry.key.text,
+						value = reqSym,
+						isColonMethod = false,
+						fieldDoc = comments.claim(ctx.claimIndex, entry.key.location.beginLine),
+						keySpan = entry.key.location,
+						defSpan = entry.location or entry.key.location,
+					})
+				end
+			end
+		end
+	end
+end
+
+local function processBranchStatements(stat: any, processStatements: (stats: any, topLevel: boolean) -> ())
+	if stat.tag == "conditional" then
+		-- Conditional mounts are part of the public surface
+		-- (`if isClient then M.UI = require(script.UI) end`).
+		if stat.thenBlock ~= nil then
+			processStatements(stat.thenBlock.statements, false)
+		end
+		for _, branch in stat.elseifs or {} do
+			if branch.thenBlock ~= nil then
+				processStatements(branch.thenBlock.statements, false)
+			end
+		end
+		if stat.elseBlock ~= nil then
+			processStatements(stat.elseBlock.statements, false)
+		end
+	elseif stat.tag == "do" and stat.body ~= nil then
+		processStatements(stat.body.statements, false)
+	end
+end
+
 function surface.evaluate(
 	parsed: Parsed,
 	claimIndex: { [number]: DocBlock },
@@ -569,91 +755,14 @@ function surface.evaluate(
 		end
 
 		if tag == "local" then
-			local doc = comments.claim(claimIndex, parseMod.effectiveStartLine(stat))
-			local values = stat.values or {}
-			for i, varPair in stat.variables do
-				local cstLocal = varPair.node
-				local valuePair = values[i]
-				local value = if valuePair ~= nil then evalExpr(ctx, valuePair.node) else opaque(nil)
-				-- An alias re-bind (`local F = Foo`) returns the original's own
-				-- `SymValue`: do not overwrite its docs or stamp the alias local's
-				-- type annotation onto the shared value.
-				if
-					cstLocal.annotation ~= nil
-					and value.annotation == nil
-					and not isRebindExpr(if valuePair ~= nil then valuePair.node else nil)
-				then
-					value.annotation = cstLocal.annotation
-				end
-				if value.span == nil then
-					value.span = stat.location
-				end
-				bindLocal(ctx, cstLocal, value, doc, i == 1)
-			end
+			processLocalStat(ctx, stat)
 		elseif tag == "localfunction" then
 			local doc = comments.claim(claimIndex, parseMod.effectiveStartLine(stat))
 			ctx.env[stat.name] = newFunction(ctx, stat.func, doc, stat.location)
 		elseif tag == "function" then
-			local doc = comments.claim(claimIndex, parseMod.effectiveStartLine(stat))
-			local nameExpr = stat.name
-			if nameExpr ~= nil and nameExpr.tag == "indexname" then
-				local target, fieldName, accessor = resolveIndexChain(ctx, nameExpr)
-				if target ~= nil then
-					setField(target, fieldName :: string, {
-						name = fieldName :: string,
-						value = newFunction(ctx, stat.func, nil, stat.location),
-						isColonMethod = accessor == ":",
-						defDoc = doc,
-						keySpan = nameExpr.index.location or stat.location,
-						defSpan = stat.location,
-					})
-				end
-			elseif nameExpr ~= nil and nameExpr.tag == "local" then
-				ctx.env[nameExpr["local"]] = newFunction(ctx, stat.func, doc, stat.location)
-			end
+			processFunctionStat(ctx, stat)
 		elseif tag == "assign" then
-			local doc = comments.claim(claimIndex, parseMod.effectiveStartLine(stat))
-			local values = stat.values or {}
-			-- Evaluate all right-hand sides before mutating any left-hand bindings
-			-- so parallel assignments like `a, b = b, a` read the pre-statement state.
-			local rhsValues: { SymValue } = {}
-			for i in stat.variables do
-				local valuePair = values[i]
-				rhsValues[i] = if valuePair ~= nil then evalExpr(ctx, valuePair.node) else opaque(nil)
-			end
-			for i, varPair in stat.variables do
-				local lhs = varPair.node
-				local valuePair = values[i]
-				local rhs = rhsValues[i]
-				if lhs.tag == "local" then
-					bindLocal(ctx, lhs["local"], rhs, doc, i == 1)
-				elseif lhs.tag == "indexname" then
-					local target, fieldName = resolveIndexChain(ctx, lhs)
-					-- `__index` is metatable machinery, not a public member: surfacing
-					-- it would make `T.__index = T` list the class as a field of itself.
-					-- Record `selfIndexing = true` instead (see `isSelfIndexing`).
-					if target ~= nil and fieldName == "__index" then
-						if rhs.kind == "table" and rhs.fields == target.fields then
-							target.selfIndexing = true
-						end
-					elseif target ~= nil then
-						local rhsNode = if valuePair ~= nil then unwrapExpr(valuePair.node) else nil
-						local declaredType = if rhsNode ~= nil and rhsNode.tag == "cast"
-							then rhsNode.annotation
-							else nil
-						setField(target, fieldName :: string, {
-							name = fieldName :: string,
-							value = rhs,
-							isColonMethod = false,
-							declaredType = declaredType,
-							defDoc = if i == 1 then doc else nil,
-							trailingDesc = comments.trailingText(ctx.trailingIndex, lhs.index.location.beginLine),
-							keySpan = lhs.index.location,
-							defSpan = stat.location,
-						})
-					end
-				end
-			end
+			processAssignStat(ctx, stat)
 		elseif tag == "typealias" or tag == "typefunction" then
 			local doc = comments.claim(claimIndex, parseMod.effectiveStartLine(stat))
 			table.insert(ctx.types, {
@@ -663,37 +772,17 @@ function surface.evaluate(
 				stat = stat,
 				doc = doc,
 			})
-		elseif tag == "return" then
+		elseif tag == "return" and topLevel then
 			-- Only the chunk's top-level return defines the module surface.
-			if topLevel then
-				local exprs = stat.expressions or {}
-				if exprs[1] ~= nil then
-					result = evalExpr(ctx, exprs[1].node)
-				else
-					result = { kind = "literal", valueKind = "nil", span = stat.location }
-				end
-			end
+			local exprs = stat.expressions or {}
+			result = if exprs[1] ~= nil
+				then evalExpr(ctx, exprs[1].node)
+				else { kind = "literal", valueKind = "nil", span = stat.location }
 		elseif tag == "expression" then
 			-- Statement-form `setmetatable(M, mt)` or `table.freeze(M)`.
 			evalExpr(ctx, stat.expression)
-		elseif tag == "conditional" then
-			-- Conditional mounts are part of the public surface
-			-- (`if isClient then M.UI = require(script.UI) end`).
-			if stat.thenBlock ~= nil then
-				processStatements(stat.thenBlock.statements, false)
-			end
-			for _, branch in stat.elseifs or {} do
-				if branch.thenBlock ~= nil then
-					processStatements(branch.thenBlock.statements, false)
-				end
-			end
-			if stat.elseBlock ~= nil then
-				processStatements(stat.elseBlock.statements, false)
-			end
-		elseif tag == "do" then
-			if stat.body ~= nil then
-				processStatements(stat.body.statements, false)
-			end
+		elseif tag == "conditional" or tag == "do" then
+			processBranchStatements(stat, processStatements)
 		end
 		-- Loops (`while`/`for`/`repeat`) and nested function bodies are intentionally not scanned.
 	end
@@ -707,62 +796,14 @@ function surface.evaluate(
 	processStatements(parsed.cst.root.statements, true)
 
 	if result ~= nil and result.kind == "table" then
-		-- Delegate fields from `setmetatable(M, { __index = Proto })` when `Proto`
-		-- is another table or a local factory call (`local Registry = new()`).
-		local mt = result.metatable
-		if mt ~= nil and mt.kind == "table" then
-			local idxField = surface.fieldOf(mt, "__index")
-			local proto = if idxField ~= nil then idxField.value else nil
-			if
-				proto ~= nil
-				and proto.kind == "opaque"
-				and proto.calleeValue ~= nil
-				and proto.calleeValue.kind == "function"
-			then
-				local body = proto.calleeValue.fnNode and proto.calleeValue.fnNode.body
-				if body ~= nil then
-					local saved = result
-					result = nil
-					processStatements(body.statements, true)
-					proto = result or proto
-					result = saved
-				end
-			end
-			if proto ~= nil and proto.kind == "table" and proto.fields ~= result.fields then
-				for _, f in proto.fields :: { SymField } do
-					if surface.fieldOf(result :: SymValue, f.name) == nil then
-						setField(result :: SymValue, f.name, f)
-					end
-				end
-			end
-		end
-		-- Synthesize module mounts declared as `Key: typeof(require(...))` on the
-		-- returned table's type annotation (lazy `__index` module tables).
-		local ann = surface.unwrapTableType(result.annotation or result.castType, ctx.types)
-		if ann ~= nil then
-			for _, entry in ann.entries do
-				if
-					parseMod.isTypeProperty(entry)
-					and entry.key ~= nil
-					and surface.fieldOf(result, entry.key.text) == nil
-				then
-					local valType = parseMod.unwrapType(entry.value)
-					local reqSym = if valType ~= nil and valType.tag == "typeof"
-						then evalRequireExpr(ctx, valType.expression or valType.expr)
-						else nil
-					if reqSym ~= nil then
-						setField(result, entry.key.text, {
-							name = entry.key.text,
-							value = reqSym,
-							isColonMethod = false,
-							fieldDoc = comments.claim(claimIndex, entry.key.location.beginLine),
-							keySpan = entry.key.location,
-							defSpan = entry.location or entry.key.location,
-						})
-					end
-				end
-			end
-		end
+		postProcessResult(ctx, result, function(statements: any): SymValue?
+			local saved = result
+			result = nil
+			processStatements(statements, true)
+			local evaluated = result
+			result = saved
+			return evaluated
+		end)
 	end
 
 	return {
@@ -778,7 +819,7 @@ function surface.isMetamethod(name: string): boolean
 	return name:sub(1, 2) == "__"
 end
 
---- Checks for `function T.f(self: T, ...)`: the explicitly typed form of a
+--- Checks for `function T.f(self: T, ...)`, the explicitly typed form of a
 --- method, which Luau's `:` syntax cannot annotate. Callers still invoke it as
 --- `t:f(...)`, so it is documented as a method. Metamethods are excluded by the caller.
 function surface.isSelfMethod(fnNode: any): boolean
@@ -803,8 +844,8 @@ local function hasMethod(sym: SymValue): boolean
 	return false
 end
 
---- Returns true if `sym` is a class table: either it has an explicit `@class`
---- tag or it defines at least one method (`:` syntax or a `.` function taking
+--- Returns true if `sym` is a class table, meaning it either has an explicit `@class`
+--- tag or defines at least one method (`:` syntax or a `.` function taking
 --- `self` first). `T.__index = T` alone is not enough because modules use
 --- self-indexing too, though `T.__index = T` paired with a constructor
 --- `setmetatable(..., T)` does promote `T` in `model/build.luau`.
@@ -812,7 +853,6 @@ function surface.classify(sym: SymValue, hasClassTag: boolean): boolean
 	return sym.kind == "table" and (hasClassTag or hasMethod(sym))
 end
 
---- Returns true when `T.__index = T` was assigned on `sym`.
 function surface.isSelfIndexing(sym: SymValue): boolean
 	return sym.kind == "table" and sym.selfIndexing == true
 end

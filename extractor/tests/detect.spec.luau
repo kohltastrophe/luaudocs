@@ -72,15 +72,22 @@ return function()
 		"function M.run() M.drain() end",
 		"function M.schedule() task.spawn(function() task.wait() end) end",
 		"function M.build() local function idle() task.wait() end return idle end",
+		"function M:LoadAsync() return 1 end",
+		"function M:cached() return self:LoadAsync() end",
 		"return M",
 	}, "\n"))
-	t.eq({
-		detected(res, "drain").yields,
-		detected(res, "flush").yields,
-		detected(res, "run").yields,
-		detected(res, "schedule").yields,
-		detected(res, "build").yields,
-	}, { true, true, true, false, false }, "same-module calls yield; nested closures do not")
+	t.eq(
+		{
+			detected(res, "drain").yields,
+			detected(res, "flush").yields,
+			detected(res, "run").yields,
+			detected(res, "schedule").yields,
+			detected(res, "build").yields,
+			detected(res, "cached").yields,
+		},
+		{ true, true, true, false, false, false },
+		"same-module calls yield; nested closures and resolved sync Async do not"
+	)
 
 	-- Mutual recursion cycle (`f` calls `g`, `g` calls `f` with `task.wait()` and server signal)
 	-- terminates cleanly and propagates both `yields` and `realm`.
@@ -220,7 +227,7 @@ return function()
 	local root = util.joinPath(t.fixtures, "detect")
 	local g, diag = t.buildGraph(root, "main.luau")
 	local doc = model.assemble(g, diag, { entryPoints = { "main.luau" } })
-	t.eq(#diag.list, 0, "detect fixture assembles clean")
+	t.check(#diag.list == 0, "detect fixture assembles clean")
 
 	local main = t.byId(doc.modules, "main.luau")
 	local function member(name: string): any

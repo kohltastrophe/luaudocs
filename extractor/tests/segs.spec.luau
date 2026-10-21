@@ -30,7 +30,7 @@ return function()
 	t.suite("segs: inline")
 
 	local tbl = inline("{ tint: Color3, name: string }")
-	t.eq(segs.text(tbl), "{ tint: Color3, name: string }", "inline display text")
+	t.check(segs.text(tbl) == "{ tint: Color3, name: string }", "inline display text")
 	t.eq(tbl, { "{ tint: ", ref("Color3", "Color3"), ", name: ", ref("string", "string"), " }" }, "table type segs")
 	t.eq(
 		inline("Map<Widget, A.B>"),
@@ -46,7 +46,7 @@ return function()
 
 	local parsed6, stat6 = typeAlias("type X = {\n\t-- speed in studs\n\tspeed: number,\n\n\ttarget: Widget,\n}")
 	local lines, lineOf = segs.block(parsed6, stat6.type)
-	t.eq({ segs.blockText(lines :: any), lineOf[3], lineOf[5], (lines :: any)[4] }, {
+	t.eq({ t.blockText(lines :: any), lineOf[3], lineOf[5], (lines :: any)[4] }, {
 		"{\n\t-- speed in studs\n\tspeed: number,\n\ttarget: Widget,\n}",
 		3,
 		4,
@@ -56,7 +56,7 @@ return function()
 	local parsedD, statD = typeAlias("type Y = (\n\t\tWidget\n\t) -> ()")
 	local linesD = select(1, segs.block(parsedD, statD.type)) :: any
 	t.eq(
-		{ segs.blockText(linesD), linesD[2] },
+		{ t.blockText(linesD), linesD[2] },
 		{ "(\n\tWidget\n) -> ()", { "\t", ref("Widget", "Widget") } },
 		"continuation lines dedent by shared prefix"
 	)

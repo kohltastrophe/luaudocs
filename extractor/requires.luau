@@ -1,7 +1,7 @@
---- Require resolution: string requires (standard Luau semantics) and Roblox
---- instance-style requires (`script.Parent` chains, `WaitForChild`, and
---- `FindFirstChild`) mapped onto the filesystem, together with `.luaurc` alias
---- chains and Rojo `*.project.json` instance trees (including nested project mounts).
+--- Resolves string requires (standard Luau semantics) and Roblox instance-style
+--- requires (`script.Parent` chains, `WaitForChild`, and `FindFirstChild`) onto
+--- the filesystem, including `.luaurc` alias chains and Rojo `*.project.json`
+--- instance trees.
 
 local fs = require("@std/fs")
 local json = require("@std/json")
@@ -44,6 +44,7 @@ local readFileSafe = util.readFileSafe
 --- string literals.
 local function luaurcToJson(text: string): string
 	local out: { string } = {}
+	local lastNonWs = 0
 	local i = 1
 	local n = #text
 	while i <= n do
@@ -51,23 +52,21 @@ local function luaurcToJson(text: string): string
 		if c == '"' then
 			local j = util.closingQuote(text, i)
 			table.insert(out, text:sub(i, j))
+			lastNonWs = #out
 			i = j + 1
 		elseif c == "-" and text:sub(i + 1, i + 1) == "-" then
 			i = util.commentEnd(text, i)
 		elseif c == "/" and text:sub(i + 1, i + 1) == "/" then
 			i = text:find("\n", i, true) or (n + 1)
 		else
-			if c == "}" or c == "]" then
+			if (c == "}" or c == "]") and lastNonWs > 0 and out[lastNonWs] == "," then
 				-- Remove a trailing comma from the last non-blank token emitted.
-				local k = #out
-				while k > 0 and out[k]:match("^%s*$") ~= nil do
-					k -= 1
-				end
-				if k > 0 and out[k] == "," then
-					out[k] = ""
-				end
+				out[lastNonWs] = ""
 			end
 			table.insert(out, c)
+			if c ~= " " and c ~= "\t" and c ~= "\n" and c ~= "\r" then
+				lastNonWs = #out
+			end
 			i += 1
 		end
 	end
@@ -81,7 +80,45 @@ end
 
 local MAX_NESTED_PROJECTS = 10
 
-local function buildRojoNode(
+local buildRojoNode -- forward
+
+--- If `abs` is a nested Rojo project mount (a directory containing
+--- `default.project.json`, or a `$path` pointing directly to a
+--- `*.project.json` file), merges its root tree into `node`.
+local function mountNestedProject(node: RojoNode, abs: string, depth: number, byPath: { [string]: RojoNode })
+	if depth >= MAX_NESTED_PROJECTS then
+		return
+	end
+	local absType = util.pathType(abs)
+	if absType == nil then
+		return
+	end
+	local isDirMount = absType == "dir"
+	local nestedFile = if isDirMount
+		then util.joinPath(abs, "default.project.json")
+		elseif abs:match("%.project%.json$") ~= nil then abs
+		else nil
+	local nestedText = if nestedFile ~= nil then readFileSafe(nestedFile) else nil
+	if nestedText == nil then
+		return
+	end
+	local nested = parseJson(nestedText)
+	if nested == nil or type(nested.tree) ~= "table" then
+		return
+	end
+	local nestedBase = if isDirMount then abs else util.dirname(abs)
+	local nestedNode = buildRojoNode(node.name, nested.tree, nestedBase, depth + 1, byPath)
+	node.fsPath = nestedNode.fsPath or node.fsPath
+	if node.fsPath ~= nil then
+		byPath[node.fsPath :: string] = node
+	end
+	for childName, child in nestedNode.children do
+		node.children[childName] = child
+		child.parent = node
+	end
+end
+
+buildRojoNode = function(
 	name: string,
 	spec: any,
 	baseDir: string,
@@ -99,31 +136,7 @@ local function buildRojoNode(
 		local abs = util.normPath(util.joinPath(baseDir, specPath))
 		node.fsPath = abs
 		byPath[abs] = node
-		-- Nested project mount: a directory containing `default.project.json`,
-		-- or a `$path` pointing directly to a `*.project.json` file.
-		if depth < MAX_NESTED_PROJECTS and fs.exists(abs) then
-			local isDirMount = util.isDir(abs)
-			local nestedFile = if isDirMount
-				then util.joinPath(abs, "default.project.json")
-				elseif abs:match("%.project%.json$") ~= nil then abs
-				else nil
-			local nestedText = if nestedFile ~= nil then readFileSafe(nestedFile) else nil
-			if nestedText ~= nil then
-				local nested = parseJson(nestedText)
-				if nested ~= nil and type(nested.tree) == "table" then
-					local nestedBase = if isDirMount then abs else util.dirname(abs)
-					local nestedNode = buildRojoNode(name, nested.tree, nestedBase, depth + 1, byPath)
-					node.fsPath = nestedNode.fsPath or node.fsPath
-					if node.fsPath ~= nil then
-						byPath[node.fsPath :: string] = node
-					end
-					for childName, child in nestedNode.children do
-						node.children[childName] = child
-						child.parent = node
-					end
-				end
-			end
-		end
+		mountNestedProject(node, abs, depth, byPath)
 	end
 	-- Sort child keys rather than iterating in hash order so two children
 	-- sharing one `$path` resolve deterministically in `byPath`.
@@ -142,9 +155,9 @@ local function buildRojoNode(
 	return node
 end
 
---- Loads project configuration. Returns an error string only when an explicitly
---- passed `projectFile` is unreadable or invalid; the implicit
---- `default.project.json` probe is best-effort.
+--- Loads project configuration. Returns an error string only when an explicit
+--- `projectFile` is unreadable or invalid. The default `default.project.json`
+--- probe is best-effort.
 function requires.load(
 	root: string,
 	opts: { projectFile: string?, aliases: { [string]: string | boolean }? }?
@@ -160,40 +173,58 @@ function requires.load(
 		aliases = options.aliases or {},
 	}
 
-	local projectFile = options.projectFile
-	if projectFile == nil then
-		local default = util.joinPath(root, "default.project.json")
-		if fs.exists(default) then
-			projectFile = default
+	local projectFile = options.projectFile or util.joinPath(root, "default.project.json")
+	local text = readFileSafe(projectFile)
+	if text == nil then
+		if explicit then
+			return self, "could not read project file: " .. projectFile
 		end
+		return self, nil
 	end
-	if projectFile ~= nil then
-		local text = readFileSafe(projectFile)
-		if text == nil then
-			if explicit then
-				return self, "could not read project file: " .. (projectFile :: string)
-			end
-		else
-			local data = parseJson(text)
-			if data == nil or type(data.tree) ~= "table" then
-				if explicit then
-					return self, "not a rojo project file (invalid JSON or no tree): " .. (projectFile :: string)
-				end
-			else
-				self.rojoRoot =
-					buildRojoNode(data.name or "root", data.tree, util.dirname(projectFile), 0, self.rojoByPath)
-			end
+	local data = parseJson(text)
+	if data == nil or type(data.tree) ~= "table" then
+		if explicit then
+			return self, "not a rojo project file (invalid JSON or no tree): " .. projectFile
 		end
+		return self, nil
 	end
+	self.rojoRoot = buildRojoNode(data.name or "root", data.tree, util.dirname(projectFile), 0, self.rojoByPath)
 
 	return self, nil
 end
 
+local function loadDirAliases(self: Project, d: string): { [string]: string }
+	local cached = self.luaurcCache[d]
+	if cached ~= nil then
+		return cached
+	end
+	local aliases: { [string]: string } = {}
+	self.luaurcCache[d] = aliases
+	local text = readFileSafe(util.joinPath(d, ".luaurc"))
+	if text == nil then
+		return aliases
+	end
+	local data = parseJson(luaurcToJson(text))
+	if data == nil then
+		self.luaurcBroken[d] = true
+		return aliases
+	end
+	if type(data.aliases) ~= "table" then
+		return aliases
+	end
+	for name, target in data.aliases do
+		if type(name) == "string" and type(target) == "string" then
+			aliases[name:lower()] = if util.isAbsolute(target) then target else util.normPath(util.joinPath(d, target))
+		end
+	end
+	return aliases
+end
+
 --- Merges `.luaurc` aliases from `project.root` down to `fileAbs`'s directory,
---- with nearer `.luaurc` files overriding outer ones. Alias targets are
---- resolved to absolute paths and keys are lowercased (Luau resolves aliases
---- case-insensitively). The second return lists directories whose `.luaurc`
---- failed to parse so an unresolved alias diagnostic can name the broken file.
+--- with nearer `.luaurc` files overriding outer ones. Resolves alias targets to
+--- absolute paths and lowercases keys (Luau resolves aliases case-insensitively).
+--- The second return lists directories whose `.luaurc` failed to parse so an
+--- unresolved alias diagnostic can name the broken file.
 local function aliasesFor(self: Project, fileAbs: string): ({ [string]: string }, { string })
 	local dir = util.dirname(util.normPath(fileAbs))
 	local chain = {}
@@ -213,35 +244,11 @@ local function aliasesFor(self: Project, fileAbs: string): ({ [string]: string }
 	local merged: { [string]: string } = {}
 	local broken: { string } = {}
 	for _, d in chain do
-		local cached = self.luaurcCache[d]
-		if cached == nil then
-			local text = readFileSafe(util.joinPath(d, ".luaurc"))
-			if text ~= nil then
-				local data = parseJson(luaurcToJson(text))
-				if data == nil then
-					self.luaurcBroken[d] = true
-				end
-				local aliases: { [string]: string } = {}
-				if data ~= nil and type(data.aliases) == "table" then
-					for name, target in data.aliases do
-						if type(name) == "string" and type(target) == "string" then
-							aliases[name:lower()] = if util.isAbsolute(target)
-								then target
-								else util.normPath(util.joinPath(d, target))
-						end
-					end
-				end
-				self.luaurcCache[d] = aliases
-				cached = aliases
-			else
-				self.luaurcCache[d] = {}
-				cached = {}
-			end
-		end
+		local cached = loadDirAliases(self, d)
 		if self.luaurcBroken[d] then
 			table.insert(broken, d)
 		end
-		for name, target in cached :: { [string]: string } do
+		for name, target in cached do
 			merged[name] = target
 		end
 	end
@@ -256,10 +263,13 @@ local function isModuleFile(p: string): boolean
 	return p:match("%.luau?$") ~= nil
 end
 
+local MODULE_EXTS = { ".luau", ".lua" }
+
 --- Probes `base .. ".luau"` then `base .. ".lua"`, centralizing the `.luau`
 --- over `.lua` extension precedence.
 local function luauOrLua(base: string): string?
-	for _, candidate in { base .. ".luau", base .. ".lua" } do
+	for _, ext in MODULE_EXTS do
+		local candidate = base .. ext
 		if isFile(candidate) then
 			return candidate
 		end
@@ -468,7 +478,6 @@ local function vnodeModuleFile(v: VNode): string?
 	return findModuleFile(v.fsPath :: string)
 end
 
---- Display name of a file as an instance.
 function requires.instanceName(project: Project, fileAbs: string): string
 	local node = rojoNodeFor(project, fileAbs)
 	if node ~= nil and node.name ~= nil and node.name ~= "" then

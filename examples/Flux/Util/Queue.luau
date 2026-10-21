@@ -12,7 +12,7 @@ export type Queue<T> = typeof(setmetatable(
 
 --[[ Creates an empty queue. ]]
 function Queue.new<T>(): Queue<T>
-	return setmetatable({ items = {} }, Queue) :: any
+	return setmetatable({ items = {} }, Queue)
 end
 
 --[[

@@ -1,6 +1,6 @@
---- Deterministic JSON serializer: object keys sorted alphabetically, arrays in
---- order, proper string escaping. (@std/json.serialize has unstable key order,
---- which would break snapshot tests.)
+--- Serializes values to deterministic JSON with alphabetically sorted object
+--- keys. (`@std/json.serialize` has unstable key order, which would break
+--- snapshot tests.)
 
 local emit = {}
 
@@ -93,12 +93,12 @@ local function encodeValue(value: any, pretty: boolean, indent: string, out: { s
 	elseif kind == "string" then
 		table.insert(out, '"' .. escapeString(value) .. '"')
 	elseif kind == "table" then
-		local nextIndent = indent .. "\t"
 		if isArray(value) then
 			if #value == 0 then
 				table.insert(out, "[]")
 				return
 			end
+			local nextIndent = if pretty then indent .. "\t" else ""
 			table.insert(out, if pretty then "[\n" else "[")
 			for i, item in ipairs(value) do
 				if pretty then
@@ -110,43 +110,46 @@ local function encodeValue(value: any, pretty: boolean, indent: string, out: { s
 				end
 			end
 			table.insert(out, if pretty then "\n" .. indent .. "]" else "]")
-		else
-			local keys = {}
-			for k in value do
-				if not isScratchKey(k) then
-					table.insert(keys, k)
-				end
-			end
-			if #keys == 0 then
-				table.insert(out, "{}")
-				return
-			end
-			table.sort(keys, function(a, b)
-				return tostring(a) < tostring(b)
-			end)
-			if pretty and isLeafObject(value, keys) then
-				local parts = {}
-				for _, k in keys do
-					local piece = {}
-					encodeValue(value[k], pretty, nextIndent, piece)
-					table.insert(parts, quotedKey(k) .. ": " .. table.concat(piece))
-				end
-				table.insert(out, "{ " .. table.concat(parts, ", ") .. " }")
-				return
-			end
-			table.insert(out, if pretty then "{\n" else "{")
-			for i, k in keys do
-				if pretty then
-					table.insert(out, nextIndent)
-				end
-				table.insert(out, quotedKey(k) .. ":" .. (if pretty then " " else ""))
-				encodeValue(value[k], pretty, nextIndent, out)
-				if i < #keys then
-					table.insert(out, if pretty then ",\n" else ",")
-				end
-			end
-			table.insert(out, if pretty then "\n" .. indent .. "}" else "}")
+			return
 		end
+		local keys = {}
+		for k in value do
+			if not isScratchKey(k) then
+				table.insert(keys, k)
+			end
+		end
+		if #keys == 0 then
+			table.insert(out, "{}")
+			return
+		end
+		table.sort(keys, function(a, b)
+			return tostring(a) < tostring(b)
+		end)
+		if pretty and isLeafObject(value, keys) then
+			table.insert(out, "{ ")
+			for i, k in keys do
+				if i > 1 then
+					table.insert(out, ", ")
+				end
+				table.insert(out, quotedKey(k) .. ": ")
+				encodeValue(value[k], pretty, indent, out)
+			end
+			table.insert(out, " }")
+			return
+		end
+		local nextIndent = if pretty then indent .. "\t" else ""
+		table.insert(out, if pretty then "{\n" else "{")
+		for i, k in keys do
+			if pretty then
+				table.insert(out, nextIndent)
+			end
+			table.insert(out, quotedKey(k) .. ":" .. (if pretty then " " else ""))
+			encodeValue(value[k], pretty, nextIndent, out)
+			if i < #keys then
+				table.insert(out, if pretty then ",\n" else ",")
+			end
+		end
+		table.insert(out, if pretty then "\n" .. indent .. "}" else "}")
 	else
 		table.insert(out, "null")
 	end

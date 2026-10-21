@@ -15,7 +15,7 @@ return function()
 		'{"Mango":3,"apple":2,"zebra":1}',
 		"object keys sort by byte order"
 	)
-	t.eq(emit.encode({ "b", "a", "c" }), '["b","a","c"]', "arrays keep source order, never sorted")
+	t.check(emit.encode({ "b", "a", "c" }) == '["b","a","c"]', "arrays keep source order, never sorted")
 
 	t.suite("emit: assembly scratch keys")
 

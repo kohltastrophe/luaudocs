@@ -5,7 +5,7 @@ return function()
 	t.suite("tags: prose")
 
 	local doc = tags.parse({ "Line one", "", "Line two" })
-	t.eq({ doc.desc, doc.placing }, { "Line one\n\nLine two", nil }, "prose joined with blank lines")
+	t.check(doc.desc == "Line one\n\nLine two" and doc.placing == nil, "prose joined with blank lines")
 
 	doc = tags.parse({ "Credits to @alice and @bob_2x for testing" })
 	t.eq(
