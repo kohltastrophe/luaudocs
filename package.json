@@ -1,6 +1,6 @@
 {
 	"name": "luaudocs",
-	"version": "0.3.0",
+	"version": "0.3.1",
 	"description": "Documentation generator for Luau.",
 	"keywords": [
 		"luau",
