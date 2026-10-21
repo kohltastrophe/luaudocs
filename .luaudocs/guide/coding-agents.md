@@ -41,7 +41,7 @@ Reference `llms.txt` in your root `AGENTS.md` or `CLAUDE.md`:
 ```md [AGENTS.md]
 ## Public API
 
-`llms.txt` indexes this library's guides and public API. Read it before using or changing the API. After changing the public surface, a doc comment, or a guide, run `npx luaudocs@0.3.0 llms` and commit the regenerated `llms.txt` with your change.
+`llms.txt` indexes this library's guides and public API. Read it before using or changing the API. After changing the public surface, a doc comment, or a guide, run `npx luaudocs@latest llms` and commit the regenerated `llms.txt` with your change.
 ```
 
 ```md [CLAUDE.md]
@@ -49,21 +49,21 @@ Reference `llms.txt` in your root `AGENTS.md` or `CLAUDE.md`:
 
 @llms.txt
 
-After changing the public surface, a doc comment, or a guide, run `npx luaudocs@0.3.0 llms` and commit the regenerated `llms.txt` with your change.
+After changing the public surface, a doc comment, or a guide, run `npx luaudocs@latest llms` and commit the regenerated `llms.txt` with your change.
 ```
 
 :::
 
 Claude Code expands `@llms.txt` into context automatically. This works well for small libraries. For larger libraries, reference `llms.txt` by name so agents read it on demand.
 
-The generated `llms.txt` header includes the exact `npx luaudocs@0.3.0 llms` regeneration command, and running `luaudocs llms` leaves the file untouched on disk when nothing changed.
+The generated `llms.txt` header includes the exact `npx luaudocs@latest llms` regeneration command, and running `luaudocs llms` leaves the file untouched on disk when nothing changed.
 
 ## Checking it in CI
 
 Use `--check` in CI to fail when the committed `llms.txt` is missing, stale, or hits extraction errors:
 
 ```bash
-npx luaudocs@0.3.0 llms --check
+npx luaudocs@latest llms --check
 ```
 
 A normal `luaudocs llms` run also aborts without overwriting `llms.txt` if extraction errors occur, so a temporary syntax error never strips modules from the index.

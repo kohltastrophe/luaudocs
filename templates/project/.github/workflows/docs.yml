@@ -24,21 +24,21 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with: { node-version: "@NODE_MAJOR@" }
-      # The docs directory's package.json is generated, so there is no lockfile
-      # to key on; the pinned version below determines both the npm dependencies
-      # and the Lute binary downloaded into ~/.cache/luaudocs.
+      - id: luaudocs
+        run: echo "version=$(npm view luaudocs version)" >> "$GITHUB_OUTPUT"
+      # Cache the npm cache, the generated site's node_modules, and the Lute
+      # binary downloaded into ~/.cache/luaudocs across runs, keyed on the
+      # resolved luaudocs release so a new release refreshes the cache.
       - uses: actions/cache@v4
         with:
           path: |
             ~/.npm
             ~/.cache/luaudocs
             @DOCS_DIR@/node_modules
-          key: ${{ runner.os }}-luaudocs-@VERSION@
+          key: ${{ runner.os }}-luaudocs-${{ steps.luaudocs.outputs.version }}
       - id: pages
         uses: actions/configure-pages@v6
-      # Pinned so a later release cannot change this deploy under you; bump the
-      # version deliberately, the way you would any other dependency.
-      - run: npx luaudocs@@VERSION@ build --url "${{ steps.pages.outputs.base_url }}"
+      - run: npx luaudocs@latest build --url "${{ steps.pages.outputs.base_url }}"
       - uses: actions/upload-pages-artifact@v5
         with: { path: "@DOCS_DIR@/.vitepress/dist" }
       - id: deployment

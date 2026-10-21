@@ -20,13 +20,12 @@ const agentsPage = join(root, ".luaudocs", "guide", "coding-agents.md");
 const rootLlms = join(root, LOCAL_LLMS_FILE);
 
 /** What `init` substitutes into `templates/project/**` for a project shaped
- * like this one: this repository's docs dir and branch, and the two pins the
- * scaffold bakes (see the Pages-workflow tests in `scaffold.test.ts`). */
+ * like this one: this repository's docs dir, branch, and Node major version
+ * (see the Pages-workflow tests in `scaffold.test.ts`). */
 const SUBSTITUTIONS: Record<string, string> = {
 	"@DOCS_DIR@": ".luaudocs",
 	"@BRANCH@": "main",
 	"@NODE_MAJOR@": /\d+/.exec(pkg.engines.node)![0],
-	"@VERSION@": pkg.version,
 };
 
 /**
@@ -45,8 +44,8 @@ function comparable(yaml: string): string {
 }
 
 describe("the site quotes its sources verbatim", () => {
-	// the failure this exists for: an action bumped, a step added, or the
-	// version pin moved by a release, in the template alone
+	// the failure this exists for: an action bumped or a step added in the
+	// template alone
 	it("shows the Pages workflow `init` actually writes", () => {
 		let template = readFileSync(
 			join(root, "templates", "project", ".github", "workflows", "docs.yml"),
@@ -63,19 +62,19 @@ describe("the site quotes its sources verbatim", () => {
 		expect(comparable(fence![1]!)).toBe(comparable(template));
 	});
 
-	// the Cloudflare build command pins the version too, but in a table rather
-	// than a copy of any file, so the check above never sees it go stale; so do
-	// the agent notes, and the root llms.txt itself, which a release has to
-	// regenerate (CI's `llms --check` holds the rest of that file)
+	// every `npx luaudocs` command across the guides and the root llms.txt must
+	// pass `@latest` so npx does not run a cached older release
 	it.each([
 		["deploying.md, in the workflow and on Cloudflare", deployingPage, 2],
-		["coding-agents.md, in the agent notes and the CI step", agentsPage, 3],
+		["coding-agents.md, in the agent notes and the CI step", agentsPage, 4],
 		["the root llms.txt, in its regeneration command", rootLlms, 1],
-	])("pins the current version in %s", (_where, file, least) => {
+	])("uses @latest in %s", (_where, file, least) => {
 		const text = readFileSync(file, "utf8");
-		const pins = [...text.matchAll(/npx luaudocs@([^\s`]+)/g)].map((match) => match[1]);
-		expect(pins.length).toBeGreaterThanOrEqual(least);
-		expect(pins).toEqual(pins.map(() => pkg.version));
+		const tags = [...text.matchAll(/npx luaudocs(?:@([^\s`]+))?(?=[\s`])/g)].map(
+			(match) => match[1],
+		);
+		expect(tags.length).toBeGreaterThanOrEqual(least);
+		expect(tags).toEqual(tags.map(() => "latest"));
 	});
 
 	// the guide shows the file the command wrote for this repository; a pasted
@@ -86,5 +85,16 @@ describe("the site quotes its sources verbatim", () => {
 		const llms = readFileSync(rootLlms, "utf8");
 		expect(isGeneratedFile(llms), "the root llms.txt lost its generated marker").toBe(true);
 		expect(llms).toContain("\n## Flux.Util.Queue\n");
+	});
+
+	it("keeps package.json and CHANGELOG.md in valid semver release order", () => {
+		const changelog = readFileSync(join(root, "CHANGELOG.md"), "utf8");
+		const headings = [...changelog.matchAll(/^## \[([^\]]+)\] - (\d{4}-\d{2}-\d{2})$/gm)].map(
+			(m) => m[1]!,
+		);
+		expect(headings[0]).toBe(pkg.version);
+		expect(changelog).toContain(
+			`[${pkg.version}]: https://github.com/kohltastrophe/luaudocs/releases/tag/v${pkg.version}`,
+		);
 	});
 });
