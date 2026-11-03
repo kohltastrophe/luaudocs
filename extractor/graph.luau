@@ -260,6 +260,7 @@ local function evaluateModule(
 		mod.claimIndex = claimIndex
 		mod.trailingIndex = trailingIndex
 		mod.surface = surfaceMod.evaluate(parsed, claimIndex, trailingIndex)
+		parsed.cst = nil
 	end)
 	if not okEval then
 		diag:error("extract-failed", tostring(evalErr), id)

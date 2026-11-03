@@ -91,6 +91,13 @@ function model.assemble(g: Graph, diag: Collector, opts: { entryPoints: { string
 		buildPass.run(ctx, mod)
 	end
 	finalizePass.run(ctx, g, { reportUndocumented = opts.reportUndocumented })
+	for _, mod in g.modules do
+		mod.parsed = nil
+		mod.surface = nil
+		mod.blocks = nil
+		mod.claimIndex = nil
+		mod.trailingIndex = nil
+	end
 
 	-- `emit.encode` automatically skips `__`-prefixed scratch keys, so no
 	-- separate stripping pass is needed here.
