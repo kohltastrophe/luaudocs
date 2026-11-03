@@ -376,8 +376,19 @@ local function evalConditionalExpr(ctx: Ctx, expr: any): SymValue
 	return opaque(expr)
 end
 
+local ARITHMETIC_OPS: { [string]: boolean } = {
+	["+"] = true,
+	["-"] = true,
+	["*"] = true,
+	["/"] = true,
+	["//"] = true,
+	["%"] = true,
+	["^"] = true,
+}
+
 local function evalOperatorExpr(ctx: Ctx, expr: any): SymValue
-	if expr.operator.text == "and" then
+	local op = expr.operator.text
+	if op == "and" then
 		-- Preserving both halves lets realm detection read `guard` while
 		-- type and surface resolution read `guarded`.
 		local result = opaque(expr)
@@ -385,19 +396,57 @@ local function evalOperatorExpr(ctx: Ctx, expr: any): SymValue
 		result.guarded = evalExpr(ctx, expr.rhsOperand)
 		return result
 	end
-	-- Unary negation preserves a numeric literal's type. Binary `-` is
-	-- subtraction, which `OPERATOR_RESULTS` intentionally omits.
-	if expr.tag == "unary" and expr.operator.text == "-" then
+	-- Unary negation preserves a numeric literal's type.
+	if expr.tag == "unary" and op == "-" then
 		local operand = evalExpr(ctx, expr.operand)
 		if operand.kind == "literal" and operand.valueKind == "number" then
 			return { kind = "literal", valueKind = "number", span = expr.location }
 		end
 		return opaque(expr)
 	end
+	if expr.tag == "binary" then
+		if ARITHMETIC_OPS[op] then
+			local lhs = evalExpr(ctx, expr.lhsOperand)
+			local rhs = evalExpr(ctx, expr.rhsOperand)
+			if
+				lhs.kind == "literal"
+				and lhs.valueKind == "number"
+				and rhs.kind == "literal"
+				and rhs.valueKind == "number"
+			then
+				return { kind = "literal", valueKind = "number", span = expr.location }
+			end
+			return opaque(expr)
+		elseif op == ".." then
+			local lhs = evalExpr(ctx, expr.lhsOperand)
+			local rhs = evalExpr(ctx, expr.rhsOperand)
+			if
+				lhs.kind == "literal"
+				and (lhs.valueKind == "string" or lhs.valueKind == "number")
+				and rhs.kind == "literal"
+				and (rhs.valueKind == "string" or rhs.valueKind == "number")
+			then
+				return { kind = "literal", valueKind = "string", span = expr.location }
+			end
+			return opaque(expr)
+		elseif op == "or" then
+			local lhs = evalExpr(ctx, expr.lhsOperand)
+			local rhs = evalExpr(ctx, expr.rhsOperand)
+			if
+				lhs.kind == "literal"
+				and lhs.valueKind ~= "nil"
+				and rhs.kind == "literal"
+				and rhs.valueKind == lhs.valueKind
+			then
+				return { kind = "literal", valueKind = lhs.valueKind, span = expr.location }
+			end
+			return opaque(expr)
+		end
+	end
 	-- Only operators whose result type is fixed by Luau regardless of
-	-- metamethods belong in `OPERATOR_RESULTS`. Arithmetic and `..` are
-	-- excluded because `a + b` can produce a `Vector3` as readily as a `number`.
-	local valueKind = OPERATOR_RESULTS[expr.operator.text]
+	-- metamethods belong in `OPERATOR_RESULTS`. Arithmetic and `..` over
+	-- non-literals are excluded because `a + b` can produce a `Vector3` as readily as a `number`.
+	local valueKind = OPERATOR_RESULTS[op]
 	if valueKind == nil then
 		return opaque(expr)
 	end
@@ -636,8 +685,14 @@ local function processAssignStat(ctx: Ctx, stat: any)
 			if target ~= nil and fieldName == "__index" then
 				if rhs.kind == "table" and rhs.fields == target.fields then
 					target.selfIndexing = true
+					if target.origin ~= nil then
+						target.origin.selfIndexing = true
+					end
 				elseif rhs.kind == "table" or rhs.kind == "opaque" then
 					target.indexTarget = rhs
+					if target.origin ~= nil then
+						target.origin.indexTarget = rhs
+					end
 				end
 			elseif target ~= nil then
 				local rhsNode = if valuePair ~= nil then unwrapExpr(valuePair.node) else nil
@@ -732,6 +787,16 @@ local function processBranchStatements(stat: any, processStatements: (stats: any
 	end
 end
 
+local function syncOrigin(sym: SymValue?)
+	if sym ~= nil and sym.kind == "table" and sym.origin ~= nil then
+		local orig = sym.origin
+		sym.metatable = sym.metatable or orig.metatable
+		sym.frozen = sym.frozen or orig.frozen
+		sym.selfIndexing = sym.selfIndexing or orig.selfIndexing
+		sym.indexTarget = sym.indexTarget or orig.indexTarget
+	end
+end
+
 function surface.evaluate(
 	parsed: Parsed,
 	claimIndex: { [number]: DocBlock },
@@ -775,9 +840,16 @@ function surface.evaluate(
 		elseif tag == "return" and topLevel then
 			-- Only the chunk's top-level return defines the module surface.
 			local exprs = stat.expressions or {}
-			result = if exprs[1] ~= nil
-				then evalExpr(ctx, exprs[1].node)
+			local firstNode = if exprs[1] ~= nil then exprs[1].node else nil
+			local doc = if firstNode ~= nil and not isRebindExpr(firstNode)
+				then comments.claim(claimIndex, parseMod.effectiveStartLine(stat))
+				else nil
+			result = if firstNode ~= nil
+				then evalExpr(ctx, firstNode)
 				else { kind = "literal", valueKind = "nil", span = stat.location }
+			if doc ~= nil and result.defDoc == nil then
+				result.defDoc = doc
+			end
 		elseif tag == "expression" then
 			-- Statement-form `setmetatable(M, mt)` or `table.freeze(M)`.
 			evalExpr(ctx, stat.expression)
@@ -794,14 +866,20 @@ function surface.evaluate(
 	end
 
 	processStatements(parsed.cst.root.statements, true)
+	syncOrigin(result)
+	for _, sym in ctx.env do
+		syncOrigin(sym)
+	end
 
 	if result ~= nil and result.kind == "table" then
 		postProcessResult(ctx, result, function(statements: any): SymValue?
-			local saved = result
-			result = nil
+			local savedResult, savedEnv, savedReq, savedTypes = result, ctx.env, ctx.requireLocals, ctx.types
+			result, ctx.env, ctx.requireLocals, ctx.types =
+				nil, table.clone(savedEnv), table.clone(savedReq), table.clone(savedTypes)
 			processStatements(statements, true)
 			local evaluated = result
-			result = saved
+			syncOrigin(evaluated)
+			result, ctx.env, ctx.requireLocals, ctx.types = savedResult, savedEnv, savedReq, savedTypes
 			return evaluated
 		end)
 	end

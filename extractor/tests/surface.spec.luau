@@ -264,4 +264,102 @@ return function()
 		{ { "Linear", "Polar" }, { "fromGamma", "toGamma" } },
 		"Color nested sections"
 	)
+
+	t.suite("surface: operator folding, origin sync, return docs, and factory scope")
+
+	res = eval(table.concat({
+		"local unknown = get()",
+		"local M = {",
+		"\tadd = 1 + 2,",
+		"\tsub = 10 - 3,",
+		"\tmul = 4 * 5,",
+		"\tdiv = 8 / 2,",
+		"\tidiv = 9 // 2,",
+		"\tmod = 7 % 3,",
+		"\tpow = 2 ^ 8,",
+		'\tcatStr = "a" .. "b",',
+		'\tcatNum = "v" .. 1,',
+		"\torBool = false or true,",
+		'\torStr = "a" or "b",',
+		"\topaqueAdd = unknown + 1,",
+		'\topaqueCat = unknown .. "x",',
+		"}",
+		"return M",
+	}, "\n"))
+	root = res.result :: any
+	t.eq({
+		field(root, "add").value.valueKind,
+		field(root, "sub").value.valueKind,
+		field(root, "mul").value.valueKind,
+		field(root, "div").value.valueKind,
+		field(root, "idiv").value.valueKind,
+		field(root, "mod").value.valueKind,
+		field(root, "pow").value.valueKind,
+		field(root, "catStr").value.valueKind,
+		field(root, "catNum").value.valueKind,
+		field(root, "orBool").value.valueKind,
+		field(root, "orStr").value.valueKind,
+		field(root, "opaqueAdd").value.kind,
+		field(root, "opaqueCat").value.kind,
+	}, {
+		"number",
+		"number",
+		"number",
+		"number",
+		"number",
+		"number",
+		"number",
+		"string",
+		"string",
+		"boolean",
+		"string",
+		"opaque",
+		"opaque",
+	}, "binary arithmetic, concat, and or literal folding")
+
+	res = eval(table.concat({
+		"type Shape = { own: number }",
+		"local Proto = { shared = 1 }",
+		"local MT = { __index = Proto }",
+		"local raw = { own = 2 }",
+		"local M = raw :: Shape",
+		"raw.__index = raw",
+		"setmetatable(raw, MT)",
+		"table.freeze(raw)",
+		"return M",
+	}, "\n"))
+	root = res.result :: any
+	t.eq(
+		{ fieldNames(root), root.frozen, root.selfIndexing, root.metatable ~= nil },
+		{ { "own", "shared" }, true, true, true },
+		"mutations on raw table after type-cast rebind sync to M"
+	)
+
+	local fnRet = eval("--- Callable module doc.\nreturn function(x: number): number\n\treturn x\nend").result :: any
+	local tblRet = eval("--- Direct table return doc.\nreturn { a = 1 }").result :: any
+	t.eq(
+		{ fnRet.kind, fnRet.defDoc ~= nil, tblRet.kind, tblRet.defDoc ~= nil },
+		{ "function", true, "table", true },
+		"doc block on top-level return statement attaches to result.defDoc"
+	)
+
+	local factory = eval(table.concat({
+		"local function makeProto()",
+		"\tlocal leaked = { secret = 1 }",
+		"\ttype InnerType = number",
+		"\treturn { public = 2 }",
+		"end",
+		"local M = { own = 1 }",
+		"setmetatable(M, { __index = makeProto() })",
+		"return M",
+	}, "\n"))
+	local envCount = 0
+	for _ in factory.env do
+		envCount += 1
+	end
+	t.eq(
+		{ fieldNames(factory.result), envCount, #factory.types },
+		{ { "own", "public" }, 2, 0 },
+		"factory body delegation does not leak locals or types into module scope"
+	)
 end
