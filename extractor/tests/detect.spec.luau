@@ -241,4 +241,25 @@ return function()
 		member("relay").tags.yields,
 		member("attempt").tags.yields,
 	}, { true, { "server" }, true, true, true, true }, "cross-module yields and realm")
+
+	local projectTableShadow = eval(table.concat({
+		"local FakePlayers = { LocalPlayer = true }",
+		"local FakePlugin = { Toolbar = true }",
+		"local M = {}",
+		"function M.checkLocal()",
+		"\treturn FakePlayers.LocalPlayer",
+		"end",
+		"function M.checkToolbar()",
+		"\treturn FakePlugin.Toolbar",
+		"end",
+		"return M",
+	}, "\n"))
+	local fakeMod: any = { id = "fake.luau", surface = projectTableShadow, requireTargets = {} }
+	local fakeWorld: any = { byId = { ["fake.luau"] = fakeMod } }
+	local checkLocalFn = (surface.fieldOf(projectTableShadow.result, "checkLocal") :: any).value
+	local checkToolbarFn = (surface.fieldOf(projectTableShadow.result, "checkToolbar") :: any).value
+	t.eq({
+		detect.realm(fakeWorld, fakeMod, projectTableShadow.result, checkLocalFn),
+		detect.realm(fakeWorld, fakeMod, projectTableShadow.result, checkToolbarFn),
+	}, { nil, nil }, "project tables with LocalPlayer or Toolbar fields do not trigger false engine realms")
 end

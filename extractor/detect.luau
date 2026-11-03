@@ -241,9 +241,11 @@ local function cachePut(cache: { [any]: any }, fnNode: any, ownerSym: any, answe
 end
 
 type Callee = { expr: any, namedYield: boolean? }
+type MemberRealmSignal = { baseExpr: any, realm: string }
 type FnSummary = {
 	yields: boolean,
 	realms: { [string]: boolean },
+	memberRealms: { MemberRealmSignal },
 	yieldCallees: { Callee },
 	realmCallees: { Callee },
 }
@@ -256,6 +258,9 @@ local function mergeSubSummary(summary: FnSummary, sub: FnSummary, inClosure: bo
 	end
 	for r in sub.realms do
 		summary.realms[r] = true
+	end
+	for _, mr in sub.memberRealms do
+		table.insert(summary.memberRealms, mr)
 	end
 	for _, c in sub.yieldCallees do
 		if not inClosure then
@@ -272,14 +277,14 @@ local function recordNodeRealms(mod: any, summary: FnSummary, node: any)
 	if tag == "indexname" then
 		local name = if node.index ~= nil then node.index.text else nil
 		if name ~= nil then
+			local baseExpr = node.expression
 			local realm = MEMBER_REALM[name]
 			if realm ~= nil then
-				summary.realms[realm] = true
+				table.insert(summary.memberRealms, { baseExpr = baseExpr, realm = realm })
 			end
 			if ENGINE ~= nil and ENGINE.pluginMembers[name] == true then
-				summary.realms.plugin = true
+				table.insert(summary.memberRealms, { baseExpr = baseExpr, realm = "plugin" })
 			end
-			local baseExpr = node.expression
 			if baseExpr ~= nil and baseExpr.tag == "global" and baseExpr.name.text == "game" then
 				local svc = SERVICE_REALM[name]
 				if svc ~= nil then
@@ -310,6 +315,7 @@ local function summarizeFn(mod: any, fnNode: any): FnSummary
 	local summary: FnSummary = {
 		yields = false,
 		realms = {},
+		memberRealms = {},
 		yieldCallees = {},
 		realmCallees = {},
 	}
@@ -342,13 +348,14 @@ local function summarizeFn(mod: any, fnNode: any): FnSummary
 		table.insert(summary.realmCallees, { expr = expr })
 	end
 
-	local seen: { [any]: boolean } = {}
 	local function walkBody(node: any, inClosure: boolean)
-		if type(node) ~= "table" or seen[node] or node.kind == "token" then
+		if node.kind == "token" then
 			return
 		end
-		seen[node] = true
 		local tag = node.tag
+		if tag == "typealias" or tag == "typefunction" then
+			return
+		end
 		if tag == "function" or tag == "localfunction" then
 			inClosure = true
 		elseif tag == "call" then
@@ -366,11 +373,19 @@ local function summarizeFn(mod: any, fnNode: any): FnSummary
 			end
 			checkCall(func, path, nil, inClosure)
 			checkCall(protectedCallee(node, path), nil, true, inClosure)
-		else
+		elseif tag ~= nil then
 			recordNodeRealms(mod, summary, node)
 		end
 		for key, v in node do
-			if key ~= "location" and type(v) == "table" then
+			if
+				key ~= "location"
+				and key ~= "annotation"
+				and key ~= "returnAnnotation"
+				and key ~= "typeArguments"
+				and key ~= "generics"
+				and key ~= "genericPacks"
+				and type(v) == "table"
+			then
 				walkBody(v, inClosure)
 			end
 		end
@@ -393,12 +408,14 @@ function detect.yields(world: any?, mod: any, fnNode: any, ownerSym: any): boole
 		return cached
 	end
 	local visited: { [any]: { [any]: boolean } } = {}
+	local hitCycle = false
 	local function visit(curMod: any, curFn: any, curOwner: any): boolean
 		local hit = cacheGet(yieldCache, curFn, curOwner)
 		if hit ~= nil then
 			return hit
 		end
 		if cacheGet(visited, curFn, curOwner) then
+			hitCycle = true
 			return false
 		end
 		cachePut(visited, curFn, curOwner, true)
@@ -420,6 +437,9 @@ function detect.yields(world: any?, mod: any, fnNode: any, ownerSym: any): boole
 				cachePut(yieldCache, curFn, curOwner, true)
 				return true
 			end
+		end
+		if not hitCycle then
+			cachePut(yieldCache, curFn, curOwner, false)
 		end
 		return false
 	end
@@ -533,34 +553,50 @@ function detect.realm(world: any?, mod: any, fnNode: any, ownerSym: any): { stri
 	end
 	local raw = cacheGet(realmCache, fnNode, ownerSym)
 	if raw == nil then
-		raw = {}
 		local visited: { [any]: { [any]: boolean } } = {}
-		local function visit(curMod: any, curFn: any, curOwner: any)
+		local hitCycle = false
+		local function visit(curMod: any, curFn: any, curOwner: any): { [string]: boolean }?
 			local hit = cacheGet(realmCache, curFn, curOwner)
 			if hit ~= nil then
-				for r in hit do
-					raw[r] = true
-				end
-				return
+				return hit
 			end
 			if cacheGet(visited, curFn, curOwner) then
-				return
+				hitCycle = true
+				return nil
 			end
 			cachePut(visited, curFn, curOwner, true)
 
+			local curRealms: { [string]: boolean } = {}
 			local summary = summarizeFn(curMod, curFn)
 			for r in summary.realms do
-				raw[r] = true
+				curRealms[r] = true
 			end
 			local selfDef = selfDefOf(curFn)
+			for _, mr in summary.memberRealms do
+				-- Skip engine member-realm attribution when the receiver resolves
+				-- to a project table (`self` or a local/required module table).
+				local base = resolveValue(world, curMod, curOwner, selfDef, mr.baseExpr)
+				if base == nil or base.kind ~= "table" then
+					curRealms[mr.realm] = true
+				end
+			end
 			for _, c in summary.realmCallees do
 				local target, targetOwner, targetMod = resolveCallTarget(world, curMod, curOwner, selfDef, c.expr)
 				if target ~= nil then
-					visit(targetMod, target, targetOwner)
+					local subRealms = visit(targetMod, target, targetOwner)
+					if subRealms ~= nil then
+						for r in subRealms do
+							curRealms[r] = true
+						end
+					end
 				end
 			end
+			if not hitCycle then
+				cachePut(realmCache, curFn, curOwner, curRealms)
+			end
+			return curRealms
 		end
-		visit(mod, fnNode, ownerSym)
+		raw = visit(mod, fnNode, ownerSym) or {}
 		cachePut(realmCache, fnNode, ownerSym, raw)
 	end
 	-- Clone `raw` before clearing `server`/`client` so the cached set retains
