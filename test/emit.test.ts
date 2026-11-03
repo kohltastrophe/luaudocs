@@ -1165,4 +1165,47 @@ describe("doc-model parse failures and signature-links runtime transformer", () 
 		expect(meta.__raw).toBe(info);
 		expect(parseLinks(meta.__raw)).toEqual([[0, 4, "/api/X"]]);
 	});
+
+	it("flattens multi-paragraph field docs and recognizes nested generic pure alias re-spellings", () => {
+		const out = emitDocsFromJson(
+			modelJson([
+				mod("src/Graph.luau", "Graph", {
+					types: [
+						ty("src/Graph.luau#type.State", "State", [["{"], ["\tvalue: T,"], ["}"]], {
+							generics: [{ name: "T", isPack: false }],
+							fields: [
+								{
+									name: "value",
+									type: ["T"],
+									doc: "First paragraph.\n\nSecond paragraph.",
+									line: 2,
+								},
+							],
+						}),
+					],
+				}),
+				mod("src/Main.luau", "Main", {
+					doc: "See [State] and [Main.State].",
+					types: [
+						ty(
+							"src/Main.luau#type.State",
+							"State",
+							[
+								[
+									{ text: "Graph.State", id: "src/Graph.luau#type.State" },
+									"<Box<() -> ()>>",
+								],
+							],
+							{ generics: [{ name: "T", isPack: false }] },
+						),
+					],
+				}),
+			]),
+			SAMPLE_CONFIG,
+		);
+		expect(out.pages.get("Graph.md")).toContain("-- First paragraph. Second paragraph.");
+		expect(out.warnings).toEqual([]);
+		expect(out.pages.get("Main.md")).toContain("[`State`](/api/Graph#state)");
+		expect(out.pages.get("Main.md")).toContain("[`Main.State`](/api/Main#state)");
+	});
 });

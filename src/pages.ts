@@ -142,52 +142,53 @@ export function syncDir(
 	mkdirSync(dir, { recursive: true });
 
 	const keep = new Set<string>();
-	for (const [relPath, content] of files) {
-		const abs = join(dir, relPath);
+	for (const relPath of files.keys()) {
 		// Record the normalized relative path (`filesUnder` uses the same form) so a
 		// non-canonical key (`./Foo.md`) is not written and then swept.
-		keep.add(toPosix(relative(dir, abs)));
-		if (writeIfChanged(abs, content)) {
+		keep.add(toPosix(relative(dir, join(dir, relPath))));
+	}
+
+	const subdirs: string[] = [];
+	if (deleteStale) {
+		const onDisk: Array<{ abs: string; rel: string }> = [];
+		const present = new Set<string>();
+		for (const entry of readdirSync(dir, { recursive: true, withFileTypes: true })) {
+			const abs = join(entry.parentPath, entry.name);
+			const rel = toPosix(relative(dir, abs));
+			if (keepForeign?.(rel)) {
+				continue;
+			}
+			if (entry.isDirectory()) {
+				subdirs.push(abs);
+			} else if (entry.isFile()) {
+				onDisk.push({ abs, rel });
+				present.add(rel);
+			}
+		}
+		let keepByLower: Map<string, string> | undefined;
+		for (const { abs, rel } of onDisk) {
+			if (keep.has(rel)) {
+				continue;
+			}
+			keepByLower ??= new Map([...keep].map((item) => [item.toLowerCase(), item]));
+			const kept = keepByLower.get(rel.toLowerCase());
+			if (kept !== undefined && !present.has(kept)) {
+				renameSync(abs, join(dir, kept));
+				continue;
+			}
+			rmSync(abs);
+			summary.deleted += 1;
+		}
+	}
+
+	for (const [relPath, content] of files) {
+		if (writeIfChanged(join(dir, relPath), content)) {
 			summary.written += 1;
 		} else {
 			summary.unchanged += 1;
 		}
 	}
 
-	if (!deleteStale) {
-		return summary;
-	}
-
-	const onDisk: Array<{ abs: string; rel: string }> = [];
-	const present = new Set<string>();
-	const subdirs: string[] = [];
-	for (const entry of readdirSync(dir, { recursive: true, withFileTypes: true })) {
-		const abs = join(entry.parentPath, entry.name);
-		const rel = toPosix(relative(dir, abs));
-		if (keepForeign?.(rel)) {
-			continue;
-		}
-		if (entry.isDirectory()) {
-			subdirs.push(abs);
-		} else if (entry.isFile()) {
-			onDisk.push({ abs, rel });
-			present.add(rel);
-		}
-	}
-	let keepByLower: Map<string, string> | undefined;
-	for (const { abs, rel } of onDisk) {
-		if (keep.has(rel)) {
-			continue;
-		}
-		keepByLower ??= new Map([...keep].map((item) => [item.toLowerCase(), item]));
-		const kept = keepByLower.get(rel.toLowerCase());
-		if (kept !== undefined && !present.has(kept)) {
-			renameSync(abs, join(dir, kept));
-			continue;
-		}
-		rmSync(abs);
-		summary.deleted += 1;
-	}
 	// Remove directories emptied by the sweep, deepest first (non-empty ones throw and stay).
 	for (const emptied of subdirs.sort((a, b) => b.length - a.length)) {
 		try {

@@ -165,6 +165,25 @@ export function inlineText(segs: Inline): string {
 	return segs.map((seg) => (typeof seg === "string" ? seg : seg.text)).join("");
 }
 
+function hasBalancedTypeArgs(rest: string): boolean {
+	if (!rest.startsWith("<")) {
+		return false;
+	}
+	let depth = 0;
+	for (let i = 0; i < rest.length; i++) {
+		const c = rest[i];
+		if (c === "<") {
+			depth++;
+		} else if (c === ">" && rest[i - 1] !== "-") {
+			depth--;
+			if (depth === 0) {
+				return i === rest.length - 1;
+			}
+		}
+	}
+	return false;
+}
+
 /**
  * Checks for a pure re-spelling (`export type Log = Util.Log` or
  * `export type State<T> = Graph.State<T>`) where the definition is a single
@@ -179,7 +198,7 @@ function pureAliasRef(ty: PageType): string | undefined {
 	if (typeof head !== "object" || !head.id) {
 		return undefined;
 	}
-	return rest.length === 0 || /^<[^>]+>$/.test(inlineText(rest)) ? head.id : undefined;
+	return rest.length === 0 || hasBalancedTypeArgs(inlineText(rest)) ? head.id : undefined;
 }
 
 /*
@@ -934,6 +953,7 @@ function commentText(doc: string): string {
 	return stripLinks(unwrap(doc))
 		.replace(/\*\*([^*]+)\*\*/g, "$1")
 		.replace(/`([^`]+)`/g, "$1")
+		.replace(/\s*\n\s*/g, " ")
 		.trim();
 }
 

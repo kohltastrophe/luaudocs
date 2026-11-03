@@ -847,7 +847,7 @@ export function homeLayoutPage(options: {
 	includeReadme?: boolean;
 }): string {
 	const scalar = (value: string): string =>
-		/[:#"']/.test(value) ? JSON.stringify(value) : value;
+		/[:#"'\[\]{}&*!|>%@`\n\r,]|^[?-]|^\s|\s$/.test(value) ? JSON.stringify(value) : value;
 	const lines = [
 		"---",
 		...(options.marker ?? []),

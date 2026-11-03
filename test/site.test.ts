@@ -12,6 +12,7 @@ import {
 	apiPageTrails,
 	collectGuides,
 	guidePageTrails,
+	homeLayoutPage,
 	syncSite,
 	type GuideItem,
 } from "../src/site";
@@ -105,6 +106,18 @@ describe("generated landing page, .gitignore, and changelog", () => {
 		expect(readFileSync(join(userOwned.docsDir, ".gitignore"), "utf8")).not.toMatch(
 			/^index\.md$/m,
 		);
+
+		const specialHero = homeLayoutPage({
+			title: "Test",
+			actions: [
+				{ theme: "brand", text: "[Start] & Go!", link: "/guide/intro?x=1&y=2" },
+				{ theme: "alt", text: "API Reference", link: "/api/" },
+			],
+		});
+		expect(specialHero).toContain('text: "[Start] & Go!"');
+		expect(specialHero).toContain('link: "/guide/intro?x=1&y=2"');
+		expect(specialHero).toContain("text: API Reference");
+		expect(specialHero).toContain("link: /api/");
 	});
 
 	it("rewrites README links through [repo], public/, and site base, and warns on unreachable links", () => {
