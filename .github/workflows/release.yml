@@ -1,23 +1,67 @@
-# Publishes to npm on a `v*` tag. The CI ladder reruns here: the tag is what
-# gets published, so the tag is what gets tested. Actions are pinned by SHA
-# because this workflow holds `id-token: write`.
+# Publishes to npm and creates the `v*` GitHub Release when `main` advances
+# `package.json` to an unreleased version. A lightweight check job gates the
+# `release` environment so ordinary pushes to `main` finish in seconds without
+# re-running the test ladder. Actions are pinned by SHA because `publish` holds
+# `id-token: write`.
 name: Release
 
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Validate and build without publishing or creating a release
+        type: boolean
+        default: true
 
 permissions:
-  contents: write # create the GitHub Release
-  id-token: write # npm provenance
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
-  publish:
+  check:
     runs-on: ubuntu-latest
-    environment: release
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      should_release: ${{ steps.release.outputs.should_release }}
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.MY_RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+
+      - name: Release PR or Release
+        id: release
+        uses: kohltastrophe/release@v1.0.0
+        with:
+          token: ${{ secrets.MY_RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+
+  publish:
+    needs: check
+    if: needs.check.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write # create the tag and GitHub Release
+      id-token: write # npm provenance
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "22"
@@ -25,17 +69,6 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: "1.3.14"
-
-      # a mismatched tag publishes the wrong version, which cannot be taken back
-      - name: Tag matches package.json
-        run: |
-          set -euo pipefail
-          tagged="${GITHUB_REF_NAME#v}"
-          declared="$(node -p "require('./package.json').version")"
-          if [ "$tagged" != "$declared" ]; then
-            echo "tag $GITHUB_REF_NAME does not match package.json version $declared" >&2
-            exit 1
-          fi
 
       - run: bun install --frozen-lockfile
 
@@ -84,21 +117,13 @@ jobs:
           ls .luaudocs/api/*.md
           ls .github/workflows/docs.yml
 
-      # Before publish: npm's version is immutable, so an empty or missing
-      # changelog section has to fail while the tag is still recoverable
+      # Before publish: npm's version is immutable, so an invalid or missing
+      # changelog section has to fail before publishing.
       - name: Release notes
-        run: |
-          set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
-          awk -v v="$version" '
-            $0 ~ "^## \\[" v "\\]" { inside = 1; next }
-            inside && /^## \[/ { exit }
-            inside { print }
-          ' CHANGELOG.md > release-notes.md
-          if [ ! -s release-notes.md ]; then
-            echo "CHANGELOG.md has no '## [$version]' section to release from" >&2
-            exit 1
-          fi
+        id: notes
+        uses: kohltastrophe/release@v1.0.0
+        with:
+          mode: release
 
       # --ignore-scripts: publish the dist/ and src/generated/ the steps above
       # tested, not a fresh prepare rebuild nothing exercised.
@@ -106,28 +131,37 @@ jobs:
       # a version already on the registry skips the publish, and an existing
       # release is edited rather than created again.
       - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          RELEASE_VERSION: ${{ needs.check.outputs.version }}
         run: |
           set -euo pipefail
-          version="$(node -p 'require("./package.json").version')"
-          if npm view "luaudocs@$version" version >/dev/null 2>&1; then
-            echo "luaudocs@$version is already on the registry; skipping publish"
+          if npm view "luaudocs@$RELEASE_VERSION" version >/dev/null 2>&1; then
+            echo "luaudocs@$RELEASE_VERSION is already on the registry; skipping publish"
           else
             npm publish --ignore-scripts
           fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.check.outputs.tag }}
+          NOTES_FILE: ${{ steps.notes.outputs.notes_file }}
+          PRERELEASE: ${{ needs.check.outputs.prerelease }}
         run: |
           set -euo pipefail
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release edit "$GITHUB_REF_NAME" \
-              --title "$GITHUB_REF_NAME" \
-              --notes-file release-notes.md
+          flags=(--title "$RELEASE_TAG" --notes-file "$NOTES_FILE")
+          if [ "$PRERELEASE" = "true" ]; then
+            flags+=(--prerelease)
+          fi
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" \
+              --title "$RELEASE_TAG" \
+              --notes-file "$NOTES_FILE"
+          elif git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" "${flags[@]}"
           else
-            gh release create "$GITHUB_REF_NAME" \
-              --title "$GITHUB_REF_NAME" \
-              --notes-file release-notes.md
+            gh release create "$RELEASE_TAG" \
+              --target "$GITHUB_SHA" \
+              "${flags[@]}"
           fi

@@ -26,6 +26,8 @@ jobs:
     steps:
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
       # the exact engines floor, so the matrix proves the minimum we claim
       - uses: actions/setup-node@v6
         with:
@@ -56,6 +58,12 @@ jobs:
 
       - name: Formatting (prettier + stylua)
         run: bun run format:check && bun run format:luau:check
+
+      - name: Conventional Commits and CHANGELOG.md check
+        uses: kohltastrophe/release@v1.0.0
+        with:
+          mode: check
+          pr-title: ${{ github.event.pull_request.title }}
 
       - name: Extractor specs (lute)
         run: bun run test:lute
