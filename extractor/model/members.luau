@@ -272,6 +272,40 @@ function members.toModelFields(fields: { segs.Field }?): { any }?
 	return out
 end
 
+--- Merges `@field` tags into table-type fields. Tag types and descriptions
+--- override AST ones, and `@field` entries absent from the AST walk append to
+--- the end (matching `lineFacts` when the field exists in the display).
+function members.mergeTypeFieldTags(
+	fields: { any }?,
+	tyDoc: ParsedDoc,
+	lineFacts: { [string]: any },
+	genericNames: { [string]: boolean }?
+): { any }?
+	if #tyDoc.fields == 0 then
+		return fields
+	end
+	local merged: { any } = fields or {}
+	for _, f in tyDoc.fields do
+		local existing = members.byName(merged, f.name)
+		if existing ~= nil then
+			existing.desc = f.desc or existing.desc
+			if f.type ~= nil then
+				existing.type = members.tagType(f.type, genericNames)
+			end
+		else
+			local at = lineFacts[f.name]
+			table.insert(merged, {
+				name = f.name,
+				type = members.tagType(f.type, genericNames),
+				desc = f.desc,
+				line = if at ~= nil then at.line else nil,
+				docInDisplay = if at ~= nil and at.docInDisplay then true else nil,
+			})
+		end
+	end
+	return merged
+end
+
 function members.forwardTagDiagnostics(ctx: Ctx, modId: string, block: any, doc: ParsedDoc)
 	-- Report diagnostics at most once per doc block, even when multiple aliased
 	-- exports share the same `defDoc`.
@@ -915,7 +949,7 @@ function members.buildMembers(ctx: Ctx, mod: ModuleData, containerName: string, 
 				then mod.claimIndex[ownerEntry.key.location.beginLine]
 				else nil
 			if entryBlock ~= nil then
-				doc = members.parseTags(ctx, entryBlock)
+				doc = members.parseBlock(ctx, mod.id, entryBlock)
 			end
 		end
 		local secondaryDesc: string? = nil

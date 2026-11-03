@@ -134,40 +134,6 @@ local function buildFloatingMember(
 	})
 end
 
---- Merges `@field` tags into table-type fields. Tag types and descriptions
---- override AST ones, and `@field` entries absent from the AST walk append to
---- the end (matching `lineFacts` when the field exists in the display).
-local function mergeTypeFieldTags(
-	fields: { any }?,
-	tyDoc: ParsedDoc,
-	lineFacts: { [string]: any },
-	genericNames: { [string]: boolean }
-): { any }?
-	if #tyDoc.fields == 0 then
-		return fields
-	end
-	local merged: { any } = fields or {}
-	for _, f in tyDoc.fields do
-		local existing = members.byName(merged, f.name)
-		if existing ~= nil then
-			existing.desc = f.desc or existing.desc
-			if f.type ~= nil then
-				existing.type = members.tagType(f.type, genericNames)
-			end
-		else
-			local at = lineFacts[f.name]
-			table.insert(merged, {
-				name = f.name,
-				type = members.tagType(f.type, genericNames),
-				desc = f.desc,
-				line = if at ~= nil then at.line else nil,
-				docInDisplay = if at ~= nil and at.docInDisplay then true else nil,
-			})
-		end
-	end
-	return merged
-end
-
 local function buildSingleTypeDecl(ctx: Ctx, mod: ModuleData, ty: any, tyDoc: ParsedDoc, parsedFile: any): any
 	local claimIndex: any = mod.claimIndex
 	local trailingIndex: any = mod.trailingIndex
@@ -185,7 +151,7 @@ local function buildSingleTypeDecl(ctx: Ctx, mod: ModuleData, ty: any, tyDoc: Pa
 		if ty.stat.location ~= nil then ty.stat.location.beginLine else nil
 	)
 	local isTypeofAlias = ty.stat.type ~= nil and ty.stat.type.tag == "typeof"
-	local fields = mergeTypeFieldTags(rawFields, tyDoc, lineFacts, genericNames)
+	local fields = members.mergeTypeFieldTags(rawFields, tyDoc, lineFacts, genericNames)
 
 	-- For a `type function`, extract its parameter list for the signature
 	-- fence instead of slicing `stat.type` (which is the `type` keyword token).
@@ -277,7 +243,12 @@ local function buildTypeDecls(
 		end
 		local decl = buildSingleTypeDecl(ctx, mod, ty, tyDoc, parsedFile)
 		table.insert(entry.types, decl)
+		ctx.typesByModule[mod.id][ty.name] = decl.id
+		if ctx.typesByModule[mod.id][typeName] == nil or not emitted[typeName] then
+			ctx.typesByModule[mod.id][typeName] = decl.id
+		end
 		emitted[ty.name] = true
+		emitted[typeName] = true
 
 		-- `classType` idiom: `export type X<T> = typeof(setmetatable({} :: D, ClassTable))`
 		-- or `setmetatable<D, typeof(ClassTable)>`.
@@ -439,7 +410,7 @@ local function processFloatingBlocks(ctx: Ctx, mod: ModuleData, entry: any, root
 		-- Visit unclaimed doc blocks, as well as blocks claimed by unexported
 		-- local statements whose tag diagnostics were never forwarded (e.g.,
 		-- `--- @function f` above a local helper that never joined the surface).
-		if not block.doc or (block.claimed and ctx.forwardedBlocks[block]) then
+		if not block.doc or ctx.forwardedBlocks[block] then
 			continue
 		end
 		local doc = members.parseTags(ctx, block)
@@ -617,9 +588,9 @@ function build.run(ctx: Ctx, mod: ModuleData)
 		local moduleDocBlock = comments.moduleDoc(mod.blocks or {}, surface.firstStatLine)
 		local moduleDoc: ParsedDoc? = nil
 		if moduleDocBlock ~= nil then
-			local parsedModuleDoc = members.parseBlock(ctx, mod.id, moduleDocBlock)
+			local parsedModuleDoc = members.parseTags(ctx, moduleDocBlock)
 			if parsedModuleDoc.placing == nil then
-				moduleDoc = parsedModuleDoc
+				moduleDoc = members.parseBlock(ctx, mod.id, moduleDocBlock)
 				moduleDocBlock.claimed = true
 			end
 		end

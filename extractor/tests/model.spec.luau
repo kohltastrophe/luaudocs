@@ -792,4 +792,132 @@ return function()
 		["@pkg/plain"] = { alias = "pkg", path = "plain" },
 		["plain.Blob"] = { alias = "pkg", path = "plain", name = "Blob" },
 	}, "externalDoc.externals map")
+
+	t.suite("model: regressions (respelled types, passthrough typeIdIn, annotatedReturn, and tag forwarding)")
+
+	local regDoc, regDiag = assembleInline({
+		{
+			id = "main.luau",
+			src = table.concat({
+				'local Sub = require("./Sub")',
+				'local Mid = require("./Mid")',
+				"export type Opts1 = Sub.Options",
+				"export type Opts2 = Sub.Options",
+				"--- @interface RenamedBox",
+				"export type RawBox = { value: Mid.Item }",
+				"--- @ignore",
+				"type RenamedBox = string",
+				"local M = {}",
+				"M.prefixedCall = Sub.makePrefixed()",
+				"M.packCall = Sub.makePack()",
+				"return M",
+			}, "\n"),
+		},
+		{
+			id = "Sub.luau",
+			surfaced = false,
+			src = table.concat({
+				'local T = require("./Mid")',
+				"--- Shared options doc.",
+				"--- @since 1.2.0",
+				"--- @field extra boolean -- injected by tag",
+				"export type Options = {",
+				"\t--- Count doc.",
+				"\tcount: number,",
+				"}",
+				"local Sub = {}",
+				"function Sub.makePrefixed<T>(): T.Item",
+				"\treturn nil :: any",
+				"end",
+				"function Sub.makePack<U...>(): (U...) -> ()",
+				"\treturn nil :: any",
+				"end",
+				"return Sub",
+			}, "\n"),
+		},
+		{
+			id = "Mid.luau",
+			src = 'return require("./Real")',
+		},
+		{
+			id = "Real.luau",
+			src = table.concat({
+				"export type Item = number",
+				"local Real = {}",
+				"return Real",
+			}, "\n"),
+		},
+	})
+	local regMain = byId(regDoc.modules, "main.luau")
+	local opts1 = byName(regMain.types, "Opts1")
+	local opts2 = byName(regMain.types, "Opts2")
+	local renamedBox = byName(regMain.types, "RenamedBox")
+	t.eq({
+		#regDiag.list,
+		opts1.doc,
+		opts2.doc,
+		opts1.tags.since,
+		opts2.tags.since,
+		#opts1.fields,
+		#opts2.fields,
+		opts1.fields[1].doc,
+		opts2.fields[1].doc,
+		opts1.fields[2].name,
+		opts2.fields[2].name,
+		renamedBox.fields[1].type[1].id,
+		byName(regMain.members, "prefixedCall").type[1].id,
+		byName(regMain.members, "packCall").type,
+	}, {
+		0,
+		"Shared options doc.",
+		"Shared options doc.",
+		"1.2.0",
+		"1.2.0",
+		2,
+		2,
+		"Count doc.",
+		"Count doc.",
+		"extra",
+		"extra",
+		"Real.luau#type.Item",
+		"Real.luau#type.Item",
+		nil,
+	}, "multiple respelled aliases, passthrough typeIdIn, prefixed generic return, and genericPack return rejection")
+
+	local ownerDoc, ownerDiag = assembleInline({
+		{
+			id = "owner.luau",
+			src = table.concat({
+				"--- @function topFloating",
+				"",
+				"type Shape = {",
+				"\t--- Field-level doc from owner type.",
+				"\t--- @param x number -- param from owner type",
+				"\t--- @param ghost string -- mismatched param on owner type",
+				"\trun: (x: number) -> (),",
+				"}",
+				"local M: Shape = {} :: any",
+				"function M.run(x: number) end",
+				"return M",
+			}, "\n"),
+		},
+	})
+	local ownerMod = byId(ownerDoc.modules, "owner.luau")
+	local diagCodes = {}
+	for _, d in ownerDiag.list do
+		table.insert(diagCodes, d.code)
+	end
+	t.eq(
+		{
+			byName(ownerMod.members, "topFloating") ~= nil,
+			byName(ownerMod.members, "run").doc,
+			diagCodes,
+		},
+		{
+			true,
+			"Field-level doc from owner type.",
+			{ "param-mismatch" },
+		},
+		"owner table-type field doc forwards diagnostics without false orphaned-doc-block and top placing block survives moduleDoc"
+	)
 end

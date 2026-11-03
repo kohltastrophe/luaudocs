@@ -359,6 +359,23 @@ function segs.fromTag(display: string, generics: { [string]: boolean }?): { Seg 
 	return cloneForTag(cached :: { Seg }, generics)
 end
 
+local function hasTrailingComment(
+	trailingIndex: comments.TrailingIndex,
+	typeSpan: Span,
+	line: number,
+	prevKeyLine: number?,
+	nextKeyLine: number?
+): boolean
+	if prevKeyLine == line or nextKeyLine == line or line > typeSpan.endLine then
+		return false
+	end
+	local tr = trailingIndex[line]
+	if tr == nil then
+		return false
+	end
+	return not (line == typeSpan.endLine and tr.span.beginColumn >= typeSpan.endColumn)
+end
+
 --- Collects per-field docs and display-line facts for a table-type definition in two tiers:
 ---   * A direct table type (`own == true`) produces full `Field` entries and
 ---     claims each field's leading doc block.
@@ -383,6 +400,7 @@ function segs.fields(
 	if typeNode == nil or typeNode.location == nil then
 		return nil, facts, nil
 	end
+	local typeSpan = parseMod.typeSpan(typeNode) :: Span
 	local blockLines, lineOf = segs.block(parsed, typeNode, generics, declLine)
 	local fields: { Field } = {}
 	local ambiguous: { [string]: boolean } = {}
@@ -410,26 +428,39 @@ function segs.fields(
 			return
 		end
 		if node.tag == "table" and node.entries ~= nil then
+			local propEntries = {}
 			for _, entry in node.entries do
 				if parseMod.isTypeProperty(entry) and entry.key ~= nil then
-					local name = entry.key.text
-					local keyLine = entry.key.location.beginLine
-					if own then
-						local block = comments.claim(claimIndex, keyLine)
-						local inDisplay = block ~= nil or trailingIndex[keyLine] ~= nil
-						table.insert(fields, {
-							name = name,
-							type = segs.inline(parsed, entry.value, generics),
-							desc = if block ~= nil
-								then util.joinDesc(block.content)
-								else comments.trailingText(trailingIndex, keyLine),
-							line = lineOf[keyLine],
-							docInDisplay = if inDisplay then true else nil,
-						})
-						fact(name, keyLine, inDisplay)
-					else
-						fact(name, keyLine, claimIndex[keyLine] ~= nil or trailingIndex[keyLine] ~= nil)
-					end
+					table.insert(propEntries, entry)
+				end
+			end
+			for idx, entry in propEntries do
+				local name = entry.key.text
+				local keyLine = entry.key.location.beginLine
+				local endLine = if entry.value ~= nil and entry.value.location ~= nil
+					then entry.value.location.endLine
+					else keyLine
+				local prevEntry = propEntries[idx - 1]
+				local prevKeyLine = if prevEntry ~= nil then prevEntry.key.location.beginLine else nil
+				local nextEntry = propEntries[idx + 1]
+				local nextKeyLine = if nextEntry ~= nil then nextEntry.key.location.beginLine else nil
+				local hasTrailing = hasTrailingComment(trailingIndex, typeSpan, endLine, prevKeyLine, nextKeyLine)
+				if own then
+					local block = comments.claim(claimIndex, keyLine)
+					local inDisplay = block ~= nil or hasTrailing
+					table.insert(fields, {
+						name = name,
+						type = segs.inline(parsed, entry.value, generics),
+						desc = if block ~= nil
+							then util.joinDesc(block.content)
+							elseif hasTrailing then comments.trailingText(trailingIndex, endLine)
+							else nil,
+						line = lineOf[keyLine],
+						docInDisplay = if inDisplay then true else nil,
+					})
+					fact(name, keyLine, inDisplay)
+				else
+					fact(name, keyLine, claimIndex[keyLine] ~= nil or hasTrailing)
 				end
 			end
 		elseif (node.tag == "intersection" or node.tag == "union") and node.types ~= nil then

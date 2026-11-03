@@ -105,6 +105,24 @@ return function()
 		"optional table type unwraps and yields own fields"
 	)
 
+	local multiLineTrailing = select(
+		1,
+		fieldsOf(
+			"{\n\tfn: (\n\t\tx: number\n\t) -> (), -- multi-line trailing doc\n\ta: number, b: string, -- shared line\n}"
+		)
+	) :: any
+	t.eq(multiLineTrailing, {
+		{
+			name = "fn",
+			type = { "( x: ", ref("number", "number"), " ) -> ()" },
+			desc = "multi-line trailing doc",
+			line = 2,
+			docInDisplay = true,
+		},
+		{ name = "a", type = { ref("number", "number") }, line = 5 },
+		{ name = "b", type = { ref("string", "string") }, line = 5 },
+	}, "multi-line field trailing comment on endLine and no shared-line trailing bleed")
+
 	t.suite("segs: generics and vararg packs")
 
 	local parsed10, stat10 = typeAlias("type G<K, V = K, W = Widget, U... = (number, Widget)> = (W, U...) -> ()")

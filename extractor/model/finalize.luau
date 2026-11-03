@@ -15,8 +15,10 @@
 ---   6. resolve + constructors -- resolves every reference segment to its target
 ---                    ID and links class constructors using those resolved IDs.
 
+local comments = require("../comments")
 local graphMod = require("../graph")
 local inferMod = require("../infer")
+local parseMod = require("../parse")
 local segs = require("../segs")
 local surfaceMod = require("../surface")
 local members = require("./members")
@@ -423,10 +425,31 @@ local function resolveReexports(ctx: Ctx, g: Graph)
 	end
 end
 
-local function typeIdIn(ctx: Ctx, mod: any, localName: string, typeName: string): string?
+local function typeIdIn(ctx: Ctx, g: Graph, mod: any, localName: string, typeName: string): string?
 	local targetMod = mod.localModules[localName]
-	local types = if targetMod ~= nil then ctx.typesByModule[targetMod] else nil
-	return if types ~= nil then types[typeName] else nil
+	local seen: { [string]: boolean }? = nil
+	while targetMod ~= nil do
+		local types = ctx.typesByModule[targetMod]
+		local found = if types ~= nil then types[typeName] else nil
+		if found ~= nil then
+			return found
+		end
+		local m = g.byId[targetMod]
+		local res = if m ~= nil and m.surface ~= nil then m.surface.result else nil
+		local nextMod = if res ~= nil and res.kind == "require" then m.requireTargets[res] else nil
+		if nextMod == nil then
+			break
+		end
+		if seen == nil then
+			seen = { [targetMod] = true }
+		elseif seen[nextMod] then
+			break
+		else
+			seen[nextMod] = true
+		end
+		targetMod = nextMod
+	end
+	return nil
 end
 
 --- Resolves reference segments in `list` against the defining module's scope.
@@ -454,7 +477,7 @@ local function resolveList(
 		local scope: string = seg.__scope or modId
 		local mod = g.byId[scope]
 		if seg.__prefix ~= nil then
-			seg.id = if mod ~= nil then typeIdIn(ctx, mod, seg.__prefix, seg.__name) else nil
+			seg.id = if mod ~= nil then typeIdIn(ctx, g, mod, seg.__prefix, seg.__name) else nil
 			-- If `seg.__prefix` is a required runtime alias (`fs.File`), record
 			-- an `ExternalRef` in `ctx.externals` so the renderer can link it.
 			local external = if mod ~= nil and seg.id == nil then mod.localExternals[seg.__prefix] else nil
@@ -478,7 +501,7 @@ local function resolveList(
 		if not seg.__tag then
 			continue
 		end
-		seg.id = if mod ~= nil then typeIdIn(ctx, mod, seg.__name, seg.__name) else nil
+		seg.id = if mod ~= nil then typeIdIn(ctx, g, mod, seg.__name, seg.__name) else nil
 		if seg.id ~= nil then
 			continue
 		end
@@ -529,7 +552,18 @@ local function annotatedReturn(parsedFile: any, fnNode: any): { any }?
 	if fnNode.generics ~= nil or fnNode.genericPacks ~= nil then
 		local _, genericNames = segs.generics(parsedFile, fnNode.generics, fnNode.genericPacks)
 		for _, seg in list do
-			if type(seg) == "table" and genericNames[seg.__name] then
+			if type(seg) == "table" and seg.__prefix == nil and genericNames[seg.__name] then
+				return nil
+			end
+		end
+		if fnNode.genericPacks ~= nil then
+			local hasUnboundPack = false
+			parseMod.walkNodes(node, function(n)
+				if (n.tag == "generic" or n.tag == "genericpack") and n.name ~= nil and genericNames[n.name.text] then
+					hasUnboundPack = true
+				end
+			end)
+			if hasUnboundPack then
 				return nil
 			end
 		end
@@ -638,18 +672,20 @@ end
 --- onto `X` and registering `X.id` in `ctx.typesByModule[Sub.id][Y]` so all
 --- references to `Sub.Y` link to `X`.
 local function expandRespelledTypes(ctx: Ctx, g: Graph)
+	local expandedHere: { [string]: boolean } = {}
 	for _, entry in ctx.modules do
 		for _, decl in entry.types do
 			local seg = respelledSeg(decl.definition)
 			local writer = if seg ~= nil then g.byId[decl.source.file] else nil
 			local targetId = if writer ~= nil then writer.localModules[seg.__prefix] else nil
 			local targetMod = if targetId ~= nil then g.byId[targetId] else nil
+			local targetKey = if targetId ~= nil and seg ~= nil then (targetId :: string) .. ":" .. seg.__name else nil
 			if
 				targetMod == nil
 				or targetMod.surfaced
 				or targetMod.surface == nil
 				or targetMod.parsed == nil
-				or ctx.typesByModule[targetId :: string][seg.__name] ~= nil
+				or (ctx.typesByModule[targetId :: string][seg.__name] ~= nil and not expandedHere[targetKey :: string])
 			then
 				continue
 			end
@@ -657,7 +693,10 @@ local function expandRespelledTypes(ctx: Ctx, g: Graph)
 			if ty == nil or ty.stat == nil or ty.stat.type == nil then
 				continue
 			end
-			ctx.typesByModule[targetId :: string][ty.name] = decl.id
+			if ctx.typesByModule[targetId :: string][ty.name] == nil then
+				ctx.typesByModule[targetId :: string][ty.name] = decl.id
+				expandedHere[(targetId :: string) .. ":" .. ty.name] = true
+			end
 			local generics, genericNames = segs.generics(targetMod.parsed, ty.stat.generics, ty.stat.genericPacks)
 			if #decl.generics == 0 and #generics > 0 then
 				for _, gp in generics do
@@ -665,9 +704,18 @@ local function expandRespelledTypes(ctx: Ctx, g: Graph)
 				end
 				decl.generics = generics
 			end
-			local claimIndex: any = targetMod.claimIndex
-			local trailingIndex: any = targetMod.trailingIndex
-			local fields, _, displayBlock = segs.fields(
+			local tyDoc = if ty.doc ~= nil then members.parseBlock(ctx, targetMod.id, ty.doc) else members.EMPTY_DOC
+			local claimIndex: any = targetMod.claimIndex or comments.claimIndex(targetMod.blocks or {})
+			local trailingIndex: any = targetMod.trailingIndex or comments.trailingIndex(targetMod.parsed)
+			if ty.stat.type.location ~= nil then
+				for line = ty.stat.type.location.beginLine, ty.stat.type.location.endLine do
+					local b = claimIndex[line]
+					if b ~= nil then
+						b.claimed = false
+					end
+				end
+			end
+			local rawFields, lineFacts, displayBlock = segs.fields(
 				targetMod.parsed,
 				ty.stat.type,
 				claimIndex,
@@ -675,6 +723,7 @@ local function expandRespelledTypes(ctx: Ctx, g: Graph)
 				genericNames,
 				if ty.stat.location ~= nil then ty.stat.location.beginLine else nil
 			)
+			local fields = members.mergeTypeFieldTags(rawFields, tyDoc, lineFacts, genericNames)
 			if displayBlock ~= nil then
 				for _, line in displayBlock do
 					stampScopeList(line, targetMod.id)
@@ -688,7 +737,10 @@ local function expandRespelledTypes(ctx: Ctx, g: Graph)
 				decl.fields = members.toModelFields(fields)
 			end
 			if decl.doc == nil and ty.doc ~= nil then
-				decl.doc = members.placingDoc(members.parseBlock(ctx, targetMod.id, ty.doc))
+				decl.doc = members.placingDoc(tyDoc)
+			end
+			if ty.doc ~= nil then
+				members.overlayBadges(decl.tags, members.buildBadges(tyDoc))
 			end
 		end
 	end
