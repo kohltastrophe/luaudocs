@@ -2,6 +2,20 @@
 
 Notable changes to LuauDocs, newest first. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow [semantic versioning](https://semver.org/spec/v2.0.0.html). While the major version is 0, a minor bump may include breaking changes.
 
+## [0.3.2] - 2026-11-04
+
+### Changed
+
+- Release parsed CSTs after extraction. ([07d2889](https://github.com/kohltastrophe/luaudocs/commit/07d288967d34946d132f5cc85e0fb3a5f54eb338))
+
+### Fixed
+
+- Avoid false-positive member realms on project tables. ([976106e](https://github.com/kohltastrophe/luaudocs/commit/976106e4869d7823edec574520c8cafa1d9ef633))
+- Fold literal binary expressions during surface evaluation. ([6a67952](https://github.com/kohltastrophe/luaudocs/commit/6a67952d428802d5f37e48936913ae5cb98ca66a))
+- Preserve tags on respelled type aliases. ([bcff882](https://github.com/kohltastrophe/luaudocs/commit/bcff882d9ee04a7bdf2845d0d068b105f51fec09))
+- Handle nested generic alias references in rendered pages. ([028147b](https://github.com/kohltastrophe/luaudocs/commit/028147badbb5be3b4a4de92e9dfb1e36f47bc70e))
+- Unshallow shallow Git clones before VitePress build. ([0011c8b](https://github.com/kohltastrophe/luaudocs/commit/0011c8bc467bfc3c00190fc846fef35d735bfeba))
+
 ## [0.3.1] - 2026-10-21
 
 ### Changed
@@ -41,6 +55,7 @@ Notable changes to LuauDocs, newest first. The format follows [Keep a Changelog]
 
 - Add Luau documentation extractor, static site generator, and CLI.
 
+[0.3.2]: https://github.com/kohltastrophe/luaudocs/releases/tag/v0.3.2
 [0.3.1]: https://github.com/kohltastrophe/luaudocs/releases/tag/v0.3.1
 [0.3.0]: https://github.com/kohltastrophe/luaudocs/releases/tag/v0.3.0
 [0.2.0]: https://github.com/kohltastrophe/luaudocs/releases/tag/v0.2.0
