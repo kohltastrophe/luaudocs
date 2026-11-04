@@ -14,7 +14,7 @@ import { join, relative, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import pc from "picocolors";
 import pkg from "../package.json";
-import { createContext, ensureVitepress, runBuild, spawnVitepress } from "./build";
+import { createContext, ensureVitepress, runBuild, spawnVitepress, unshallowGit } from "./build";
 import { formatDocModel } from "./docmodel";
 import { runDev } from "./dev";
 import { initProject } from "./init";
@@ -93,7 +93,7 @@ async function build(args: string[]): Promise<void> {
 		return;
 	}
 	if (!values["emit-only"]) {
-		await ensureVitepress(context.docsDir);
+		await Promise.all([ensureVitepress(context.docsDir), unshallowGit(context.root)]);
 		const vitepress = spawnVitepress(context.docsDir, "build");
 		try {
 			await vitepress.done;
