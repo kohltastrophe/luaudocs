@@ -7,7 +7,7 @@
  * transient parse error never unpublishes a page.
  */
 import { existsSync, readFileSync } from "node:fs";
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import pc from "picocolors";
@@ -226,6 +226,31 @@ function vitepressBin(docsDir: string): string {
 	const bin =
 		typeof vitepressPkg.bin === "string" ? vitepressPkg.bin : vitepressPkg.bin?.vitepress;
 	return join(dirname(pkgPath), bin ?? "bin/vitepress.js");
+}
+
+/**
+ * Best-effort unshallows a shallow Git clone (`--depth=1` on Cloudflare Pages
+ * or `actions/checkout`) so VitePress's `lastUpdated` timestamps reflect each
+ * page's real commit history instead of the HEAD commit. Silently no-ops
+ * outside a Git repository, on full clones, or when `git fetch` fails.
+ */
+export function unshallowGit(cwd: string): Promise<void> {
+	return new Promise((settle) => {
+		execFile(
+			"git",
+			["rev-parse", "--is-shallow-repository"],
+			{ cwd, timeout: 5_000 },
+			(err, out) => {
+				if (err || out.trim() !== "true") {
+					settle();
+					return;
+				}
+				execFile("git", ["fetch", "--quiet", "--unshallow"], { cwd, timeout: 60_000 }, () =>
+					settle(),
+				);
+			},
+		);
+	});
 }
 
 export interface VitepressProcess {

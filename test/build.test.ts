@@ -1,10 +1,18 @@
 /**
  * Tests for `syncDir`, `filterModel`, and `runBuild` (`src/build.ts`).
  */
+import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import { createContext, runBuild, type BuildContext, type RenderedModel } from "../src/build";
+import {
+	createContext,
+	runBuild,
+	unshallowGit,
+	type BuildContext,
+	type RenderedModel,
+} from "../src/build";
 import { parseDocModel, type DocModel } from "../src/docmodel";
 import { syncDir } from "../src/pages";
 import { emitDocs, filterModel } from "../src/render";
@@ -206,5 +214,55 @@ describe("runBuild", () => {
 		} finally {
 			vi.restoreAllMocks();
 		}
+	});
+
+	it("unshallows shallow Git clones and no-ops on full clones or non-repositories", async () => {
+		const nonRepo = tempDir();
+		await expect(unshallowGit(nonRepo)).resolves.toBeUndefined();
+
+		const origin = tempDir();
+		const gitEnv = {
+			...process.env,
+			GIT_AUTHOR_NAME: "Test",
+			GIT_AUTHOR_EMAIL: "test@example.com",
+			GIT_COMMITTER_NAME: "Test",
+			GIT_COMMITTER_EMAIL: "test@example.com",
+		};
+		execFileSync("git", ["init", "--initial-branch=main"], { cwd: origin, env: gitEnv });
+		seed(origin, { "a.txt": "1\n" });
+		execFileSync("git", ["add", "a.txt"], { cwd: origin, env: gitEnv });
+		execFileSync("git", ["commit", "-m", "first"], { cwd: origin, env: gitEnv });
+		seed(origin, { "a.txt": "2\n" });
+		execFileSync("git", ["commit", "-am", "second"], { cwd: origin, env: gitEnv });
+
+		const shallow = join(tempDir(), "shallow");
+		execFileSync(
+			"git",
+			["clone", "--quiet", "--depth=1", pathToFileURL(origin).href, shallow],
+			{ env: gitEnv },
+		);
+		expect(
+			execFileSync("git", ["rev-parse", "--is-shallow-repository"], {
+				cwd: shallow,
+				encoding: "utf8",
+			}).trim(),
+		).toBe("true");
+
+		await unshallowGit(shallow);
+		expect(
+			execFileSync("git", ["rev-parse", "--is-shallow-repository"], {
+				cwd: shallow,
+				encoding: "utf8",
+			}).trim(),
+		).toBe("false");
+		expect(
+			execFileSync("git", ["rev-list", "--count", "HEAD"], {
+				cwd: shallow,
+				encoding: "utf8",
+			}).trim(),
+		).toBe("2");
+
+		// Second call on an already-full clone is a fast no-op.
+		await expect(unshallowGit(shallow)).resolves.toBeUndefined();
 	});
 });
