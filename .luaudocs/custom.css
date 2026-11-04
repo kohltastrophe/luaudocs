@@ -14,3 +14,20 @@
 .VPHero .tagline {
 	text-wrap: balance;
 }
+
+.VPHome .vp-doc h2:first-child {
+	margin-top: 0;
+}
+
+.VPHome .vp-doc h2 > span {
+	color: var(--vp-c-text-3);
+}
+
+.VPHome .vp-doc .sponsors {
+	text-align: center;
+}
+
+.VPHome .vp-doc .sponsors img {
+	display: inline-block;
+	vertical-align: middle;
+}
