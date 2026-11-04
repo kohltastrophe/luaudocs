@@ -1,0 +1,5 @@
+<svg width="78" height="36" viewBox="0 0 75 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+<rect x="1.5" y="1.5" width="72" height="33" rx="6" fill="#F6F8FA" stroke="#d1d9e0"/>
+<path fill="#1f2328" d="M13 12h12v12h-6v-9h-3v9h-3V12z"/>
+<text x="46" y="20" class="label" text-anchor="middle" dominant-baseline="middle" fill="#1f2328" style="font: 600 14px 'Mona Sans VF', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif">npm</text>
+</svg>

@@ -1,0 +1,62 @@
+<svg width="680" height="316" viewBox="0 0 680 316" fill="none" xmlns="http://www.w3.org/2000/svg">
+<style>
+  .sans { font-family: 'Mona Sans VF', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif; }
+  .mono { font-family: 'Fira Code VF', ui-monospace, 'SF Mono', 'Menlo', 'Monaco', 'Consolas', monospace; }
+</style>
+
+<!-- Outer VitePress Frame -->
+<rect x="8" y="14" width="664" height="294" rx="8" fill="#1b1b1f" stroke="#2e2e32"/>
+
+<!-- Frame Label Pill -->
+<rect x="24" y="6" width="166" height="16" fill="#1b1b1f"/>
+<text x="32" y="17" class="sans" font-size="11" font-weight="600" letter-spacing="0.8" fill="#a8b1ff">GENERATED REFERENCE ↗</text>
+
+<!-- Entry 1: state -->
+<rect x="32" y="34" width="56" height="26" rx="4" fill="#202127"/>
+<text x="60" y="52" text-anchor="middle" class="mono" font-size="15" font-weight="600" fill="#a8b1ff">state</text>
+<text x="648" y="51" text-anchor="end" class="mono" font-size="13" fill="#a8b1ff">&lt;/&gt;</text>
+
+<!-- Entry 1 Signature Block -->
+<rect x="32" y="70" width="616" height="44" rx="8" fill="#161618"/>
+<text x="48" y="97" xml:space="preserve" class="mono" font-size="13.5" fill="#e1e4e8"><tspan fill="#e1e4e8">Flux.</tspan><tspan fill="#b392f0">state</tspan><tspan fill="#e1e4e8">&lt;</tspan><tspan fill="#79b8ff">T</tspan><tspan fill="#e1e4e8">&gt;(</tspan><tspan fill="#ffab70">initial</tspan><tspan fill="#f97583">:</tspan> <tspan fill="#79b8ff">T</tspan><tspan fill="#f97583">?</tspan><tspan fill="#e1e4e8">)</tspan><tspan fill="#f97583">:</tspan> <tspan fill="#79b8ff" text-decoration="underline">State.State</tspan><tspan fill="#e1e4e8">&lt;</tspan><tspan fill="#79b8ff">T</tspan><tspan fill="#e1e4e8">&gt;</tspan></text>
+
+<!-- Entry 1 Prose -->
+<text x="32" y="136" class="sans" font-size="14" fill="#dfdfd6">Creates a state holding</text>
+<rect x="183" y="122" width="62" height="20" rx="4" fill="#202127"/>
+<text x="214" y="136" text-anchor="middle" class="mono" font-size="12.5" fill="#c9def1">initial</text>
+<text x="247" y="136" class="sans" font-size="14" fill="#dfdfd6">. Call the state to read it, and see</text>
+<rect x="466" y="122" width="108" height="20" rx="4" fill="#202127"/>
+<text x="520" y="136" text-anchor="middle" class="mono" font-size="12.5" fill="#a8b1ff" text-decoration="underline">State:Connect</text>
+<text x="576" y="136" class="sans" font-size="14" fill="#dfdfd6">.</text>
+
+<!-- Divider -->
+<line x1="32" y1="162" x2="648" y2="162" stroke="#2e2e32"/>
+
+<!-- Entry 2: isState + badges -->
+<rect x="32" y="180" width="72" height="26" rx="4" fill="#202127"/>
+<text x="68" y="198" text-anchor="middle" class="mono" font-size="15" font-weight="600" fill="#a8b1ff">isState</text>
+
+<!-- Badge: from State ↗ -->
+<rect x="112" y="182" width="96" height="22" rx="11" fill="#202127" stroke="#2e2e32"/>
+<text x="160" y="197" text-anchor="middle" class="sans" font-size="12" font-weight="500" fill="#dfdfd6">from State ↗</text>
+
+<!-- Badge: Yields -->
+<rect x="216" y="182" width="54" height="22" rx="11" fill="#eab30829" stroke="#eab30852"/>
+<text x="243" y="197" text-anchor="middle" class="sans" font-size="12" font-weight="500" fill="#f9b44e">Yields</text>
+
+<!-- Badge: Server -->
+<rect x="278" y="182" width="56" height="22" rx="11" fill="#a78bfa1f" stroke="#a78bfa52"/>
+<text x="306" y="197" text-anchor="middle" class="sans" font-size="12" font-weight="500" fill="#a78bfa">Server</text>
+
+<text x="648" y="197" text-anchor="end" class="mono" font-size="13" fill="#a8b1ff">&lt;/&gt;</text>
+
+<!-- Entry 2 Signature Block -->
+<rect x="32" y="216" width="616" height="44" rx="8" fill="#161618"/>
+<text x="48" y="243" xml:space="preserve" class="mono" font-size="13.5" fill="#e1e4e8"><tspan fill="#e1e4e8">Flux.</tspan><tspan fill="#b392f0">isState</tspan><tspan fill="#e1e4e8">(</tspan><tspan fill="#ffab70">value</tspan><tspan fill="#f97583">:</tspan> <tspan fill="#f97583">any</tspan><tspan fill="#e1e4e8">)</tspan><tspan fill="#f97583">:</tspan> <tspan fill="#79b8ff">boolean</tspan></text>
+
+<!-- Entry 2 Prose -->
+<text x="32" y="282" class="sans" font-size="14" fill="#dfdfd6">Reports whether</text>
+<rect x="141" y="268" width="48" height="20" rx="4" fill="#202127"/>
+<text x="165" y="282" text-anchor="middle" class="mono" font-size="12.5" fill="#c9def1">value</text>
+<text x="194" y="282" class="sans" font-size="14" fill="#dfdfd6">is a state.</text>
+</svg>
