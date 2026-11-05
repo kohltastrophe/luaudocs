@@ -77,5 +77,8 @@
 		"vitepress-plugin-group-icons": "^1.7.6",
 		"vitest": "^3.0.0",
 		"vue": "^3.5.13"
+	},
+	"overrides": {
+		"esbuild": "^0.28.0"
 	}
 }
