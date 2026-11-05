@@ -80,14 +80,16 @@ function util.isAbsolute(p: string): boolean
 	return pathlib.isAbsolute(p)
 end
 
---- Matches `init.luau` and `init.lua` only, so `init.client.luau` remains a plain module.
+--- Matches `init.luau`, `init.d.luau`, and `init.lua` only, so `init.client.luau` remains a plain module.
 function util.isInitFile(fileAbs: string): boolean
-	return util.basename(fileAbs):match("^init%.luau?$") ~= nil
+	local base = util.basename(fileAbs)
+	return base:match("^init%.d%.luau$") ~= nil or base:match("^init%.luau?$") ~= nil
 end
 
---- Strips a single `.luau`/`.lua` extension (`data.lua.luau` stems to `data.lua`).
+--- Strips a single `.d.luau`/`.luau`/`.lua` extension (`data.lua.luau` stems to `data.lua`).
 function util.stem(p: string): string
-	local stripped = util.basename(p):gsub("%.luau?$", "")
+	local base = util.basename(p)
+	local stripped = if base:match("%.d%.luau$") ~= nil then base:gsub("%.d%.luau$", "") else base:gsub("%.luau?$", "")
 	return stripped
 end
 

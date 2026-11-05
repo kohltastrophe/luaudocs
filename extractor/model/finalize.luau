@@ -495,6 +495,10 @@ local function resolveList(
 			seg.id = ownTypes[seg.__name]
 			continue
 		end
+		if ctx.ambientTypes[seg.__name] ~= nil then
+			seg.id = ctx.ambientTypes[seg.__name]
+			continue
+		end
 		-- Moonwave tag convention: a bare `@return Widget` in a tag can name a
 		-- required module's same-named type (`Widget.Widget`) or a class defined,
 		-- required, or targeted (`landed`) by this module.
@@ -746,6 +750,55 @@ local function expandRespelledTypes(ctx: Ctx, g: Graph)
 	end
 end
 
+local function detectConstructor(ctx: Ctx, classOfRefId: { [string]: any }, fn: any)
+	local class: any = nil
+	local sym = fn.__constructsSym
+	if sym ~= nil then
+		class = ctx.containerOfSym[members.symKey(sym)]
+		fn.__constructsSym = nil
+	end
+	-- Fall back to return-type matching only for dot-called functions (so
+	-- fluent methods like `function Widget:withSize(): Widget` are not
+	-- mistaken for constructors).
+	if class == nil and fn.kind == "function" then
+		local firstReturn = fn.signature.returns[1]
+		local head = if firstReturn ~= nil then exactClassRef(firstReturn.type) else nil
+		if head ~= nil then
+			class = classOfRefId[head]
+		end
+	end
+	local isOverload = fn.id:find(":%d+$") ~= nil
+	if
+		not isOverload
+		and class ~= nil
+		and class.constructors ~= nil
+		and table.find(class.constructors, fn.id) == nil
+	then
+		table.insert(class.constructors, fn.id)
+	end
+end
+
+local function applyReturnedRequire(member: any, entryById: { [string]: any })
+	local reqTargetId = member.__returnedRequire
+	member.__returnedRequire = nil
+	local reqEntry = if reqTargetId ~= nil then entryById[reqTargetId] else nil
+	if reqEntry == nil or #member.signature.returns > 1 then
+		return
+	end
+	local ret = member.signature.returns[1]
+	local retText = if ret ~= nil and ret.type ~= nil then segs.text(ret.type) else ""
+	if retText == "" or retText:find("^typeof%(require%(") ~= nil then
+		local refSeg = { text = reqEntry.name, id = reqEntry.id }
+		if ret ~= nil then
+			ret.type = { refSeg }
+		else
+			member.signature.returns[1] = { type = { refSeg } }
+		end
+		member.signature.__tagReturns = true
+		member.signature.segs = members.signatureSegs(member.signature)
+	end
+end
+
 local function resolveRefsAndConstructors(ctx: Ctx, g: Graph)
 	-- Map both `classType` declaration IDs and direct `Class` IDs to their class
 	-- entries so constructor detection works with or without a `classType` alias.
@@ -769,28 +822,6 @@ local function resolveRefsAndConstructors(ctx: Ctx, g: Graph)
 		requiredByMod[modId] = set
 	end
 
-	local function detectConstructor(fn: any)
-		local class: any = nil
-		local sym = fn.__constructsSym
-		if sym ~= nil then
-			class = ctx.containerOfSym[members.symKey(sym)]
-			fn.__constructsSym = nil
-		end
-		-- Fall back to return-type matching only for dot-called functions (so
-		-- fluent methods like `function Widget:withSize(): Widget` are not
-		-- mistaken for constructors).
-		if class == nil and fn.kind == "function" then
-			local firstReturn = fn.signature.returns[1]
-			local head = if firstReturn ~= nil then exactClassRef(firstReturn.type) else nil
-			if head ~= nil then
-				class = classOfRefId[head]
-			end
-		end
-		if class ~= nil and class.constructors ~= nil and table.find(class.constructors, fn.id) == nil then
-			table.insert(class.constructors, fn.id)
-		end
-	end
-
 	local function resolveMember(member: any, landed: any)
 		-- Resolve against `member.source.file` (the defining module, preserved
 		-- across `@within` moves).
@@ -798,23 +829,7 @@ local function resolveRefsAndConstructors(ctx: Ctx, g: Graph)
 		if member.kind == "prop" then
 			resolveList(ctx, g, requiredByMod, modId, member.type, landed)
 		else
-			local reqTargetId = member.__returnedRequire
-			member.__returnedRequire = nil
-			local reqEntry = if reqTargetId ~= nil then entryById[reqTargetId] else nil
-			if reqEntry ~= nil and #member.signature.returns <= 1 then
-				local ret = member.signature.returns[1]
-				local retText = if ret ~= nil and ret.type ~= nil then segs.text(ret.type) else ""
-				if retText == "" or retText:find("^typeof%(require%(") ~= nil then
-					local refSeg = { text = reqEntry.name, id = reqEntry.id }
-					if ret ~= nil then
-						ret.type = { refSeg }
-					else
-						member.signature.returns[1] = { type = { refSeg } }
-					end
-					member.signature.__tagReturns = true
-					member.signature.segs = members.signatureSegs(member.signature)
-				end
-			end
+			applyReturnedRequire(member, entryById)
 			resolveList(ctx, g, requiredByMod, modId, member.signature.segs, landed)
 			for _, p in member.signature.params do
 				resolveList(ctx, g, requiredByMod, modId, p.type, landed)
@@ -822,7 +837,7 @@ local function resolveRefsAndConstructors(ctx: Ctx, g: Graph)
 			for _, r in member.signature.returns do
 				resolveList(ctx, g, requiredByMod, modId, r.type, landed)
 			end
-			detectConstructor(member)
+			detectConstructor(ctx, classOfRefId, member)
 		end
 	end
 	for _, entry in ctx.modules do
@@ -905,8 +920,12 @@ local function reportUndocumented(ctx: Ctx)
 			report("class", class.name, class)
 		end
 		members.eachMember(entry, function(member, owner)
+			if member.id:find(":%d+$") ~= nil then
+				return
+			end
 			if member.kind == "prop" then
-				report("property", if owner.name ~= "" then owner.name .. "." .. member.name else member.name, member)
+				local sep = if member.name:sub(1, 1) == "[" then "" else "."
+				report("property", if owner.name ~= "" then owner.name .. sep .. member.name else member.name, member)
 			else
 				report(member.kind, member.signature.callee, member)
 			end

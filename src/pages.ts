@@ -258,8 +258,11 @@ const LUAU_KEYWORDS = new Set([
 	"while",
 ]);
 
-/** Formats member access as `container.name` for valid identifiers or `container["name"]` otherwise. */
+/** Formats member access as `container.name` for valid identifiers, `container[K]` for indexers, or `container["name"]` otherwise. */
 export function memberAccess(container: string, name: string): string {
+	if (name.startsWith("[") && name.endsWith("]")) {
+		return `${container}${name}`;
+	}
 	if (/^[A-Za-z_]\w*$/.test(name) && !LUAU_KEYWORDS.has(name)) {
 		return `${container}.${name}`;
 	}

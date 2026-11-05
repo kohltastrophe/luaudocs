@@ -102,12 +102,14 @@ local diag = util.diagnostics()
 local entryAbsPaths: { string } = {}
 local entryIds: { string } = {}
 for _, entry in entries do
-	local abs, err = graphMod.expandEntry(rootAbs, entry)
-	if abs == nil then
+	local list, err = graphMod.expandEntries(rootAbs, entry)
+	if list == nil then
 		fail(tostring(err))
 	end
-	table.insert(entryAbsPaths, abs :: string)
-	table.insert(entryIds, util.relPath(rootAbs, abs :: string))
+	for _, abs in list :: { string } do
+		table.insert(entryAbsPaths, abs)
+		table.insert(entryIds, util.relPath(rootAbs, abs))
+	end
 end
 
 local g = graphMod.build(proj, entryAbsPaths, diag)

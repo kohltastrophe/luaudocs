@@ -91,8 +91,30 @@ local function isOutsideRoot(root: string, abs: string): boolean
 	return rel == ".." or rel:sub(1, 3) == "../" or util.isAbsolute(rel)
 end
 
---- Expands an entry (file or directory) to an absolute module file path.
-function graph.expandEntry(root: string, entry: string): (string?, string?)
+local function collectDluauFiles(dir: string, out: { string })
+	local ok, items = pcall(fs.listDirectory, dir)
+	if not ok or type(items) ~= "table" then
+		return
+	end
+	table.sort(items, function(a, b)
+		return a.name < b.name
+	end)
+	for _, item in items do
+		if item.name:sub(1, 1) == "." then
+			continue
+		end
+		local child = util.normPath(util.joinPath(dir, item.name))
+		if item.type == "dir" then
+			collectDluauFiles(child, out)
+		elseif item.type == "file" and item.name:match("%.d%.luau$") ~= nil then
+			table.insert(out, child)
+		end
+	end
+end
+
+--- Expands an entry (file or directory) to one or more absolute module file paths.
+--- When a directory has no `init.*` file, any `.d.luau` files inside it are expanded.
+function graph.expandEntries(root: string, entry: string): ({ string }?, string?)
 	local abs = if util.isAbsolute(entry) then entry else util.joinPath(root, entry)
 	abs = util.normPath(abs)
 	if isOutsideRoot(root, abs) then
@@ -108,11 +130,25 @@ function graph.expandEntry(root: string, entry: string): (string?, string?)
 		-- wrong for an entry pointing at a directory.
 		local resolved = requiresMod.findInitFile(abs)
 		if resolved ~= nil then
-			return util.normPath(resolved), nil
+			return { util.normPath(resolved) }, nil
+		end
+		local dluauFiles: { string } = {}
+		collectDluauFiles(abs, dluauFiles)
+		if #dluauFiles > 0 then
+			return dluauFiles, nil
 		end
 		return nil, "entry directory has no init.luau: " .. entry
 	end
-	return abs, nil
+	return { abs }, nil
+end
+
+--- Expands an entry (file or directory) to an absolute module file path.
+function graph.expandEntry(root: string, entry: string): (string?, string?)
+	local list, err = graph.expandEntries(root, entry)
+	if list == nil then
+		return nil, err
+	end
+	return list[1], nil
 end
 
 local function collectSurfacedRequires(result: surfaceMod.SymValue?): { any }
@@ -179,6 +215,9 @@ local function declaresClass(mod: ModuleData): boolean
 	local surface = mod.surface
 	if surface == nil then
 		return false
+	end
+	if surface.declaredClasses ~= nil and #surface.declaredClasses > 0 then
+		return true
 	end
 	local result = surface.result
 	if result ~= nil and result.defDoc ~= nil and tagsMod.className(tagsMod.parseBlock(result.defDoc)) ~= nil then

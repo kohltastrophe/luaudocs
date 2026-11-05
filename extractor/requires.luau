@@ -263,10 +263,9 @@ local function isModuleFile(p: string): boolean
 	return p:match("%.luau?$") ~= nil
 end
 
-local MODULE_EXTS = { ".luau", ".lua" }
+local MODULE_EXTS = { ".luau", ".d.luau", ".lua" }
 
---- Probes `base .. ".luau"` then `base .. ".lua"`, centralizing the `.luau`
---- over `.lua` extension precedence.
+--- Probes `base .. ".luau"`, `base .. ".d.luau"`, then `base .. ".lua"`, centralizing extension precedence.
 local function luauOrLua(base: string): string?
 	for _, ext in MODULE_EXTS do
 		local candidate = base .. ext

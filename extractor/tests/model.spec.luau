@@ -60,7 +60,10 @@ local function entryWith(id: string, name: string): any
 	}
 end
 
-local function assembleInline(specs: { { id: string, src: string, surfaced: boolean? } }): (any, any)
+local function assembleInline(
+	specs: { { id: string, src: string, surfaced: boolean? } },
+	reportUndoc: boolean?
+): (any, any)
 	local diag = util.diagnostics()
 	local g: any = { modules = {}, byId = {}, byAbs = {} }
 	for _, s in specs do
@@ -106,7 +109,7 @@ local function assembleInline(specs: { { id: string, src: string, surfaced: bool
 		table.insert(g.modules, mod)
 		g.byId[s.id] = mod
 	end
-	return model.assemble(g, diag, { entryPoints = { specs[1].id } }), diag
+	return model.assemble(g, diag, { entryPoints = { specs[1].id }, reportUndocumented = reportUndoc }), diag
 end
 
 return function()
@@ -919,5 +922,229 @@ return function()
 			{ "param-mismatch" },
 		},
 		"owner table-type field doc forwards diagnostics without false orphaned-doc-block and top placing block survives moduleDoc"
+	)
+
+	t.suite("model: .d.luau classes, companion tables, indexers, overloads, and @deprecated attributes")
+
+	local dluauDoc, dluauDiag = assembleInline({
+		{
+			id = "globalTypes.d.luau",
+			src = table.concat({
+				"--- Global runtime definitions.",
+				"",
+				"--- Version string.",
+				"declare  _VERSION: string",
+				"",
+				"@[deprecated {",
+				'\tuse = "warn()",',
+				'\treason = "legacy logger",',
+				"}]",
+				"declare  function oldLog(",
+				"\tmsg: string",
+				"): ()",
+				"",
+				"declare Vec: {",
+				"\t--- Constructs a Vec.",
+				"\t--- @param x -- X component",
+				"\t--- @param y -- Y component",
+				"\tnew: (() -> Vec) & ((x: number, y: number) -> Vec),",
+				"\tzero: Vec,",
+				"}",
+				"",
+				"--- 2D vector class.",
+				"declare class Vec",
+				"\tread X: number",
+				"\tY: number",
+				"\tcfg:",
+				"\t\t| {",
+				"\t\t\ta: number,",
+				"\t\t}",
+				"\t\t| nil",
+				"\tread [number]: number",
+				"\t@deprecated",
+				"\tfunction Magnitude(self): number",
+				"\tfunction Lerp(",
+				"\t\tself,",
+				"\t\tother: Vec,",
+				"\t\talpha: number",
+				"\t): Vec",
+				"\tfunction Lerp(self, other: Vec): Vec",
+				"\tfunction __add(self, other: Vec): Vec",
+				"end",
+			}, "\n"),
+		},
+		{
+			id = "Quat.d.luau",
+			src = table.concat({
+				"declare class Quat",
+				"\tfunction Rotate(self, v: Vec): Vec",
+				"end",
+				"--- @within Quat",
+				"--- @method Inverse",
+				"--- @return Quat",
+			}, "\n"),
+		},
+	})
+	local dluauMod = byId(dluauDoc.modules, "globalTypes.d.luau")
+	local quatMod = byId(dluauDoc.modules, "Quat.d.luau")
+	local quatPrimaryCls = byName(quatMod.classes, "Quat")
+	local vecCls = byName(dluauMod.classes, "Vec")
+	local vecMemberIds = {}
+	for _, m in vecCls.members do
+		table.insert(vecMemberIds, m.id)
+		t.eq(m.__overload, nil, "__overload scratch key is stripped")
+	end
+	local new2 = byId(vecCls.members, "globalTypes.d.luau#fn.Vec.new:2")
+	local lerp1 = byId(vecCls.members, "globalTypes.d.luau#fn.Vec.Lerp")
+	local mag = byName(vecCls.members, "Magnitude")
+	local oldLog = byName(dluauMod.members, "oldLog")
+	t.eq(
+		{
+			#dluauDiag.list,
+			dluauMod.name,
+			dluauMod.doc,
+			byName(dluauMod.members, "_VERSION").kind,
+			byName(dluauMod.members, "_VERSION").doc,
+			oldLog.tags.deprecated,
+			vecCls.doc,
+			vecCls.constructors,
+			vecMemberIds,
+			new2.signature.params[1].doc,
+			new2.signature.params[2].doc,
+			byName(vecCls.members, "X").readonly,
+			byName(vecCls.members, "Y").readonly,
+			byName(vecCls.members, "[number]").readonly,
+			mag.tags.deprecated ~= nil,
+			wireSegs(lerp1.signature.params[1].type),
+			wireSegs(lerp1.signature.returns[1].type),
+			byName(vecCls.members, "__add").kind,
+			#quatMod.members,
+			byName(quatPrimaryCls.members, "Rotate") ~= nil,
+			byName(quatPrimaryCls.members, "Inverse") ~= nil,
+			wireSegs(byName(quatPrimaryCls.members, "Rotate").signature.params[1].type),
+		},
+		{
+			0,
+			"globalTypes",
+			"Global runtime definitions.",
+			"prop",
+			"Version string.",
+			{ note = "legacy logger (use `warn()` instead)" },
+			"2D vector class.",
+			{ "globalTypes.d.luau#fn.Vec.new" },
+			{
+				"globalTypes.d.luau#fn.Vec.new",
+				"globalTypes.d.luau#fn.Vec.new:2",
+				"globalTypes.d.luau#prop.Vec.zero",
+				"globalTypes.d.luau#prop.Vec.X",
+				"globalTypes.d.luau#prop.Vec.Y",
+				"globalTypes.d.luau#prop.Vec.cfg",
+				"globalTypes.d.luau#prop.Vec.[number]",
+				"globalTypes.d.luau#fn.Vec.Magnitude",
+				"globalTypes.d.luau#fn.Vec.Lerp",
+				"globalTypes.d.luau#fn.Vec.Lerp:2",
+				"globalTypes.d.luau#fn.Vec.__add",
+			},
+			"X component",
+			"Y component",
+			true,
+			false,
+			true,
+			true,
+			{ { text = "Vec", id = "globalTypes.d.luau#class.Vec" } },
+			{ { text = "Vec", id = "globalTypes.d.luau#class.Vec" } },
+			"metamethod",
+			0,
+			true,
+			true,
+			{ { text = "Vec", id = "globalTypes.d.luau#class.Vec" } },
+		},
+		".d.luau assembly builds companion constructors, overload IDs, readonly props/indexers, cross-file ambient class links, and deprecated attributes"
+	)
+
+	local edgeDoc, edgeDiag = assembleInline({
+		{
+			id = "ambientEdge.d.luau",
+			src = table.concat({
+				"--- Companion Vec2 table doc.",
+				"declare Vec2: {",
+				"\tfromPolar: ((r: number, theta: number) -> Vec2) & ((r: number) -> Vec2),",
+				"}",
+				"",
+				"--- Primary Vec2 class doc.",
+				"declare class Vec2",
+				"\tread [string]: number",
+				"end",
+				"",
+				"--- @ignore",
+				"declare class HiddenClass",
+				"\tX: number",
+				"end",
+				"",
+				"@[deprecated]",
+				"declare function bareDep(): ()",
+				"",
+				"@[deprecated { reason = 'use modern path' }]",
+				"declare function reasonDep(): ()",
+				"",
+				"@[deprecated { use = 'newCall()' }]",
+				"declare function useDep(): ()",
+				"",
+				"--- @deprecated v1.0 -- doc tag wins",
+				"@[deprecated { reason = 'attr ignored' }]",
+				"declare function docWinsDep(): ()",
+			}, "\n"),
+		},
+		{
+			id = "sidecar.d.luau",
+			surfaced = false,
+			src = table.concat({
+				"declare class SidecarVec2",
+				"\t--- @within Vec2",
+				"\t--- Normalized copy.",
+				"\tfunction Unit(self): Vec2",
+				"end",
+			}, "\n"),
+		},
+	}, true)
+	local edgeMod = byId(edgeDoc.modules, "ambientEdge.d.luau")
+	local vec2Cls = byName(edgeMod.classes, "Vec2")
+	local undocumentedMsgs = {}
+	for _, d in edgeDiag.list do
+		if d.code == "undocumented" then
+			table.insert(undocumentedMsgs, d.message)
+		end
+	end
+	t.eq(
+		{
+			byName(edgeMod.classes, "HiddenClass"),
+			vec2Cls.doc,
+			byName(vec2Cls.members, "Unit") ~= nil,
+			byName(vec2Cls.members, "Unit").doc,
+			byName(edgeMod.members, "bareDep").tags.deprecated,
+			byName(edgeMod.members, "reasonDep").tags.deprecated,
+			byName(edgeMod.members, "useDep").tags.deprecated,
+			byName(edgeMod.members, "docWinsDep").tags.deprecated,
+			undocumentedMsgs,
+		},
+		{
+			nil,
+			"Primary Vec2 class doc.\n\nCompanion Vec2 table doc.",
+			true,
+			"Normalized copy.",
+			{ __record = true },
+			{ note = "use modern path" },
+			{ note = "Use `newCall()` instead." },
+			{ version = "v1.0", note = "doc tag wins" },
+			{
+				"function ambientEdge.bareDep has no doc comment",
+				"function ambientEdge.reasonDep has no doc comment",
+				"function ambientEdge.useDep has no doc comment",
+				"function ambientEdge.docWinsDep has no doc comment",
+				"function Vec2.fromPolar has no doc comment",
+				"property Vec2[string] has no doc comment",
+			},
+		},
+		".d.luau model merges companion docs, honors @ignore, moves sidecar declared class members, parses @deprecated attribute variants, and formats undocumented indexers without duplicate overload warnings"
 	)
 end

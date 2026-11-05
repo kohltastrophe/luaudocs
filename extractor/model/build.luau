@@ -529,6 +529,60 @@ local function resolveModuleDocs(
 	return rootDoc, classDoc, className, rootIsInterfaceDoc, floatingClassSpan
 end
 
+local function buildDeclaredClasses(
+	ctx: Ctx,
+	mod: ModuleData,
+	entry: any,
+	surface: any,
+	fullProcessing: boolean,
+	rootContainer: any
+): any
+	for _, decl in surface.declaredClasses or {} do
+		local doc = members.parseBlock(ctx, mod.id, decl.value.defDoc)
+		if decl.secondaryDoc ~= nil then
+			local secDoc = members.parseBlock(ctx, mod.id, decl.secondaryDoc)
+			doc = table.clone(doc)
+			doc.desc = members.mergeDescs(doc.desc, secDoc.desc) or ""
+		end
+		if doc.flags.ignore then
+			continue
+		end
+		local cName = tagsMod.className(doc) or decl.name
+		if not fullProcessing then
+			members.buildMembers(ctx, mod, cName, decl.value, nil)
+			continue
+		end
+		local class = declareClass(ctx, mod, entry, cName, doc, decl.value.span)
+		if class == nil then
+			continue
+		end
+		ctx.containerOfSym[members.symKey(decl.value)] = class
+		if ctx.containersByName[cName] == entry then
+			ctx.containersByName[cName] = class
+		end
+		if rootContainer == entry and cName == entry.name then
+			rootContainer = class
+		end
+		members.buildMembers(ctx, mod, cName, decl.value, members.sinks(class, entry))
+		if ctx.typesByModule[mod.id][decl.name] == nil then
+			ctx.typesByModule[mod.id][decl.name] = class.id
+		end
+		if ctx.typesByModule[mod.id][cName] == nil then
+			ctx.typesByModule[mod.id][cName] = class.id
+		end
+		if ctx.ambientTypes[decl.name] == nil then
+			ctx.ambientTypes[decl.name] = class.id
+		end
+		if ctx.ambientTypes[cName] == nil then
+			ctx.ambientTypes[cName] = class.id
+		end
+		if entry.doc == nil and cName == entry.name and class.doc ~= nil then
+			entry.doc = class.doc
+		end
+	end
+	return rootContainer
+end
+
 --- Builds `mod`'s `Module` entry and appends it to `ctx.modules`.
 function build.run(ctx: Ctx, mod: ModuleData)
 	-- Pre-populate `ctx.typesByModule[mod.id]` (`buildTypeDecls` prunes any
@@ -624,6 +678,7 @@ function build.run(ctx: Ctx, mod: ModuleData)
 	end
 
 	buildTypeDecls(ctx, mod, entry, fullProcessing, if rootIsInterfaceDoc then rootDoc else nil)
+	rootContainer = buildDeclaredClasses(ctx, mod, entry, surface, fullProcessing, rootContainer)
 	processFloatingBlocks(ctx, mod, entry, rootContainer)
 end
 

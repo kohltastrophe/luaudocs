@@ -1,6 +1,8 @@
 local util = require("../util")
 local t = require("./harness")
 local requiresMod = require("../requires")
+local graphMod = require("../graph")
+local modelMod = require("../model")
 
 local FIXTURES = t.fixtures
 
@@ -154,4 +156,69 @@ return function()
 		{ false, "require-external", { spelling = "@sert/bar", alias = "sert", path = "bar" } },
 		".luaurc alias into hidden dot-directory resolves as require-external"
 	)
+
+	t.suite("requires: .d.luau extensions and directory expansion")
+
+	t.eq({
+		util.stem("src/globalTypes.d.luau"),
+		util.stem("src/init.d.luau"),
+		util.stem("src/data.lua.luau"),
+		util.isInitFile("src/init.d.luau"),
+		util.isInitFile("src/init.luau"),
+		util.isInitFile("src/init.client.luau"),
+	}, {
+		"globalTypes",
+		"init",
+		"data.lua",
+		true,
+		true,
+		false,
+	}, "util.stem and util.isInitFile handle .d.luau")
+
+	local dluauRoot = util.joinPath(FIXTURES, "dluau")
+	local expanded, expandErr = graphMod.expandEntries(dluauRoot, ".")
+	local firstEntry, firstErr = graphMod.expandEntry(dluauRoot, ".")
+	local missingEntry, missingErr = graphMod.expandEntry(dluauRoot, "missing")
+	t.eq({
+		expandErr,
+		expanded ~= nil and #expanded or 0,
+		expanded ~= nil and util.relPath(dluauRoot, expanded[1]) or "",
+		expanded ~= nil and util.relPath(dluauRoot, expanded[2]) or "",
+		expanded ~= nil and util.relPath(dluauRoot, expanded[3]) or "",
+		firstErr,
+		firstEntry ~= nil and util.relPath(dluauRoot, firstEntry) or "",
+		missingEntry,
+		missingErr ~= nil,
+	}, {
+		nil,
+		3,
+		"alpha.d.luau",
+		"beta.d.luau",
+		"nested/gamma.d.luau",
+		nil,
+		"alpha.d.luau",
+		nil,
+		true,
+	}, "expandEntries and expandEntry collect nested .d.luau files while skipping dot-files and non-.d.luau files")
+
+	local dluauProj = requiresMod.load(dluauRoot)
+	local dluauDiag = util.diagnostics()
+	local dluauGraph = graphMod.build(dluauProj, expanded :: { string }, dluauDiag)
+	local dluauModel = modelMod.assemble(dluauGraph, dluauDiag, {
+		entryPoints = { "alpha.d.luau", "beta.d.luau", "nested/gamma.d.luau" },
+	})
+	local gammaMod = t.byId(dluauModel.modules, "nested/gamma.d.luau")
+	local gammaCls = t.byName(gammaMod.classes, "Gamma")
+	local stepFn = t.byName(gammaCls.members, "Step")
+	t.eq({
+		#dluauDiag.list,
+		#dluauModel.modules,
+		stepFn.signature.params[1].type[1].id,
+		stepFn.signature.returns[1].type[1].id,
+	}, {
+		0,
+		3,
+		"beta.d.luau#class.Beta",
+		"alpha.d.luau#class.Alpha",
+	}, "graph.build and model.assemble link ambient .d.luau classes across nested directory entries")
 end

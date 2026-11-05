@@ -225,6 +225,46 @@ describe("buildDependencyLinks and external resolution", () => {
 			'[<Badge type="info" text="Module" />](https://dep.test/docs/api/Dep){.badge-link .ignore-header}',
 		);
 	});
+
+	it("normalizes .d.luau and init.d.luau module paths when resolving dependency links", () => {
+		const dluauDep = parseDocModel(
+			modelJson([
+				{
+					id: "src/init.d.luau",
+					instancePath: ["Dep"],
+					name: "Dep",
+					doc: "The dependency's .d.luau entry.",
+					source: { file: "src/init.d.luau", line: 1 },
+				},
+				{
+					id: "src/net/types.d.luau",
+					instancePath: ["Dep", "net", "types"],
+					name: "types",
+					types: [
+						{
+							id: "src/net/types.d.luau#type.Packet",
+							name: "Packet",
+							kind: "alias",
+							exported: true,
+							visibility: "public",
+							tags: { custom: [] },
+							generics: [],
+							definition: [["string"]],
+							source: { file: "src/net/types.d.luau", line: 1 },
+						},
+					],
+					source: { file: "src/net/types.d.luau", line: 1 },
+				},
+			]),
+		);
+		const links = buildDependencyLinks([
+			{ alias: "dep", url: "https://dep.test/docs", model: dluauDep },
+		]);
+		expect(links.resolve({ alias: "dep", path: "" })).toBe("https://dep.test/docs/api/Dep");
+		expect(links.resolve({ alias: "dep", path: "net/types", name: "Packet" })).toBe(
+			"https://dep.test/docs/api/types#packet",
+		);
+	});
 });
 
 describe("loadDependencies", () => {

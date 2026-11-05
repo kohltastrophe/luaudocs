@@ -10,6 +10,7 @@ import {
 	loadConfig,
 	parseConfig,
 	parseUrlFlag,
+	probeEntries,
 	validateConfig,
 } from "../src/config";
 import { makeTempDirFactory } from "./helpers";
@@ -261,5 +262,24 @@ describe("loadConfig", () => {
 				/docs\.dir: expected a directory inside the project/,
 			);
 		}
+	});
+
+	it("probes init.d.luau and nested .d.luau directories while skipping dot-entries and non-.d.luau files", () => {
+		const root = tempDir();
+		mkdirSync(join(root, "src"));
+		writeFileSync(join(root, "src", "init.d.luau"), "declare x: number\n");
+		mkdirSync(join(root, "lib", "empty-sub"), { recursive: true });
+		mkdirSync(join(root, "lib", "nested"), { recursive: true });
+		writeFileSync(join(root, "lib", ".hidden.d.luau"), "declare h: number\n");
+		writeFileSync(join(root, "lib", "plain.luau"), "return {}\n");
+		writeFileSync(join(root, "lib", "nested", "types.d.luau"), "declare y: string\n");
+		mkdirSync(join(root, "dotonly", ".dotdir"), { recursive: true });
+		writeFileSync(join(root, "dotonly", ".hidden.d.luau"), "declare z: number\n");
+		writeFileSync(join(root, "dotonly", ".dotdir", "nested.d.luau"), "declare w: number\n");
+		mkdirSync(join(root, "empty"));
+		expect(probeEntries(root, ["src", "lib", "dotonly", "empty", "missing"], true)).toEqual([
+			"src",
+			"lib",
+		]);
 	});
 });

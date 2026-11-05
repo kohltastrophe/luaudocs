@@ -9,7 +9,7 @@
  * footprint. Present keys must be well-formed, while omitted keys fall back to
  * their defaults.
  */
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { parse as parseToml } from "smol-toml";
 
@@ -448,20 +448,39 @@ function findConfig(startDir: string): string | undefined {
 /** Conventional entry directories probed in order when no config file exists (and by `init` when generating a starter config). */
 export const PROBED_ENTRIES = ["src", "lib"];
 
+function hasDluauFile(dirPath: string): boolean {
+	if (!existsSync(dirPath)) return false;
+	for (const entry of readdirSync(dirPath, { withFileTypes: true })) {
+		if (entry.name.startsWith(".")) continue;
+		const full = join(dirPath, entry.name);
+		if (entry.isDirectory()) {
+			if (hasDluauFile(full)) return true;
+		} else if (entry.isFile() && entry.name.endsWith(".d.luau")) {
+			return true;
+		}
+	}
+	return false;
+}
+
 /**
  * Probes conventional module roots in caller-specified order, shared by
  * config-less builds, `init`, and Moonwave conversion. When `requireInit` is
- * true, only directories containing an `init.luau` or `init.lua` match, so
- * `init` never writes an entry directory that would fail the first build.
- * Config-less builds pass `false` so the extractor's own `entry-missing`
- * diagnostic reports a folder without an init file.
+ * true, only directories containing an `init.luau`, `init.d.luau`, `init.lua`,
+ * or any `.d.luau` declaration file match, so `init` never writes an entry
+ * directory that would fail the first build. Config-less builds pass `false` so
+ * the extractor's own `entry-missing` diagnostic reports a folder without an
+ * init file.
  */
 export function probeEntries(root: string, order: string[], requireInit: boolean): string[] {
-	return order.filter((dir) =>
-		requireInit
-			? ["init.luau", "init.lua"].some((init) => existsSync(join(root, dir, init)))
-			: existsSync(join(root, dir)),
-	);
+	return order.filter((dir) => {
+		const dirPath = join(root, dir);
+		if (!requireInit) return existsSync(dirPath);
+		return (
+			["init.luau", "init.d.luau", "init.lua"].some((init) =>
+				existsSync(join(dirPath, init)),
+			) || hasDluauFile(dirPath)
+		);
+	});
 }
 
 /**

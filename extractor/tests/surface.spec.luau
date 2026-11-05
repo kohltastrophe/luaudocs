@@ -362,4 +362,139 @@ return function()
 		{ { "own", "public" }, 2, 0 },
 		"factory body delegation does not leak locals or types into module scope"
 	)
+
+	t.suite("surface: .d.luau ambient declarations")
+
+	local dluau = eval(table.concat({
+		"declare _VERSION: string",
+		"declare function print<T...>(...: T...): ()",
+		"declare math: {",
+		"\tpi: number,",
+		"\tabs: ((x: number) -> number) & ((x: vector) -> vector),",
+		"}",
+		"declare Vec: {",
+		"\tnew: (() -> Vec) & ((x: number, y: number) -> Vec),",
+		"\tzero: Vec,",
+		"}",
+		"--- 2D vector class.",
+		"declare class Vec extends BaseVec",
+		"\tread X: number",
+		"\twrite Y: number",
+		"\tread [number]: number",
+		"\tfunction Lerp(self, other: Vec, alpha: number): Vec",
+		"\tfunction __add(self, other: Vec): Vec",
+		"end",
+		"declare extern type Channel with",
+		"\tread Closed: boolean",
+		"\tfunction Close(self): ()",
+		"end",
+		"declare extern type EmptyExtern with end",
+	}, "\n"))
+	local dluauRoot = dluau.result :: any
+	local classNames = {}
+	for _, cls in dluau.declaredClasses do
+		table.insert(classNames, cls.name)
+	end
+	local vecClass = dluau.declaredClasses[2]
+	t.eq({
+		dluauRoot.kind,
+		dluauRoot.isDeclaredRoot,
+		surface.classify(dluauRoot, false),
+		fieldNames(dluauRoot),
+		classNames,
+		vecClass.name,
+		vecClass.value.defDoc ~= nil,
+		fieldNames(vecClass.value),
+		field(vecClass.value, "X").readonly,
+		field(vecClass.value, "Y").readonly,
+		field(vecClass.value, "[number]").readonly,
+		surface.isSelfMethod(field(vecClass.value, "Lerp").value.fnNode),
+		surface.isSelfMethod(field(vecClass.value, "__add").value.fnNode),
+	}, {
+		"table",
+		true,
+		false,
+		{ "_VERSION", "print" },
+		{ "math", "Vec", "Channel", "EmptyExtern" },
+		"Vec",
+		true,
+		{ "new", "new", "zero", "X", "Y", "[number]", "Lerp", "__add" },
+		true,
+		false,
+		true,
+		true,
+		true,
+	}, ".d.luau declarations merge companion tables and preserve class/indexer/overload metadata")
+
+	local dluauEdge = eval(table.concat({
+		"--[=[",
+		"\tdeclare ignoredBlock: string",
+		"]=] -- end block",
+		"declare and: boolean",
+		'declare Mode: --[[ inline block ]] "dev" |',
+		'\t"prod--mode"',
+		"declare function repeat<",
+		"\tT,",
+		"\tU",
+		">(",
+		"\txs: { T }",
+		"): { U }",
+		"declare function fire(x: number)",
+		'declare function kind(): "fast" | "slow"',
+		"declare function makeConfig(): {",
+		"\tenabled: boolean,",
+		"}",
+		"--- Primary Box class doc.",
+		"declare class Box",
+		"\tread [string]: {",
+		"\t\tcount: number,",
+		"\t}",
+		"\tfunction end(self): ()",
+		"\tfunction reset(self)",
+		"end",
+		"--- Secondary Box table doc.",
+		"declare Box: {",
+		"\tcb: (number, ...string) -> boolean,",
+		"\thybrid: (() -> ()) & { tag: string },",
+		"}",
+		"declare class EmptyClass end",
+	}, "\n"))
+	local edgeRoot = dluauEdge.result :: any
+	local edgeClasses = {}
+	for _, cls in dluauEdge.declaredClasses do
+		table.insert(edgeClasses, cls.name)
+	end
+	local boxClass = dluauEdge.declaredClasses[1]
+	local cbFn = field(boxClass.value, "cb").value.fnNode
+	t.eq(
+		{
+			fieldNames(edgeRoot),
+			edgeClasses,
+			boxClass.value.defDoc ~= nil,
+			boxClass.secondaryDoc ~= nil,
+			fieldNames(boxClass.value),
+			field(boxClass.value, "[string]").readonly,
+			field(boxClass.value, "cb").value.kind,
+			cbFn.parameters[1].node.name.text,
+			cbFn.vararg ~= nil,
+			field(boxClass.value, "hybrid").value.kind,
+			surface.isSelfMethod(field(boxClass.value, "end").value.fnNode),
+			surface.isSelfMethod(field(boxClass.value, "reset").value.fnNode),
+		},
+		{
+			{ "and", "Mode", "repeat", "fire", "kind", "makeConfig" },
+			{ "Box", "EmptyClass" },
+			true,
+			true,
+			{ "[string]", "end", "reset", "cb", "hybrid" },
+			true,
+			"function",
+			"arg1",
+			true,
+			"opaque",
+			true,
+			true,
+		},
+		".d.luau normalizer handles block comments, keyword names, multi-line generics/returns/indexers, unnamed/vararg fn types, and class-first doc merging"
+	)
 end

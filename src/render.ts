@@ -664,6 +664,7 @@ class SymbolTable {
 						this.registerName(containerName, target, warnings);
 					}
 				}
+				const seenNames = new Set<string>();
 				for (const member of section.members) {
 					const target = {
 						page: page.slug,
@@ -671,6 +672,8 @@ class SymbolTable {
 						name: `${containerName}.${member.name}`,
 					};
 					this.byId.set(member.id, target);
+					if (seenNames.has(member.name)) continue;
+					seenNames.add(member.name);
 					this.registerName(target.name, target, warnings);
 					// Methods also register under colon syntax (`Class:method`).
 					if (member.kind === "method") {
@@ -798,6 +801,7 @@ export interface DependencyLinks {
 function requirePathOf(moduleId: string): string {
 	return toPosix(moduleId)
 		.replace(/^\.\//, "")
+		.replace(/\.d\.luau$/, "")
 		.replace(/\.luau?$/, "")
 		.replace(/(^|\/)init$/, "");
 }

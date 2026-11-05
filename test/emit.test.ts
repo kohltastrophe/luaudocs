@@ -1208,4 +1208,80 @@ describe("doc-model parse failures and signature-links runtime transformer", () 
 		expect(out.pages.get("Main.md")).toContain("[`State`](/api/Graph#state)");
 		expect(out.pages.get("Main.md")).toContain("[`Main.State`](/api/Main#state)");
 	});
+
+	it("renders .d.luau indexer properties and overloaded functions without link ambiguity warnings", () => {
+		const out = emitDocsFromJson(
+			modelJson([
+				mod("src/Vec.d.luau", "Vec", {
+					source: { file: "src/Vec.d.luau", line: 1 },
+					doc: "Use [Vec.new] or [Vec:Lerp].",
+					classes: [
+						cls("src/Vec.d.luau#class.Vec", "Vec", {
+							constructors: ["src/Vec.d.luau#fn.Vec.new"],
+							members: [
+								fn("src/Vec.d.luau#fn.Vec.new", "new", "Vec.new", ["(): Vec"], {
+									returns: [{ type: ["Vec"] }],
+								}),
+								fn(
+									"src/Vec.d.luau#fn.Vec.new:2",
+									"new",
+									"Vec.new",
+									["(x: number, y: number): Vec"],
+									{
+										params: [
+											{ name: "x", type: ["number"], optional: false },
+											{ name: "y", type: ["number"], optional: false },
+										],
+										returns: [{ type: ["Vec"] }],
+									},
+								),
+								prop("src/Vec.d.luau#prop.Vec.[number]", "[number]", ["number"], {
+									readonly: true,
+								}),
+								prop("src/Vec.d.luau#prop.Vec.[unclosed", "[unclosed", ["string"]),
+								fn(
+									"src/Vec.d.luau#fn.Vec.Lerp",
+									"Lerp",
+									"Vec:Lerp",
+									["(other: Vec, alpha: number): Vec"],
+									{
+										kind: "method",
+										params: [
+											{ name: "other", type: ["Vec"], optional: false },
+											{ name: "alpha", type: ["number"], optional: false },
+										],
+										returns: [{ type: ["Vec"] }],
+									},
+								),
+								fn(
+									"src/Vec.d.luau#fn.Vec.Lerp:2",
+									"Lerp",
+									"Vec:Lerp",
+									["(other: Vec): Vec"],
+									{
+										kind: "method",
+										params: [{ name: "other", type: ["Vec"], optional: false }],
+										returns: [{ type: ["Vec"] }],
+									},
+								),
+							],
+						}),
+					],
+				}),
+			]),
+			SAMPLE_CONFIG,
+		);
+		expect(out.warnings).toEqual([]);
+		const page = out.pageModels[0]!;
+		expect(page.anchors["src/Vec.d.luau#fn.Vec.new"]).toBe("new");
+		expect(page.anchors["src/Vec.d.luau#fn.Vec.new:2"]).toBe("new-1");
+		expect(page.anchors["src/Vec.d.luau#fn.Vec.Lerp"]).toBe("lerp");
+		expect(page.anchors["src/Vec.d.luau#fn.Vec.Lerp:2"]).toBe("lerp-1");
+		const md = out.pages.get("Vec.md")!;
+		expect(md).toContain('### `[number]` <Badge type="info" text="Read Only" />');
+		expect(md).toContain("Vec[number]: number");
+		expect(md).toContain('Vec["[unclosed"]: string');
+		expect(md).toContain("[`Vec.new`](/api/Vec#new)");
+		expect(md).toContain("[`Vec:Lerp`](/api/Vec#lerp)");
+	});
 });

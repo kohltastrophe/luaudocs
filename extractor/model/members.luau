@@ -21,6 +21,96 @@ type Collector = util.Collector
 export type ParsedDoc = tagsMod.ParsedDoc
 export type ModuleData = graphMod.ModuleData
 type Seg = segs.Seg
+type DocBlock = comments.DocBlock
+type Span = parseMod.Span
+type SymValue = surfaceMod.SymValue
+type SymField = surfaceMod.SymField
+
+export type SourceSpan = {
+	file: string,
+	line: number,
+	endLine: number?,
+}
+
+export type Badges = {
+	custom: { string },
+	deprecated: { version: string?, note: string? }?,
+	since: string?,
+	yields: boolean?,
+	unreleased: boolean?,
+	realm: { string }?,
+}
+
+export type ParamEntry = {
+	name: string,
+	type: { Seg }?,
+	doc: string?,
+}
+
+export type ReturnEntry = {
+	type: { Seg }?,
+	doc: string?,
+}
+
+export type Signature = {
+	callee: string,
+	segs: { Seg },
+	params: { ParamEntry },
+	returns: { ReturnEntry },
+	__generics: { segs.Generic }?,
+	__genericNames: { [string]: boolean }?,
+	__annotationTail: { Seg }?,
+	__tagReturns: boolean?,
+	__hasCodeParams: boolean?,
+	__accessor: string?,
+}
+
+export type FnMember = {
+	id: string,
+	name: string,
+	kind: string,
+	doc: string?,
+	tags: Badges,
+	visibility: string,
+	signature: Signature,
+	errors: { { type: string?, doc: string? } },
+	source: SourceSpan,
+	__valueSym: SymValue?,
+	__constructsSym: SymValue?,
+	__returnedRequire: string?,
+}
+
+export type PropMember = {
+	id: string,
+	name: string,
+	kind: string,
+	type: { Seg }?,
+	doc: string?,
+	tags: Badges,
+	visibility: string,
+	readonly: boolean,
+	source: SourceSpan,
+	__valueSym: SymValue?,
+	__inferred: boolean?,
+	__inferCall: SymValue?,
+	__mountRealm: boolean?,
+}
+
+export type Member = FnMember | PropMember
+
+export type ClassEntry = {
+	id: string,
+	name: string,
+	doc: string?,
+	tags: Badges,
+	constructors: { string },
+	members: { any },
+	within: string?,
+	source: SourceSpan,
+	__kind: string?,
+	__moduleId: string?,
+	__valueSym: SymValue?,
+}
 
 local members = {}
 
@@ -33,12 +123,14 @@ export type Ctx = {
 	diag: Collector,
 	modules: { any }, -- doc-model Module entries, parallel to g.modules
 	containersByName: { [string]: any }, -- class/module name -> container entry
-	containerOfSym: { [any]: any }, -- class table SymValue -> class entry
-	classByTypeId: { [string]: any }, -- classType type-id -> class entry
+	containerOfSym: { [any]: ClassEntry }, -- class table SymValue -> class entry
+	classByTypeId: { [string]: ClassEntry }, -- classType type-id -> class entry
 	-- module id -> (type name -> declaration id). Stores the resolved declaration
 	-- id rather than a boolean so `finalize`'s type deduplication can settle
 	-- which declaration owns a duplicate name in one place.
 	typesByModule: { [string]: { [string]: string } },
+	-- Ambient `.d.luau` class names -> declaration id (resolved across `.d.luau` files without `require`).
+	ambientTypes: { [string]: string },
 	-- Unresolved external names -> `@external` URL string or runtime-alias ExternalRef (first wins).
 	externals: { [string]: ExternalEntry },
 	-- Pending `@within` relocations. A member without `__valueSym` is a
@@ -55,10 +147,10 @@ export type Ctx = {
 			targetContainer: any?,
 		}
 	},
-	forwardedBlocks: { [any]: boolean }, -- blocks whose tag diagnostics have already been reported
+	forwardedBlocks: { [DocBlock]: boolean }, -- blocks whose tag diagnostics have already been reported
 	-- Module graph set by `model.assemble` so `detect` can follow calls across
 	-- modules (absent in isolated unit tests).
-	graph: any?,
+	graph: graphMod.Graph?,
 }
 
 function members.newCtx(diag: Collector): Ctx
@@ -69,29 +161,31 @@ function members.newCtx(diag: Collector): Ctx
 		containerOfSym = {},
 		classByTypeId = {},
 		typesByModule = {},
+		ambientTypes = {},
 		externals = {},
 		pendingMoves = {},
 		forwardedBlocks = {},
 	}
 end
 
-function members.span(modId: string, s: any): any
+function members.span(modId: string, s: Span?): SourceSpan
 	if s == nil then
 		return { file = modId, line = 1 }
 	end
 	return { file = modId, line = s.beginLine, endLine = if s.endLine ~= s.beginLine then s.endLine else nil }
 end
 
-function members.buildBadges(doc: ParsedDoc): any
+function members.buildBadges(doc: ParsedDoc): Badges
 	-- Clone `customTags` because undocumented members share `EMPTY_DOC`, and
 	-- `overlayBadges` mutates `badges.custom` in place.
-	local badges: any = { custom = table.clone(doc.customTags) }
+	local badges: Badges = { custom = table.clone(doc.customTags) }
 	if doc.deprecated ~= nil then
-		badges.deprecated = { version = doc.deprecated.version, note = doc.deprecated.desc }
-		if next(badges.deprecated) == nil then
+		local dep = { version = doc.deprecated.version, note = doc.deprecated.desc }
+		if next(dep) == nil then
 			-- Mark bare `@deprecated` tables so `emit` encodes `{}` instead of `[]`.
-			emitMod.record(badges.deprecated)
+			emitMod.record(dep)
 		end
+		badges.deprecated = dep
 	end
 	if doc.since ~= nil then
 		badges.since = doc.since
@@ -109,7 +203,7 @@ end
 --- Merges tag-declared badges into code-discovered badges (first-wins, except
 --- `custom`, which is unioned). Kept adjacent to `buildBadges` so any new badge
 --- field is updated in both functions together.
-function members.overlayBadges(into: any, from: any)
+function members.overlayBadges(into: Badges, from: Badges)
 	into.deprecated = into.deprecated or from.deprecated
 	into.since = into.since or from.since
 	into.yields = into.yields or from.yields
@@ -147,34 +241,7 @@ end
 --- Luau reserved keywords (`continue` is contextual, so it is excluded).
 --- `T.end` is a syntax error, so bracket access `T["end"]` is required.
 --- Mirrors `LUAU_KEYWORDS` in `src/pages.ts`.
-local LUAU_KEYWORDS: { [string]: boolean } = {}
-for _, word in
-	{
-		"and",
-		"break",
-		"do",
-		"else",
-		"elseif",
-		"end",
-		"false",
-		"for",
-		"function",
-		"if",
-		"in",
-		"local",
-		"nil",
-		"not",
-		"or",
-		"repeat",
-		"return",
-		"then",
-		"true",
-		"until",
-		"while",
-	}
-do
-	LUAU_KEYWORDS[word] = true
-end
+local LUAU_KEYWORDS = parseMod.LUAU_KEYWORDS
 
 local function isIdentName(name: string): boolean
 	return name:match("^[%a_][%w_]*$") ~= nil and LUAU_KEYWORDS[name] == nil
@@ -419,8 +486,11 @@ function members.mergeParamTags(
 	line: number?,
 	diag: Collector,
 	overrideType: boolean,
-	genericNames: { [string]: boolean }?
+	genericNames: { [string]: boolean }?,
+	fnNode: any?
 )
+	local overloadParams = if fnNode ~= nil then fnNode.overloadParams else nil
+	local isSecondary = fnNode ~= nil and fnNode.isSecondaryOverload
 	for _, tagParam in paramTags do
 		local docText = tagParam.desc or tagParam.doc
 		local found = members.byName(params, tagParam.name)
@@ -436,7 +506,7 @@ function members.mergeParamTags(
 				type = resolveTagType(tagParam.type, genericNames),
 				doc = docText,
 			})
-		else
+		elseif not (overloadParams ~= nil and (overloadParams[tagParam.name] or isSecondary)) then
 			diag:warn(
 				"param-mismatch",
 				string.format("@param %s does not match any parameter of %s", tagParam.name, fnName),
@@ -506,7 +576,7 @@ local function buildSignature(
 	doc: ParsedDoc,
 	memberLine: number?,
 	dropSelf: boolean?
-): any
+): Signature
 	local qualified = if containerName == "" then name else containerName .. "." .. name
 	local parsedFile: any = mod.parsed
 	local trailingIndex: any = mod.trailingIndex
@@ -552,7 +622,8 @@ local function buildSignature(
 		memberLine,
 		ctx.diag,
 		true,
-		genericNames
+		genericNames,
+		fnNode
 	)
 	local tagReturns = members.mergeReturnTags(
 		returns,
@@ -673,11 +744,11 @@ function members.buildFn(
 	ctx: Ctx,
 	mod: ModuleData,
 	containerName: string,
-	field: any,
+	field: SymField,
 	doc: ParsedDoc,
 	secondaryDesc: string?,
-	ownerSym: any?
-): any
+	ownerSym: SymValue?
+): FnMember
 	local name = field.name
 	local isColon = field.isColonMethod
 	local isMetamethod = surfaceMod.isMetamethod(name)
@@ -711,6 +782,15 @@ function members.buildFn(
 		errors = {},
 		source = members.span(mod.id, field.defSpan),
 	}
+	if fn.tags.deprecated == nil then
+		local depAttr = parseMod.extractDeprecationAttr(mod.parsed, fnNode)
+		if depAttr ~= nil then
+			fn.tags.deprecated = { note = depAttr.note }
+			if next(fn.tags.deprecated) == nil then
+				emitMod.record(fn.tags.deprecated)
+			end
+		end
+	end
 	for _, err in doc.errors do
 		table.insert(fn.errors, { type = err.type, doc = err.desc })
 	end
@@ -747,11 +827,11 @@ function members.buildProp(
 	ctx: Ctx,
 	mod: ModuleData,
 	containerName: string,
-	field: any,
+	field: SymField,
 	doc: ParsedDoc,
 	secondaryDesc: string?,
-	ownerSym: any?
-): any
+	ownerSym: SymValue?
+): PropMember
 	local name = field.name
 	local visibility = members.visibilityOf(name, doc)
 	local parsedFile: any = mod.parsed
@@ -801,7 +881,7 @@ function members.buildProp(
 		doc = desc,
 		tags = badges,
 		visibility = visibility,
-		readonly = doc.flags.readonly == true or detectMod.propReadonly(mod, ownerSym, name),
+		readonly = doc.flags.readonly == true or field.readonly == true or detectMod.propReadonly(mod, ownerSym, name),
 		source = members.span(mod.id, field.defSpan),
 		-- Mark value-inferred types so a later `@prop x T` tag stub can override them.
 		__inferred = if inferred then true else nil,
@@ -821,9 +901,9 @@ function members.newContainer(
 	mod: ModuleData,
 	name: string,
 	doc: ParsedDoc,
-	sourceSpan: any,
+	sourceSpan: Span?,
 	within: string?
-): any
+): ClassEntry
 	local class = {
 		-- Qualify nested class IDs with `within` so same-named nested tables
 		-- under different parents do not collide.
@@ -908,6 +988,72 @@ local function tryAddReexport(
 	return true
 end
 
+local function resolveFieldDoc(
+	ctx: Ctx,
+	mod: ModuleData,
+	owner: any,
+	field: any,
+	mounted: any,
+	out: any?
+): (ParsedDoc?, string?, any?)
+	local block = members.docBlockOf(field)
+	local value = field.value
+	if out == nil then
+		if block == nil then
+			return nil, nil, nil
+		end
+		local sidecarDoc = members.parseTags(ctx, block)
+		if sidecarDoc.within == nil then
+			return nil, nil, nil
+		end
+		if
+			not sidecarDoc.flags.ignore
+			and value.kind ~= "function"
+			and (value.kind == "table" or mounted.kind == "require" or mounted.kind == "import")
+		then
+			return nil, nil, nil
+		end
+	end
+	local doc = members.parseBlock(ctx, mod.id, block)
+	if block == nil and mod.claimIndex ~= nil then
+		local ownerEntry = detectMod.ownerFieldEntry(mod, owner, field.name)
+		local entryBlock = if ownerEntry ~= nil and ownerEntry.key ~= nil
+			then mod.claimIndex[ownerEntry.key.location.beginLine]
+			else nil
+		if entryBlock ~= nil then
+			doc = members.parseBlock(ctx, mod.id, entryBlock)
+		end
+	end
+	local secondaryDesc: string? = nil
+	if out ~= nil and field.defDoc ~= nil and field.fieldDoc ~= nil then
+		local fieldParsed = members.parseBlock(ctx, mod.id, field.fieldDoc)
+		secondaryDesc = fieldParsed.desc
+	end
+	if doc.flags.ignore then
+		return nil, nil, nil
+	end
+	return doc, secondaryDesc, block
+end
+
+local function isNestedContainer(ctx: Ctx, field: any, value: any, doc: ParsedDoc, out: any?): boolean
+	return out ~= nil
+		and value.kind == "table"
+		and field.declaredType == nil
+		and value.castType == nil
+		and value.annotation == nil
+		and #value.fields > 0
+		-- Tables already registered as containers (including cyclic references)
+		-- render as plain properties linking to the existing container.
+		and ctx.containerOfSym[members.symKey(value)] == nil
+		-- Keep `_`-prefixed and `@private` tables as properties so they can
+		-- carry `visibility = "private"` instead of becoming public sections.
+		and members.visibilityOf(field.name, doc) == "public"
+		-- A non-`@class` placing tag (`@prop Defaults { size: number }`) or
+		-- `@readonly` marks the table as a single property rather than a namespace section.
+		and (doc.placing == nil or doc.placing.kind == "class")
+		and not doc.flags.readonly
+end
+
 --- Builds members from `sym.fields` into `out` (or queues only `@within`
 --- members into `ctx.pendingMoves` when `out` is `nil` for a non-surfaced
 --- sidecar module). `ownerSym` overrides the table that `self` and readonly
@@ -915,49 +1061,19 @@ end
 --- metatable attached to `ownerSym`).
 function members.buildMembers(ctx: Ctx, mod: ModuleData, containerName: string, sym: any, out: any?, ownerSym: any?)
 	local owner = ownerSym or sym
+	local overloadCounts: { [string]: number } = {}
 	for _, field in sym.fields or {} do
 		-- Skip string keys containing dots (`M["A.b"]`), which would collide
-		-- with nested container member IDs (`M.A.b`).
-		if field.name:find(".", 1, true) ~= nil then
+		-- with nested container member IDs (`M.A.b`), unless it is a `[K]` indexer.
+		if not (field.name:sub(1, 1) == "[" and field.name:sub(-1) == "]") and field.name:find(".", 1, true) ~= nil then
 			continue
 		end
 		local value = field.value
 		-- Unwrap realm-guarded mounts (`IsServer() and require(X)`) so they
 		-- emit as re-exports with a realm badge.
 		local mounted = surfaceMod.unguard(value)
-		local block = members.docBlockOf(field)
-		if out == nil then
-			if block == nil then
-				continue
-			end
-			local sidecarDoc = members.parseTags(ctx, block)
-			if sidecarDoc.within == nil then
-				continue
-			end
-			if
-				not sidecarDoc.flags.ignore
-				and value.kind ~= "function"
-				and (value.kind == "table" or mounted.kind == "require" or mounted.kind == "import")
-			then
-				continue
-			end
-		end
-		local doc = members.parseBlock(ctx, mod.id, block)
-		if block == nil and mod.claimIndex ~= nil then
-			local ownerEntry = detectMod.ownerFieldEntry(mod, owner, field.name)
-			local entryBlock = if ownerEntry ~= nil and ownerEntry.key ~= nil
-				then mod.claimIndex[ownerEntry.key.location.beginLine]
-				else nil
-			if entryBlock ~= nil then
-				doc = members.parseBlock(ctx, mod.id, entryBlock)
-			end
-		end
-		local secondaryDesc: string? = nil
-		if out ~= nil and field.defDoc ~= nil and field.fieldDoc ~= nil then
-			local fieldParsed = members.parseBlock(ctx, mod.id, field.fieldDoc)
-			secondaryDesc = fieldParsed.desc
-		end
-		if doc.flags.ignore then
+		local doc, secondaryDesc, block = resolveFieldDoc(ctx, mod, owner, field, mounted, out)
+		if doc == nil then
 			continue
 		end
 
@@ -967,28 +1083,20 @@ function members.buildMembers(ctx: Ctx, mod: ModuleData, containerName: string, 
 
 		local member: any = nil
 		if value.kind == "function" then
-			if block == nil and surfaceMod.isMetamethod(field.name) then
+			if
+				block == nil
+				and surfaceMod.isMetamethod(field.name)
+				and not (field.isDeclared and field.name ~= "__index" and field.name ~= "__newindex")
+			then
 				continue -- skip undocumented metamethods (`__index`, `__newindex`, etc.)
 			end
 			member = members.buildFn(ctx, mod, containerName, field, doc, secondaryDesc, owner)
-		elseif
-			out ~= nil
-			and value.kind == "table"
-			and field.declaredType == nil
-			and value.castType == nil
-			and value.annotation == nil
-			and #value.fields > 0
-			-- Tables already registered as containers (including cyclic references)
-			-- render as plain properties linking to the existing container.
-			and ctx.containerOfSym[members.symKey(value)] == nil
-			-- Keep `_`-prefixed and `@private` tables as properties so they can
-			-- carry `visibility = "private"` instead of becoming public sections.
-			and members.visibilityOf(field.name, doc) == "public"
-			-- A non-`@class` placing tag (`@prop Defaults { size: number }`) or
-			-- `@readonly` marks the table as a single property rather than a namespace section.
-			and (doc.placing == nil or doc.placing.kind == "class")
-			and not doc.flags.readonly
-		then
+			local count = (overloadCounts[member.id] or 0) + 1
+			overloadCounts[member.id] = count
+			if count > 1 then
+				member.id = member.id .. ":" .. tostring(count)
+			end
+		elseif isNestedContainer(ctx, field, value, doc, out) then
 			local nestedName = containerName .. "." .. field.name
 			local nested = members.newContainer(ctx, mod, field.name, doc, field.defSpan, containerName)
 			ctx.containerOfSym[members.symKey(value)] = nested
