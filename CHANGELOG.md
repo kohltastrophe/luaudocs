@@ -2,6 +2,12 @@
 
 Notable changes to LuauDocs, newest first. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow [semantic versioning](https://semver.org/spec/v2.0.0.html). While the major version is 0, a minor bump may include breaking changes.
 
+## [0.4.0] - 2026-11-06
+
+### Added
+
+- Support parsing Luau declaration (.d.luau) files. ([1b47ca1](https://github.com/kohltastrophe/luaudocs/commit/1b47ca14c7004636f8bf4b7544b61b5b70311c5a))
+
 ## [0.3.2] - 2026-11-04
 
 ### Changed
@@ -55,6 +61,7 @@ Notable changes to LuauDocs, newest first. The format follows [Keep a Changelog]
 
 - Add Luau documentation extractor, static site generator, and CLI.
 
+[0.4.0]: https://github.com/kohltastrophe/luaudocs/releases/tag/v0.4.0
 [0.3.2]: https://github.com/kohltastrophe/luaudocs/releases/tag/v0.3.2
 [0.3.1]: https://github.com/kohltastrophe/luaudocs/releases/tag/v0.3.1
 [0.3.0]: https://github.com/kohltastrophe/luaudocs/releases/tag/v0.3.0
