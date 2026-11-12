@@ -9,9 +9,13 @@ import { spawnSync } from "node:child_process";
 import { resolveLute } from "../src/lute";
 
 const lute = await resolveLute();
-const { status, error } = spawnSync(lute.command, process.argv.slice(2), { stdio: "inherit" });
-if (error) {
+const result = spawnSync(lute.command, process.argv.slice(2), { stdio: "inherit" });
+if (result.error) {
 	console.error(lute.hint);
 	process.exit(2);
 }
-process.exit(status ?? 1);
+if (result.signal !== null) {
+	console.error(`lute was killed by ${result.signal}`);
+	process.exit(1);
+}
+process.exit(result.status ?? 1);

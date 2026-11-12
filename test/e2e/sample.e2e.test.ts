@@ -10,6 +10,7 @@ import {
 	mkdirSync,
 	readFileSync,
 	rmSync,
+	symlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { basename, join } from "node:path";
@@ -75,50 +76,54 @@ function distHtml(dist: string): Array<[string, string]> {
 		.map((abs) => [abs.slice(dist.length + 1), readFileSync(abs, "utf8")]);
 }
 
+function cloneDir(source: string): string {
+	const dir = tempDir();
+	cpSync(source, dir, { recursive: true });
+	return dir;
+}
+
 describe("luaudocs e2e on the sample project", () => {
-	let projectDir: string;
+	let initializedDir: string;
+	let initResult: CliResult;
+	let cachedNodeModules: string | undefined;
 
-	beforeAll(() => {
-		projectDir = freshProject();
-	});
-
-	it("init runs from the built CLI", async () => {
-		const result = await cli(
+	beforeAll(async () => {
+		initializedDir = freshProject();
+		initResult = await cli(
 			["init", ".", "--title", "Sample", "--description", "Reactive state"],
-			projectDir,
+			initializedDir,
 		);
-		expect(result.exitCode, result.stderr).toBe(0);
+		// the fixture is not a git repo, so [repo] stays off; source links and
+		// the edit link below are exactly what this stanza turns on
+		appendFileSync(
+			join(initializedDir, "luaudocs.toml"),
+			'\n[repo]\nurl = "https://github.com/example/sample"\n',
+		);
+	}, 120_000);
+
+	it("init runs from the built CLI", () => {
+		expect(initResult.exitCode, initResult.stderr).toBe(0);
 		// only the built bundle takes this branch of packageRoot (dist/ ->
 		// <pkg>), so nothing but e2e proves the packaged templates resolve
 		expect(
 			readFileSync(
-				join(projectDir, ".luaudocs", ".vitepress", "generated", "signature-links.ts"),
+				join(initializedDir, ".luaudocs", ".vitepress", "generated", "signature-links.ts"),
 				"utf8",
 			),
 		).toContain("luaudocs-links=");
-		// the fixture is not a git repo, so [repo] stays off; source links and
-		// the edit link below are exactly what this stanza turns on
-		appendFileSync(
-			join(projectDir, "luaudocs.toml"),
-			'\n[repo]\nurl = "https://github.com/example/sample"\n',
-		);
 	});
 
 	it("build produces the static site", async () => {
-		// --emit-only never needs VitePress, so it must not install anything
-		const emitted = await cli(["build", ".", "--emit-only"], projectDir);
-		expect(emitted.exitCode, emitted.stderr).toBe(0);
-		expect(existsSync(join(projectDir, ".luaudocs", "node_modules"))).toBe(false);
-
-		// --model is the doc model as a consumable artifact: written where it was
-		// asked for, parsing as the schema this build declares, and carrying the
-		// same surface the pages were rendered from
+		const projectDir = cloneDir(initializedDir);
+		// --emit-only never needs VitePress, so it must not install anything;
+		// --model writes the consumable doc-model artifact from the same pass
 		const modelPath = join(projectDir, "model.json");
 		const withModel = await cli(
 			["build", ".", "--emit-only", "--model", "model.json"],
 			projectDir,
 		);
 		expect(withModel.exitCode, withModel.stderr).toBe(0);
+		expect(existsSync(join(projectDir, ".luaudocs", "node_modules"))).toBe(false);
 		expect(withModel.stdout).toContain("wrote model.json");
 		const model = JSON.parse(readFileSync(modelPath, "utf8")) as {
 			schemaVersion: number;
@@ -133,6 +138,7 @@ describe("luaudocs e2e on the sample project", () => {
 		const result = await cli(["build", "."], projectDir);
 		expect(result.exitCode, result.stderr).toBe(0);
 		expect(result.stdout).toContain("installing the docs site dependencies");
+		cachedNodeModules = join(projectDir, ".luaudocs", "node_modules");
 
 		const dist = join(projectDir, ".luaudocs", ".vitepress", "dist");
 		for (const pageName of ["Sample", "State", "Color", "Interpolate", "Query", "Type"]) {
@@ -175,13 +181,13 @@ describe("luaudocs e2e on the sample project", () => {
 		expect(stateHtml).toContain('href="/api/State"');
 
 		// the baked trail map reached the render-time rule: both kinds of page
-		// head with links, and the markdown inside the wrapper really parsed
+		// head with `<nav>` landmarks, and the markdown inside the wrapper really parsed
 		expect(stateHtml).toContain(
-			'<div class="luaudocs-trail"><p><a href="/">Home</a> › ' +
-				'<a href="/api/">Overview</a> › <a href="/api/Sample">Sample</a></p></div>',
+			'<nav class="luaudocs-trail" aria-label="Breadcrumb"><p><a href="/">Home</a> › ' +
+				'<a href="/api/">Overview</a> › <a href="/api/Sample">Sample</a></p></nav>',
 		);
 		expect(guideHtml).toContain(
-			'<div class="luaudocs-trail"><p><a href="/">Home</a></p></div>',
+			'<nav class="luaudocs-trail" aria-label="Breadcrumb"><p><a href="/">Home</a></p></nav>',
 		);
 		// above the first heading, which is what keeps it out of the search index
 		expect(stateHtml.indexOf("luaudocs-trail")).toBeLessThan(stateHtml.indexOf("<h1"));
@@ -211,15 +217,20 @@ describe("luaudocs e2e on the sample project", () => {
 	// the pages emitted fine and VitePress then failed the site: a build
 	// failure (1), not the usage or environment error (2) it used to exit with
 	it("exits 1 when VitePress fails the site", async () => {
-		const guide = join(projectDir, ".luaudocs", "guide", "broken.md");
-		writeFileSync(guide, "# Broken\n\n[nowhere](./does-not-exist)\n");
-		try {
-			const result = await cli(["build", "."], projectDir);
-			expect(result.exitCode, result.stderr).toBe(1);
-			expect(result.stderr).toContain("vitepress build failed");
-		} finally {
-			rmSync(guide);
+		const projectDir = cloneDir(initializedDir);
+		if (cachedNodeModules && existsSync(cachedNodeModules)) {
+			symlinkSync(
+				cachedNodeModules,
+				join(projectDir, ".luaudocs", "node_modules"),
+				"junction",
+			);
 		}
+		const guide = join(projectDir, ".luaudocs", "guide", "broken.md");
+		mkdirSync(join(projectDir, ".luaudocs", "guide"), { recursive: true });
+		writeFileSync(guide, "# Broken\n\n[nowhere](./does-not-exist)\n");
+		const result = await cli(["build", "."], projectDir);
+		expect(result.exitCode, result.stderr).toBe(1);
+		expect(result.stderr).toContain("vitepress build failed");
 	}, 300_000);
 });
 
@@ -247,19 +258,21 @@ describe("config-less build", () => {
 	}, 120_000);
 });
 
-// its own copy: these mutate the project and must not reach the suite above
+// each test clones the seeded baseline so mutating `it(...)` blocks can run in
+// any order or standalone under `vitest -t "..."`
 describe("emit owns the generated api directory", () => {
-	let projectDir: string;
+	let seededDir: string;
 
 	beforeAll(async () => {
-		projectDir = freshProject();
-		const init = await cli(["init", ".", "--title", "Sample"], projectDir);
+		seededDir = freshProject();
+		const init = await cli(["init", ".", "--title", "Sample"], seededDir);
 		expect(init.exitCode, init.stderr).toBe(0);
-		const emit = await cli(["build", ".", "--emit-only"], projectDir);
+		const emit = await cli(["build", ".", "--emit-only"], seededDir);
 		expect(emit.exitCode, emit.stderr).toBe(0);
 	}, 120_000);
 
 	it("deletes stale pages when a module disappears", async () => {
+		const projectDir = cloneDir(seededDir);
 		// the page must exist before the mutation, or the absence assertion
 		// below would pass vacuously if emit never produced it at all
 		expect(existsSync(join(projectDir, ".luaudocs", "api", "Color.md"))).toBe(true);
@@ -283,6 +296,7 @@ describe("emit owns the generated api directory", () => {
 	// api/ is wholly tool-owned: anything a build did not emit is swept, while
 	// the user's content outside it is never touched
 	it("sweeps hand-planted files out of api/, never guide content", async () => {
+		const projectDir = cloneDir(seededDir);
 		const handWritten = join(projectDir, ".luaudocs", "api", "hand-written.md");
 		writeFileSync(handWritten, "# Mine\n");
 		const guidePage = join(projectDir, ".luaudocs", "guide", "mine.md");
@@ -298,8 +312,8 @@ describe("emit owns the generated api directory", () => {
 		expect(readFileSync(starter, "utf8")).toBe(starterBefore);
 	}, 120_000);
 
-	// last: it breaks the sources for good
 	it("keeps previously generated pages when extraction reports errors", async () => {
+		const projectDir = cloneDir(seededDir);
 		expect(existsSync(join(projectDir, ".luaudocs", "api", "State.md"))).toBe(true);
 		const llmsPath = join(projectDir, ".luaudocs", "public", "llms.txt");
 		const generated = join(projectDir, ".luaudocs", ".vitepress", "generated");

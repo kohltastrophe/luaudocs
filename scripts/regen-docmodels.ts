@@ -8,7 +8,7 @@
  *   bun run regen:docmodels           # rewrite the fixtures
  *   bun run regen:docmodels --check   # verify they are up to date (CI)
  */
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { extractorJson } from "../src/extract";
@@ -46,6 +46,11 @@ for (const [index, { capture }] of captures.entries()) {
 	const path = join(fixtures, capture);
 	const next = `${stdout.replaceAll("\r\n", "\n")}\n`;
 	if (check) {
+		if (!existsSync(path)) {
+			console.error(`test/fixtures/${capture} is missing; run \`bun run regen:docmodels\``);
+			stale += 1;
+			continue;
+		}
 		const current = readFileSync(path, "utf8").replaceAll("\r\n", "\n");
 		if (current !== next) {
 			const a = current.split("\n");

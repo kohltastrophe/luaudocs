@@ -11,7 +11,14 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
-import { DEFAULT_BRANCH, DEFAULT_ENTRIES, probeEntries } from "./config";
+import {
+	DEFAULT_BRANCH,
+	DEFAULT_ENTRIES,
+	errorMessage,
+	isRecord,
+	normalizeGitRepoUrl,
+	probeEntries,
+} from "./config";
 import {
 	CODE_SPAN,
 	frontmatter,
@@ -65,10 +72,10 @@ export interface MoonwaveConversion {
 
 /** Returns `value` as a record when it is a non-array object, or `{}` otherwise. */
 function tableOf(value: unknown): Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value)
-		? (value as Record<string, unknown>)
-		: {};
+	return isRecord(value) ? value : {};
 }
+
+const EXTERNAL_URL = /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i;
 
 /** Returns `value` when it is a string, or `undefined` otherwise. */
 function stringOf(value: unknown): string | undefined {
@@ -95,7 +102,7 @@ function unmapped(
  * to a root-relative `/...` path served from `public/`, leaving full URLs untouched.
  */
 function rooted(path: string): string {
-	return /^[a-z][a-z0-9+.-]*:/i.test(path) ? path : `/${path.replace(/^\/+/, "")}`;
+	return EXTERNAL_URL.test(path) ? path : `/${path.replace(/^\/+/, "")}`;
 }
 
 /** Joins `host` and `baseUrl` into a single published URL, or returns `undefined` if invalid. */
@@ -104,13 +111,20 @@ function joinedUrl(host: string, baseUrl: unknown, defaultBase: string): string 
 	return URL.canParse(path, host) ? new URL(path, host).href : undefined;
 }
 
-/** Parses `moonwave.toml` or `moonwave.json`, throwing on malformed syntax. */
+/** Parses `moonwave.toml` or `moonwave.json`, throwing on malformed syntax or non-object roots. */
 export function readMoonwave(moonwavePath: string): MoonwaveSource {
+	const filename = basename(moonwavePath);
 	const text = readFileSync(moonwavePath, "utf8");
-	const raw = (moonwavePath.endsWith(".json") ? JSON.parse(text) : parseToml(text)) as Record<
-		string,
-		unknown
-	>;
+	let parsed: unknown;
+	try {
+		parsed = moonwavePath.endsWith(".json") ? JSON.parse(text) : parseToml(text);
+	} catch (error) {
+		throw new Error(`${filename}: ${errorMessage(error)}`);
+	}
+	if (!isRecord(parsed)) {
+		throw new Error(`${filename}: expected a table/object at the root`);
+	}
+	const raw = parsed;
 	const docusaurus = tableOf(raw.docusaurus);
 	const home = tableOf(raw.home);
 	return {
@@ -309,9 +323,10 @@ export function convertMoonwave(
 	// Prefer `gitRepoUrl`, falling back to `docusaurus.organizationName` + `projectName`.
 	const org = stringOf(docusaurus.organizationName);
 	const project = stringOf(docusaurus.projectName);
+	const rawRepoUrl = stringOf(raw.gitRepoUrl);
 	const repoUrl =
-		stringOf(raw.gitRepoUrl) ??
-		(org && project ? `https://github.com/${org}/${project}` : undefined);
+		(rawRepoUrl === undefined ? undefined : normalizeGitRepoUrl(rawRepoUrl)) ??
+		(org && project ? normalizeGitRepoUrl(`https://github.com/${org}/${project}`) : undefined);
 	if (repoUrl !== undefined) {
 		config.repo = {
 			url: repoUrl,
@@ -551,30 +566,79 @@ export interface ConvertedMdx {
 	components: string[];
 }
 
+interface EsmScanState {
+	depth: number;
+	inBlockComment: boolean;
+	quote: "'" | '"' | "`" | undefined;
+}
+
+function scanEsmLine(line: string, state: EsmScanState): void {
+	for (let i = 0; i < line.length; i += 1) {
+		const ch = line[i]!;
+		const next = line[i + 1];
+		if (state.inBlockComment) {
+			if (ch === "*" && next === "/") {
+				state.inBlockComment = false;
+				i += 1;
+			}
+			continue;
+		}
+		if (state.quote !== undefined) {
+			if (ch === "\\") {
+				i += 1;
+				continue;
+			}
+			if (ch === state.quote || (ch === "\n" && state.quote !== "`")) {
+				state.quote = undefined;
+			}
+			continue;
+		}
+		if (ch === "/" && next === "/") {
+			break;
+		}
+		if (ch === "/" && next === "*") {
+			state.inBlockComment = true;
+			i += 1;
+			continue;
+		}
+		if (ch === "'" || ch === '"' || ch === "`") {
+			state.quote = ch;
+			continue;
+		}
+		if (ch === "(" || ch === "[" || ch === "{") {
+			state.depth += 1;
+		} else if (ch === ")" || ch === "]" || ch === "}") {
+			state.depth = Math.max(0, state.depth - 1);
+		}
+	}
+}
+
 /**
  * Strips top-level MDX `import` and `export` blocks. Under Docusaurus MDX, a
  * paragraph starting with `import ` or `export ` is parsed as ESM rather than
  * prose, whereas in VitePress it would render as literal text. Drops each ESM block
  * through the blank line that closes it (ignoring blank lines inside unclosed
- * brackets), while preserving mid-paragraph lines that happen to start with
- * `"import"` or `"export"`.
+ * brackets, block comments, or template literals), while preserving mid-paragraph
+ * lines that happen to start with `"import"` or `"export"`.
  */
 function stripEsm(segment: string): string {
-	const brackets = (line: string): number =>
-		(line.match(/[([{]/g)?.length ?? 0) - (line.match(/[)\]}]/g)?.length ?? 0);
 	const kept: string[] = [];
 	let atBlockStart = true;
 	let dropping = false;
-	let depth = 0;
+	const state: EsmScanState = { depth: 0, inBlockComment: false, quote: undefined };
 	for (const line of segment.split(/(?<=\n)/)) {
 		const blank = line.trim() === "";
-		if (dropping && (!blank || depth > 0)) {
-			depth += brackets(line);
+		const open = state.depth > 0 || state.inBlockComment || state.quote !== undefined;
+		if (dropping && (!blank || open)) {
+			scanEsmLine(line, state);
 			continue;
 		}
 		dropping = atBlockStart && !blank && /^(?:import|export)\s/.test(line);
 		if (dropping) {
-			depth = brackets(line);
+			state.depth = 0;
+			state.inBlockComment = false;
+			state.quote = undefined;
+			scanEsmLine(line, state);
 		} else {
 			kept.push(line);
 		}
@@ -609,6 +673,9 @@ function convertMdxComments(segment: string): string {
  * - `.mdx` extensions become `.md`
  */
 function convertTarget(target: string): string {
+	if (EXTERNAL_URL.test(target)) {
+		return target;
+	}
 	return (
 		moonwaveStaticTarget(target) ??
 		target.replace(/^\/docs(?=\/|$)/, "/guide").replace(/\.mdx(?=$|[#?])/, ".md")

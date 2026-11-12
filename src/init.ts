@@ -6,18 +6,18 @@
  * `.vitepress/` machinery once at the end so the site resolves before the first
  * build.
  */
-import { execFile } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import pc from "picocolors";
 import pkg from "../package.json";
-import { createContext } from "./build";
+import { createContext, execGit } from "./build";
 import {
 	DEFAULT_BRANCH,
 	DEFAULT_DOCS_DIR,
 	DEFAULT_ENTRIES,
 	type LuauDocsConfig,
 	normalizeDocsDir,
+	normalizeGitRepoUrl,
 	parseConfig,
 	PROBED_ENTRIES,
 	probeEntries,
@@ -60,14 +60,19 @@ function configToml(options: {
 	description: string;
 	entries: string[];
 	repoUrl?: string;
+	branch?: string;
 	docsDir?: string;
 }): string {
 	// A detected GitHub remote enables `[repo]` (source links, edit links, and
 	// the GitHub icon) instead of leaving the table commented out, while `branch`
-	// stays commented because the config loader defaults it to `"main"`.
+	// stays commented when equal to `DEFAULT_BRANCH` (`"main"`).
+	const branchLine =
+		options.branch !== undefined && options.branch !== DEFAULT_BRANCH
+			? `branch = ${JSON.stringify(options.branch)}`
+			: `# branch = ${JSON.stringify(DEFAULT_BRANCH)}`;
 	const repo = options.repoUrl
-		? `[repo]\nurl = ${JSON.stringify(options.repoUrl)}\n# branch = "main"`
-		: '# [repo]\n# url = "https://github.com/user/repo"\n# branch = "main"';
+		? `[repo]\nurl = ${JSON.stringify(options.repoUrl)}\n${branchLine}`
+		: `# [repo]\n# url = "https://github.com/user/repo"\n# branch = ${JSON.stringify(DEFAULT_BRANCH)}`;
 	// When re-running against an existing custom docs directory, keep the
 	// rewritten config pointing at the directory where content is scaffolded.
 	const dir = options.docsDir
@@ -123,48 +128,38 @@ ${dir}
 `;
 }
 
-/**
- * Returns a git command's trimmed stdout, or `undefined` outside a repository
- * (or when git is unavailable). Every caller has a fallback, so failures are non-fatal.
- */
-function git(args: string[], cwd: string): Promise<string | undefined> {
-	return new Promise((done) => {
-		execFile("git", args, { cwd, timeout: 5_000 }, (error, out) =>
-			done(error ? undefined : out.trim()),
-		);
-	});
-}
-
 /** Normalizes `git remote get-url origin` to HTTPS, or returns `undefined`. */
 async function detectRepoUrl(targetDir: string): Promise<string | undefined> {
-	const remote = await git(["remote", "get-url", "origin"], targetDir);
-	if (remote === undefined) {
+	const remote = await execGit(targetDir, ["remote", "get-url", "origin"]);
+	if (!remote) {
 		return undefined;
 	}
-	const https = remote.replace(/^git@github\.com:/, "https://github.com/").replace(/\.git$/, "");
-	if (!https.startsWith("http")) {
-		return undefined;
-	}
-	// Strip credentials so a clone URL containing a token never leaks into
-	// `luaudocs.toml` or generated source links.
-	if (!URL.canParse(https)) {
-		return undefined;
-	}
-	const url = new URL(https);
-	url.username = "";
-	url.password = "";
-	return url.href.replace(/\/$/, "");
+	const candidate = remote.replace(
+		/^(?:git@github\.com:|ssh:\/\/(?:[^@/]+@)?github\.com\/)/i,
+		"https://github.com/",
+	);
+	return normalizeGitRepoUrl(candidate);
 }
 
 /**
- * Detects the current branch for the Pages workflow trigger. Uses `symbolic-ref`
- * so a newly initialized repository with no commits yet still reports a branch.
- * Falls back to `DEFAULT_BRANCH` outside a repository or when the branch name
- * contains characters that cannot sit inside the template's quoted scalar.
+ * Detects the default branch for `[repo] branch` and the Pages workflow trigger.
+ * Prefers `origin/HEAD` so initializing from a feature branch in a cloned repo
+ * still targets the remote's default branch, then falls back to `HEAD` (via
+ * `symbolic-ref` so an unborn repository with zero commits still reports its
+ * branch) and finally `DEFAULT_BRANCH`.
  */
 async function detectBranch(targetDir: string): Promise<string> {
-	const branch = (await git(["symbolic-ref", "--short", "HEAD"], targetDir)) ?? "";
-	return /^[^"\\]+$/.test(branch) ? branch : DEFAULT_BRANCH;
+	const originHead = await execGit(targetDir, [
+		"symbolic-ref",
+		"--short",
+		"refs/remotes/origin/HEAD",
+	]);
+	const remoteBranch = originHead?.replace(/^origin\//, "") ?? "";
+	if (remoteBranch !== "" && /^[^"\\]+$/.test(remoteBranch)) {
+		return remoteBranch;
+	}
+	const headBranch = (await execGit(targetDir, ["symbolic-ref", "--short", "HEAD"])) ?? "";
+	return /^[^"\\]+$/.test(headBranch) ? headBranch : DEFAULT_BRANCH;
 }
 
 /**
@@ -263,31 +258,37 @@ function copyTemplateTree(
 	}
 }
 
-async function scaffold(options: {
+function scaffold(options: {
 	targetDir: string;
 	put: Put;
 	title: string;
 	description: string;
-	/** Target docs directory, read by the caller before `scaffold` rewrites `luaudocs.toml`. */
+	/** Target docs directory, read by the caller before `scaffold` writes `luaudocs.toml`. */
 	docsDir: string;
+	repoUrl?: string;
+	branch: string;
+	writeConfig: boolean;
 	skipTemplate?: (rel: string) => boolean;
-}): Promise<void> {
+}): void {
 	const { targetDir, put, title, description, docsDir } = options;
 
-	// Run the same entry probe as a config-less build, requiring an `init`
-	// module so `init` never writes an entry directory that would fail the
-	// first build.
-	const probed = probeEntries(targetDir, PROBED_ENTRIES, true);
-	put(
-		"luaudocs.toml",
-		configToml({
-			title,
-			description,
-			entries: probed.length > 0 ? probed : DEFAULT_ENTRIES,
-			repoUrl: await detectRepoUrl(targetDir),
-			docsDir: docsDir !== DEFAULT_DOCS_DIR ? docsDir : undefined,
-		}),
-	);
+	if (options.writeConfig) {
+		// Run the same entry probe as a config-less build, requiring an `init`
+		// module so `init` never writes an entry directory that would fail the
+		// first build.
+		const probed = probeEntries(targetDir, PROBED_ENTRIES, true);
+		put(
+			"luaudocs.toml",
+			configToml({
+				title,
+				description,
+				entries: probed.length > 0 ? probed : DEFAULT_ENTRIES,
+				repoUrl: options.repoUrl,
+				branch: options.branch,
+				docsDir: docsDir !== DEFAULT_DOCS_DIR ? docsDir : undefined,
+			}),
+		);
+	}
 
 	copyTemplateTree(
 		"site",
@@ -307,7 +308,6 @@ function finalizeMoonwaveInit(
 	pages: MoonwavePages,
 	put: Put,
 	existing: LuauDocsConfig | undefined,
-	hadConfig: boolean,
 ): void {
 	const { targetDir, force } = options;
 	const existingDocsDir = existing?.docs.dir;
@@ -317,7 +317,7 @@ function finalizeMoonwaveInit(
 	const guideLink = firstGuidePage(collectGuides(join(targetDir, docsDirName)));
 	// When an existing `luaudocs.toml` is kept (no `--force`), the homepage
 	// follows the surviving config's `includeReadme` setting rather than Moonwave's.
-	const configWritten = !hadConfig || force === true;
+	const willWriteConfig = existing === undefined || force === true;
 	const conversion = convertMoonwave(source, {
 		fallbackTitle: options.title ?? source.title ?? basename(targetDir),
 		docsDir:
@@ -325,7 +325,7 @@ function finalizeMoonwaveInit(
 				? existingDocsDir
 				: undefined,
 		guideLink,
-		homeReadme: configWritten ? undefined : existing?.docs.includeReadme === true,
+		homeReadme: willWriteConfig ? undefined : existing.docs.includeReadme === true,
 	});
 	// Port Moonwave homepage branding to `index.md` unless `pages/index.md`
 	// already claimed the homepage slot.
@@ -344,18 +344,7 @@ function finalizeMoonwaveInit(
 		console.log("");
 	}
 
-	// Write the converted config after `scaffold` so it overwrites the
-	// starter `luaudocs.toml` when `--force` is set.
-	if (!configWritten) {
-		console.log(
-			pc.yellow(
-				"  skipped (exists)  luaudocs.toml; re-run with --force to apply the conversion",
-			),
-		);
-	} else {
-		writeFileSync(join(targetDir, "luaudocs.toml"), conversion.configToml);
-		console.log(pc.green("  wrote converted   luaudocs.toml"));
-	}
+	put("luaudocs.toml", conversion.configToml);
 	const staticDir = join(targetDir, ".moonwave", "static");
 	if (existsSync(staticDir)) {
 		// `force: false` preserves any existing files in `public/` (including `CNAME`).
@@ -414,9 +403,8 @@ export async function initProject(options: InitOptions): Promise<void> {
 	let source: MoonwaveSource | undefined;
 	let pages: MoonwavePages | undefined;
 
-	const hadConfig = existsSync(join(targetDir, "luaudocs.toml"));
 	const { put, counts } = makePut(targetDir, options.force);
-	// Read any existing config before `scaffold` rewrites it under `--force`.
+	// Read any existing config before writing `luaudocs.toml` under `--force`.
 	// A custom `[docs] dir` must carry over into the converted config, and
 	// `includeReadme` determines whether the converted homepage includes the
 	// README when an existing config is kept.
@@ -428,6 +416,11 @@ export async function initProject(options: InitOptions): Promise<void> {
 		title = title ?? source.title;
 		description = description ?? source.description;
 	}
+
+	const [repoUrl, branch] = await Promise.all([
+		detectRepoUrl(targetDir),
+		detectBranch(targetDir),
+	]);
 
 	// Converted Moonwave content displaces matching starter templates even under
 	// `--force`. Skip any template path claimed by a converted file, the homepage
@@ -442,25 +435,28 @@ export async function initProject(options: InitOptions): Promise<void> {
 		pages?.files.some(
 			(page) => page.destRel.startsWith("guide/") && page.destRel.endsWith(".md"),
 		) ?? false;
-	await scaffold({
+	scaffold({
 		targetDir,
 		put,
 		title: title ?? basename(targetDir),
 		description: description ?? "Documentation",
 		docsDir: docsDirName,
+		repoUrl,
+		branch,
+		writeConfig: source === undefined,
 		skipTemplate: (rel) =>
 			claimed.has(rel) || (hasGuides && (rel === "index.md" || rel.startsWith("guide/"))),
 	});
 
 	if (source !== undefined && pages !== undefined) {
-		finalizeMoonwaveInit(options, source, pages, put, existing, hadConfig);
+		finalizeMoonwaveInit(options, source, pages, put, existing);
 	}
 
 	// Scaffold the project-root tree (the GitHub Pages workflow) after the
 	// config settles so `@DOCS_DIR@` reflects the final `[docs] dir`.
 	copyTemplateTree("project", "", put, {
 		"@DOCS_DIR@": docsDirName,
-		"@BRANCH@": await detectBranch(targetDir),
+		"@BRANCH@": branch,
 		"@NODE_MAJOR@": NODE_MAJOR,
 	});
 

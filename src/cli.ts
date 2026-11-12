@@ -9,8 +9,8 @@
  * - 2: usage and environment errors (bad flags, an invalid config, nothing to
  *   document, an unreachable Lute or VitePress binary, or a user-owned `llms.txt`)
  */
-import { writeFileSync } from "node:fs";
-import { join, relative, resolve } from "node:path";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname, join, relative, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import pc from "picocolors";
 import pkg from "../package.json";
@@ -36,11 +36,7 @@ Usage:
   luaudocs --version | --help
 `;
 
-// VitePress flags ride behind `--`. Split them off before `parseArgs`, which
-// would otherwise bind the first token after `--` to the `[dir]` positional.
-const separator = process.argv.indexOf("--");
-const argv = (separator === -1 ? process.argv : process.argv.slice(0, separator)).slice(2);
-const passthrough = separator === -1 ? [] : process.argv.slice(separator + 1);
+const HELP_OPTION = { help: { type: "boolean", short: "h" } } as const;
 
 function usage(message: string): never {
 	console.error(pc.red(`error: ${message}`));
@@ -61,12 +57,17 @@ async function build(args: string[]): Promise<void> {
 		args,
 		allowPositionals: true,
 		options: {
+			...HELP_OPTION,
 			"emit-only": { type: "boolean" },
 			strict: { type: "boolean" },
 			url: { type: "string" },
 			model: { type: "string" },
 		},
 	});
+	if (values.help) {
+		console.log(HELP);
+		return;
+	}
 	const context = createContext(dirArg(positionals), { url: values.url });
 	const { result, model, counts, summary } = await runBuild(context);
 	if (values.model !== undefined) {
@@ -74,6 +75,7 @@ async function build(args: string[]): Promise<void> {
 		// before the error gate below so callers can inspect the diagnostics
 		// that failed the build.
 		const target = resolve(values.model);
+		mkdirSync(dirname(target), { recursive: true });
 		writeFileSync(target, formatDocModel(model));
 		console.log(`${pc.green("wrote")} ${values.model}`);
 	}
@@ -112,10 +114,15 @@ async function llms(args: string[]): Promise<void> {
 		args,
 		allowPositionals: true,
 		options: {
+			...HELP_OPTION,
 			out: { type: "string" },
 			check: { type: "boolean" },
 		},
 	});
+	if (values.help) {
+		console.log(HELP);
+		return;
+	}
 	const context = createContext(dirArg(positionals));
 	const target =
 		values.out === undefined ? join(context.root, LOCAL_LLMS_FILE) : resolve(values.out);
@@ -144,60 +151,118 @@ async function llms(args: string[]): Promise<void> {
 	}
 }
 
+async function init(args: string[]): Promise<void> {
+	const { values, positionals } = parseArgs({
+		args,
+		allowPositionals: true,
+		options: {
+			...HELP_OPTION,
+			force: { type: "boolean" },
+			"from-moonwave": { type: "boolean" },
+			title: { type: "string" },
+			description: { type: "string" },
+		},
+	});
+	if (values.help) {
+		console.log(HELP);
+		return;
+	}
+	await initProject({
+		targetDir: dirArg(positionals),
+		force: values.force,
+		title: values.title,
+		description: values.description,
+		fromMoonwave: values["from-moonwave"],
+	});
+}
+
+async function dev(args: string[], passthrough: string[]): Promise<void> {
+	const { values, positionals } = parseArgs({
+		args,
+		allowPositionals: true,
+		options: HELP_OPTION,
+	});
+	if (values.help) {
+		console.log(HELP);
+		return;
+	}
+	await runDev({ startDir: dirArg(positionals), vitepressArgs: passthrough });
+}
+
+function handleCommandlessArgs(rawArgs: string[], hasTerminator: boolean): void {
+	if (hasTerminator) {
+		usage("missing command before `--`");
+	}
+	const { values } = parseArgs({
+		args: rawArgs,
+		options: {
+			...HELP_OPTION,
+			version: { type: "boolean", short: "v" },
+		},
+	});
+	console.log(values.version && !values.help ? pkg.version : HELP);
+}
+
 async function main(): Promise<void> {
-	const command = argv[0];
-	if (command === undefined || command === "--help" || command === "-h") {
+	const rawArgs = process.argv.slice(2);
+	if (rawArgs.length === 0) {
 		console.log(HELP);
 		return;
 	}
-	if (command === "--version" || command === "-v") {
-		console.log(pkg.version);
+	// Inspect tokens first so `--` only forwards VitePress flags on `dev` and
+	// never promotes a post-`--` positional into the subcommand slot.
+	const top = parseArgs({
+		args: rawArgs,
+		strict: false,
+		allowPositionals: true,
+		tokens: true,
+		options: {
+			...HELP_OPTION,
+			version: { type: "boolean", short: "v" },
+			title: { type: "string" },
+			description: { type: "string" },
+			url: { type: "string" },
+			model: { type: "string" },
+			out: { type: "string" },
+		},
+	});
+	const terminator = top.tokens.find((token) => token.kind === "option-terminator");
+	const firstPositional = top.tokens.find(
+		(token): token is Extract<(typeof top.tokens)[number], { kind: "positional" }> =>
+			token.kind === "positional" &&
+			(terminator === undefined || token.index < terminator.index),
+	);
+	if (firstPositional === undefined) {
+		handleCommandlessArgs(rawArgs, terminator !== undefined);
 		return;
 	}
-	const rest = argv.slice(1);
-	// Honor `--help` anywhere in the argument list instead of rejecting it as an
-	// undeclared subcommand flag.
-	if (rest.includes("--help") || rest.includes("-h")) {
-		console.log(HELP);
-		return;
-	}
+
+	const command = firstPositional.value;
+	const end = terminator === undefined ? rawArgs.length : terminator.index;
+	const rest = [
+		...rawArgs.slice(0, firstPositional.index),
+		...rawArgs.slice(firstPositional.index + 1, end),
+	];
+	const passthrough = terminator === undefined ? [] : rawArgs.slice(terminator.index + 1);
+
 	// Only `dev` forwards arguments after `--`. Rejecting `--` on other commands
 	// prevents a misplaced `--` from silently dropping flags like `--strict`.
 	if (passthrough.length > 0 && command !== "dev") {
 		usage(`${command} takes no arguments after \`--\`: ${passthrough.join(" ")}`);
 	}
 	switch (command) {
-		case "init": {
-			const { values, positionals } = parseArgs({
-				args: rest,
-				allowPositionals: true,
-				options: {
-					force: { type: "boolean" },
-					"from-moonwave": { type: "boolean" },
-					title: { type: "string" },
-					description: { type: "string" },
-				},
-			});
-			await initProject({
-				targetDir: dirArg(positionals),
-				force: values.force,
-				title: values.title,
-				description: values.description,
-				fromMoonwave: values["from-moonwave"],
-			});
+		case "init":
+			await init(rest);
 			return;
-		}
 		case "build":
 			await build(rest);
 			return;
 		case "llms":
 			await llms(rest);
 			return;
-		case "dev": {
-			const { positionals } = parseArgs({ args: rest, allowPositionals: true, options: {} });
-			await runDev({ startDir: dirArg(positionals), vitepressArgs: passthrough });
+		case "dev":
+			await dev(rest, passthrough);
 			return;
-		}
 		default:
 			usage(`unknown command: ${command}`);
 	}

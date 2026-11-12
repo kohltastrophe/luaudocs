@@ -32,6 +32,11 @@ describe("convertMdxPage", () => {
 			"\nProse.\n",
 		],
 		[
+			"ignores unbalanced brackets inside string literals and JS comments in stripEsm",
+			'export const ICON = ":("; // trailing [ (\nexport const BOX = "{" /* { ( */;\n\nProse stays.\n',
+			"\nProse stays.\n",
+		],
+		[
 			"rewrites MDX comments (including code spans and -- pairs)",
 			"a {/* hidden `foo` */} b\n{/* A --> B */}\n",
 			"a <!-- hidden `foo` --> b\n<!-- A - -> B -->\n",
@@ -42,10 +47,12 @@ describe("convertMdxPage", () => {
 			'clicking \n[here](/guide/setup) or `{" "}`.\n',
 		],
 		[
-			"moves /docs/ links to /guide/ and renames .mdx targets",
+			"moves /docs/ links to /guide/, renames .mdx targets, and leaves external URLs untouched",
 			[
 				'Inline [setup](/docs/setup), [next](./advanced.mdx#top), and [t](./s.mdx "Title").',
 				'<a href="/docs/intro">intro</a> <img src="/docs/assets/x.png">',
+				"[ext](https://example.com/docs/setup.mdx) [cdn](//cdn.example.com/.moonwave/static/logo.png) [mail](mailto:hi@example.com)",
+				'<img src="https://cdn.example.com/.moonwave/static/logo.png">',
 				"",
 				"[ref]: /docs/deep/page",
 				"[sibling]: other.mdx",
@@ -54,6 +61,8 @@ describe("convertMdxPage", () => {
 			[
 				'Inline [setup](/guide/setup), [next](./advanced.md#top), and [t](./s.md "Title").',
 				'<a href="/guide/intro">intro</a> <img src="/guide/assets/x.png">',
+				"[ext](https://example.com/docs/setup.mdx) [cdn](//cdn.example.com/.moonwave/static/logo.png) [mail](mailto:hi@example.com)",
+				'<img src="https://cdn.example.com/.moonwave/static/logo.png">',
 				"",
 				"[ref]: /guide/deep/page",
 				"[sibling]: other.md",

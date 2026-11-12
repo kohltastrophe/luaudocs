@@ -8,13 +8,16 @@ import { pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import {
 	createContext,
+	ensureVitepress,
 	runBuild,
+	spawnVitepress,
 	unshallowGit,
 	type BuildContext,
 	type RenderedModel,
 } from "../src/build";
+import pkg from "../package.json";
 import { parseDocModel, type DocModel } from "../src/docmodel";
-import { syncDir } from "../src/pages";
+import { SITE_DEPENDENCIES, syncDir } from "../src/pages";
 import { emitDocs, filterModel } from "../src/render";
 import { makeTempDirFactory, modelJson, readFixture, seed } from "./helpers";
 
@@ -80,14 +83,88 @@ describe("syncDir", () => {
 		expect(existsSync(join(foreign, "generated/stale.ts"))).toBe(false);
 
 		const recased = tempDir();
-		seed(recased, { "widget.md": "old\n" });
-		syncDir(recased, new Map([["Widget.md", "new\n"]]));
+		seed(recased, { "widget.md": "old\n", "sub/leaf.md": "old\n" });
+		syncDir(
+			recased,
+			new Map([
+				["Widget.md", "new\n"],
+				["Sub/Leaf.md", "nested\n"],
+			]),
+		);
 		expect(readFileSync(join(recased, "Widget.md"), "utf8")).toBe("new\n");
-		expect(readdirSync(recased)).toEqual(["Widget.md"]);
+		expect(readFileSync(join(recased, "Sub/Leaf.md"), "utf8")).toBe("nested\n");
+		expect(readdirSync(recased).sort()).toEqual(["Sub", "Widget.md"]);
+
+		const emptied = tempDir();
+		seed(emptied, { "stale.md": "old\n" });
+		expect(syncDir(emptied, new Map())).toEqual({ written: 0, deleted: 1, unchanged: 0 });
+		expect(existsSync(emptied)).toBe(false);
 
 		const never = join(tempDir(), "never");
 		syncDir(never, new Map());
 		expect(existsSync(never)).toBe(false);
+	});
+});
+
+describe("parseDocModel structural validation", () => {
+	const base = () => ({
+		schemaVersion: 1,
+		project: { entryPoints: ["src/init.luau"] },
+		modules: [
+			{
+				id: "src/init.luau",
+				name: "Init",
+				instancePath: ["Init"],
+				source: { file: "src/init.luau", line: 1 },
+				classes: [],
+				members: [],
+				types: [],
+				reexports: [],
+			},
+		],
+		diagnostics: [],
+	});
+
+	it("rejects malformed project.entryPoints, modules spine fields, diagnostics, and externals", () => {
+		expect(() => parseDocModel(JSON.stringify({ ...base(), project: null }))).toThrow(
+			/project\.entryPoints/,
+		);
+		expect(() =>
+			parseDocModel(JSON.stringify({ ...base(), project: { entryPoints: [123] } })),
+		).toThrow(/project\.entryPoints/);
+
+		expect(() => parseDocModel(JSON.stringify({ ...base(), modules: "nope" }))).toThrow(
+			/malformed modules/,
+		);
+		for (const badField of [
+			{ id: 42 },
+			{ name: undefined },
+			{ instancePath: [1] },
+			{ source: null },
+			{ classes: {} },
+			{ members: null },
+			{ types: "bad" },
+			{ reexports: 0 },
+		]) {
+			const broken = base();
+			broken.modules = [{ ...broken.modules[0]!, ...badField } as never];
+			expect(() => parseDocModel(JSON.stringify(broken))).toThrow(/malformed modules/);
+		}
+
+		expect(() => parseDocModel(JSON.stringify({ ...base(), diagnostics: {} }))).toThrow(
+			/missing diagnostics array/,
+		);
+		expect(() =>
+			parseDocModel(JSON.stringify({ ...base(), externals: ["not-a-record"] })),
+		).toThrow(/externals must be a JSON object/);
+		expect(() => parseDocModel(JSON.stringify({ ...base(), externals: null }))).toThrow(
+			/externals must be a JSON object/,
+		);
+
+		const valid = parseDocModel(
+			JSON.stringify({ ...base(), externals: { Promise: "https://example.com" } }),
+		);
+		expect(valid.externals).toEqual({ Promise: "https://example.com" });
 	});
 });
 
@@ -264,5 +341,48 @@ describe("runBuild", () => {
 
 		// Second call on an already-full clone is a fast no-op.
 		await expect(unshallowGit(shallow)).resolves.toBeUndefined();
+	});
+
+	it("resolves local/exports-restricted site deps and spawns the local VitePress CLI", async () => {
+		const emptyDocs = tempDir();
+		// Missing `package.json` returns early rather than walking up to a parent project,
+		// and `spawnVitepress` reports the missing install clearly.
+		await expect(ensureVitepress(emptyDocs)).resolves.toBeUndefined();
+		expect(() => spawnVitepress(emptyDocs, "build")).toThrow(/vitepress is not installed/);
+
+		const docsDir = tempDir();
+		const files: Record<string, string> = {
+			"package.json": JSON.stringify({ name: "docs", private: true }),
+		};
+		for (const dep of SITE_DEPENDENCIES) {
+			if (dep === "vitepress") {
+				files[`node_modules/${dep}/package.json`] = JSON.stringify({
+					name: dep,
+					version: pkg.devDependencies.vitepress,
+					bin: "bin/cli.mjs",
+				});
+				files[`node_modules/${dep}/bin/cli.mjs`] = [
+					"const args = process.argv.slice(2);",
+					'if (args.includes("--fail")) process.exit(2);',
+					"process.exit(0);",
+				].join("\n");
+			} else {
+				// `exports: { ".": "./index.js" }` omits `./package.json`, exercising
+				// `resolveFromDocs`'s `ERR_PACKAGE_PATH_NOT_EXPORTED` directory walk.
+				files[`node_modules/${dep}/package.json`] = JSON.stringify({
+					name: dep,
+					version: "1.0.0",
+					exports: { ".": "./index.js" },
+				});
+				files[`node_modules/${dep}/index.js`] = "export {};\n";
+			}
+		}
+		seed(docsDir, files);
+
+		await expect(ensureVitepress(docsDir)).resolves.toBeUndefined();
+		await expect(spawnVitepress(docsDir, "build").done).resolves.toBeUndefined();
+		await expect(spawnVitepress(docsDir, "dev", ["--fail"]).done).rejects.toThrow(
+			/vitepress dev failed \(exit 2\)/,
+		);
 	});
 });

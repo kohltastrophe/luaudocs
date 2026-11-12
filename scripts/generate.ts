@@ -16,8 +16,9 @@
  * Only this script touches the network: the build bundles `roblox-names.json`
  * into `dist/`, so `luaudocs build` never fetches the dump at runtime.
  */
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // Pinned to a specific Roblox-Client-Tracker commit so CI and local checkouts
@@ -105,6 +106,11 @@ const ENGINE_LISTS = [
 	"datatypes",
 	"enums",
 ] as const;
+
+const DATATYPES_HASH = createHash("sha256")
+	.update(JSON.stringify([...DATATYPES].sort()))
+	.digest("hex");
+const ENGINE_STAMP = `-- Source: dump=${DUMP_COMMIT} datatypes=${DATATYPES_HASH}`;
 
 /** Formats the opening line of a table in `engine.luau` (shared by the writer and `engineIsCurrent`). */
 function listHeader(name: string): string {
@@ -207,12 +213,43 @@ function methodReturns(dump: Dump): Array<[string, string]> {
 		.sort(([a], [b]) => (a < b ? -1 : 1));
 }
 
+const LUAU_IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const LUAU_KEYWORDS = new Set([
+	"and",
+	"break",
+	"do",
+	"else",
+	"elseif",
+	"end",
+	"false",
+	"for",
+	"function",
+	"if",
+	"in",
+	"local",
+	"nil",
+	"not",
+	"or",
+	"repeat",
+	"return",
+	"then",
+	"true",
+	"until",
+	"while",
+]);
+
+function luauKey(key: string): string {
+	return LUAU_IDENT.test(key) && !LUAU_KEYWORDS.has(key) ? key : `[${JSON.stringify(key)}]`;
+}
+
 function luauSet(names: string[]): string {
-	return names.map((name) => `\t\t${name} = true,`).join("\n");
+	return names.map((name) => `\t\t${luauKey(name)} = true,`).join("\n");
 }
 
 function luauMap(entries: Array<[string, string]>): string {
-	return entries.map(([name, value]) => `\t\t${name} = "${value}",`).join("\n");
+	return entries
+		.map(([name, value]) => `\t\t${luauKey(name)} = ${JSON.stringify(value)},`)
+		.join("\n");
 }
 
 /**
@@ -223,7 +260,7 @@ async function fetchDump(): Promise<Dump> {
 	let last: unknown;
 	for (let attempt = 1; attempt <= ATTEMPTS; attempt += 1) {
 		try {
-			const response = await fetch(DUMP_URL);
+			const response = await fetch(DUMP_URL, { signal: AbortSignal.timeout(30_000) });
 			if (!response.ok) {
 				throw new Error(`${response.status} ${response.statusText}`);
 			}
@@ -243,15 +280,18 @@ async function fetchDump(): Promise<Dump> {
 }
 
 /**
- * Checks whether an existing `engine.luau` on disk includes every table in
- * `ENGINE_LISTS`.
+ * Checks whether an existing `engine.luau` on disk matches the pinned
+ * `DUMP_COMMIT`, `DATATYPES` fingerprint, and `ENGINE_LISTS` schema.
  */
 function engineIsCurrent(): boolean {
 	if (!existsSync(engineOut)) {
 		return false;
 	}
 	const source = readFileSync(engineOut, "utf8");
-	return ENGINE_LISTS.every((name) => source.includes(listHeader(name)));
+	return (
+		source.includes(ENGINE_STAMP) &&
+		ENGINE_LISTS.every((name) => source.includes(listHeader(name)))
+	);
 }
 
 export async function main(force = process.argv.includes("--force")): Promise<void> {
@@ -293,6 +333,7 @@ export async function main(force = process.argv.includes("--force")): Promise<vo
 		"-- in (the prepare hook and CI refresh it). When this file is absent, badge",
 		"-- detection falls back to built-in conventions and type inference skips",
 		"-- Roblox engine types.",
+		ENGINE_STAMP,
 		"return {",
 		...ENGINE_LISTS.flatMap((name) => [listHeader(name), bodies[name], "\t},"]),
 		"}",
@@ -305,4 +346,6 @@ export async function main(force = process.argv.includes("--force")): Promise<vo
 	);
 }
 
-await main();
+if (fileURLToPath(import.meta.url) === resolve(process.argv[1] ?? "")) {
+	await main();
+}

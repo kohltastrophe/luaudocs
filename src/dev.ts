@@ -83,7 +83,7 @@ function reloadDevContext(
 	startDir: string,
 	current: BuildContext,
 	docsDir: string,
-	shutdown: (code?: number) => void,
+	shutdown: () => void,
 ): BuildContext | undefined {
 	let next: BuildContext;
 	try {
@@ -99,24 +99,52 @@ function reloadDevContext(
 	}
 	if (next.docsDir !== docsDir) {
 		console.log(pc.yellow("[docs] dir moved; restart `dev` to serve the new directory"));
-		shutdown(0);
+		shutdown();
 		return undefined;
 	}
 	return next;
 }
 
-/** Resolves each `[source] entries` item to its watched directory root. */
-function collectSourceRoots(context: BuildContext, roots: Set<string>): void {
-	// When an entry points at a file (`src/init.luau`), watch its parent
-	// directory so sibling modules it requires are covered.
-	roots.clear();
+/**
+ * Resolves each `[source] entries` item to its minimal set of watched directory
+ * roots, dropping nested subdirectories already covered by a recursive ancestor.
+ */
+function resolveSourceRoots(context: BuildContext): string[] {
+	const candidates: string[] = [];
 	for (const entry of context.config.source.entries) {
 		const abs = resolve(context.root, entry);
 		try {
-			roots.add(statSync(abs).isDirectory() ? abs : dirname(abs));
+			// When an entry points at a file (`src/init.luau`), watch its parent
+			// directory so sibling modules it requires are covered.
+			candidates.push(statSync(abs).isDirectory() ? abs : dirname(abs));
 		} catch {
-			// Missing entries are reported as extractor diagnostics during the build.
+			// If `entry` names a missing file inside an existing directory, watch
+			// that parent directory; missing source directories are bound once created.
+			const parent = dirname(abs);
+			try {
+				if (parent !== context.root && statSync(parent).isDirectory()) {
+					candidates.push(parent);
+				}
+			} catch {
+				// Missing entries are reported as extractor diagnostics during the build.
+			}
 		}
+	}
+	candidates.sort((a, b) => a.length - b.length);
+	const deduped: string[] = [];
+	for (const dir of candidates) {
+		if (!deduped.some((ancestor) => under(dir, ancestor))) {
+			deduped.push(dir);
+		}
+	}
+	return deduped;
+}
+
+function collectSourceRoots(context: BuildContext, roots: Set<string>): void {
+	const next = resolveSourceRoots(context);
+	roots.clear();
+	for (const dir of next) {
+		roots.add(dir);
 	}
 }
 
@@ -132,7 +160,9 @@ async function runRebuildPass(
 	label: string,
 	state: DevCache,
 	getContext: () => BuildContext,
+	isStopping: () => boolean,
 	applyConfig: () => boolean,
+	syncSourceWatchers: () => void,
 ): Promise<void> {
 	const startedAt = Date.now();
 	// Reload the config before reading either cache, since config changes
@@ -144,6 +174,10 @@ async function runRebuildPass(
 			label = "config reload";
 		}
 	}
+	if (isStopping()) {
+		return;
+	}
+	syncSourceWatchers();
 	// Snapshot and clear the dirty flags before `runBuild` starts so any
 	// file event arriving mid-build re-dirties the flag for the next pass.
 	const cached = state.modelDirty ? undefined : state.lastRendered;
@@ -188,9 +222,13 @@ function bindWatchers(
 	watchers.length = 0;
 	const listen = (dir: string, recursive: boolean): void => {
 		try {
-			watchers.push(
-				watch(dir, { recursive }, (_event, filename) => onEvent(join(dir, filename ?? ""))),
+			const watcher = watch(dir, { recursive }, (_event, filename) =>
+				onEvent(join(dir, filename ?? "")),
 			);
+			// Swallow asynchronous OS watcher errors so removing a watched tree
+			// mid-session cannot crash Node with an unhandled `'error'` event.
+			watcher.on("error", () => {});
+			watchers.push(watcher);
 		} catch {
 			// Directory disappeared. The next config reload will rebind remaining roots.
 		}
@@ -199,11 +237,98 @@ function bindWatchers(
 	for (const dir of roots) {
 		listen(dir, true);
 	}
-	// Watch the project root non-recursively for `luaudocs.toml`,
-	// `CHANGELOG.md`, `README.md`, the Rojo project file, and `.luaurc`.
+	// Watch the project root non-recursively for `luaudocs.toml`, newly created
+	// source directories, `CHANGELOG.md`, `README.md`, the Rojo project file, and `.luaurc`.
 	listen(context.root, false);
 	mkdirSync(docsDir, { recursive: true });
 	listen(docsDir, true);
+}
+
+async function serveUntilStopped(
+	docsDir: string,
+	vitepressArgs: string[],
+	stopped: Promise<void>,
+	isStopping: () => boolean,
+	setServer: (proc: VitepressProcess) => void,
+): Promise<void> {
+	await ensureVitepress(docsDir);
+	if (isStopping()) {
+		return;
+	}
+	const proc = spawnVitepress(docsDir, "dev", vitepressArgs);
+	setServer(proc);
+	proc.done.catch(() => {});
+	try {
+		await Promise.race([proc.done, stopped]);
+	} catch (error) {
+		if (!isStopping()) {
+			throw error;
+		}
+	}
+}
+
+interface RebuildQueue {
+	schedule: () => void;
+	drain: (label?: string) => Promise<void>;
+	cancel: () => void;
+}
+
+function createRebuildQueue(
+	isStopping: () => boolean,
+	runPass: (label: string) => Promise<void>,
+): RebuildQueue {
+	let pending = false;
+	let running = false;
+	let timer: ReturnType<typeof setTimeout> | undefined;
+
+	const drain = async (label = "rebuild"): Promise<void> => {
+		running = true;
+		try {
+			while (pending && !isStopping()) {
+				pending = false;
+				await runPass(label);
+				label = "rebuild";
+			}
+		} finally {
+			running = false;
+		}
+	};
+
+	return {
+		schedule(): void {
+			pending = true;
+			if (!running) {
+				clearTimeout(timer);
+				timer = setTimeout(() => void drain(), 150);
+			}
+		},
+		async drain(label = "rebuild"): Promise<void> {
+			pending = true;
+			await drain(label);
+		},
+		cancel(): void {
+			clearTimeout(timer);
+		},
+	};
+}
+
+function closeWatchSession(
+	watchers: FSWatcher[],
+	queue: RebuildQueue,
+	server: VitepressProcess | undefined,
+	resolveStop: (() => void) | undefined,
+): void {
+	queue.cancel();
+	for (const watcher of watchers) {
+		watcher.close();
+	}
+	watchers.length = 0;
+	server?.child.kill("SIGINT");
+	if (server && typeof server.child.once === "function") {
+		setTimeout(() => resolveStop?.(), 100).unref();
+	} else {
+		resolveStop?.();
+	}
 }
 
 export async function runDev(options: DevOptions): Promise<void> {
@@ -214,33 +339,26 @@ export async function runDev(options: DevOptions): Promise<void> {
 	const { ignored, touchesModel } = createEventFilter(docsDir, () => context.root);
 	const state: DevCache = { configDirty: false, modelDirty: true, guidesDirty: true };
 
-	let pending = false;
-	let running = false;
 	let stopping = false;
-	let timer: ReturnType<typeof setTimeout> | undefined;
 	let server: VitepressProcess | undefined;
+	let resolveStop: (() => void) | undefined;
+	const stopped = new Promise<void>((settle) => {
+		resolveStop = settle;
+	});
 	const watchers: FSWatcher[] = [];
 
 	const onSignal = (): void => shutdown();
-	const shutdown = (code?: number): void => {
+	const shutdown = (): void => {
 		stopping = true;
 		process.off("SIGINT", onSignal);
 		process.off("SIGTERM", onSignal);
-		clearTimeout(timer);
-		for (const watcher of watchers) {
-			watcher.close();
-		}
-		server?.child.kill("SIGINT");
-		if (code !== undefined) {
-			process.exit(code);
-		}
+		closeWatchSession(watchers, queue, server, resolveStop);
 	};
 
-	const schedule = (): void => {
-		pending = true;
-		if (!running) {
-			clearTimeout(timer);
-			timer = setTimeout(() => void drain(), 150);
+	const syncSourceWatchers = (): void => {
+		const next = resolveSourceRoots(context);
+		if (next.length !== roots.size || next.some((dir) => !roots.has(dir))) {
+			bindWatchers(watchers, context, docsDir, roots, onEvent);
 		}
 	};
 
@@ -248,14 +366,15 @@ export async function runDev(options: DevOptions): Promise<void> {
 		if (stopping || ignored(path)) {
 			return;
 		}
-		if (basename(path) === "luaudocs.toml") {
+		if (resolve(path) === resolve(context.configPath ?? join(context.root, "luaudocs.toml"))) {
 			state.configDirty = true;
 		} else if (touchesModel(path)) {
 			state.modelDirty = true;
+			syncSourceWatchers();
 		} else if (under(path, docsDir)) {
 			state.guidesDirty = true;
 		}
-		schedule();
+		queue.schedule();
 	};
 
 	const applyConfig = (): boolean => {
@@ -270,39 +389,37 @@ export async function runDev(options: DevOptions): Promise<void> {
 		return true;
 	};
 
-	const drain = async (label = "rebuild"): Promise<void> => {
-		running = true;
-		try {
-			while (pending && !stopping) {
-				pending = false;
-				await runRebuildPass(label, state, () => context, applyConfig);
-				label = "rebuild";
-			}
-		} finally {
-			running = false;
-		}
-	};
+	const queue = createRebuildQueue(
+		() => stopping,
+		(label) =>
+			runRebuildPass(
+				label,
+				state,
+				() => context,
+				() => stopping,
+				applyConfig,
+				syncSourceWatchers,
+			),
+	);
 
-	bindWatchers(watchers, context, docsDir, roots, onEvent);
-	process.on("SIGINT", onSignal);
-	process.on("SIGTERM", onSignal);
-
-	pending = true;
-	await drain("initial build");
-	if (stopping) {
-		return;
-	}
-	console.log(pc.dim(`watching ${[...roots, context.root, docsDir].join(", ")}`));
-
-	await ensureVitepress(docsDir);
-	if (stopping) {
-		return;
-	}
-	server = spawnVitepress(docsDir, "dev", options.vitepressArgs ?? []);
 	try {
-		await server.done;
-	} catch {
-		// VitePress exiting (for example on Ctrl+C) ends the session.
+		bindWatchers(watchers, context, docsDir, roots, onEvent);
+		process.on("SIGINT", onSignal);
+		process.on("SIGTERM", onSignal);
+		await queue.drain("initial build");
+		if (!stopping) {
+			console.log(pc.dim(`watching ${[...roots, context.root, docsDir].join(", ")}`));
+			await serveUntilStopped(
+				docsDir,
+				options.vitepressArgs ?? [],
+				stopped,
+				() => stopping,
+				(proc) => {
+					server = proc;
+				},
+			);
+		}
+	} finally {
+		shutdown();
 	}
-	shutdown();
 }

@@ -12,7 +12,7 @@ import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import pc from "picocolors";
 import pkg from "../package.json";
-import { loadConfig, parseUrlFlag } from "./config";
+import { IS_WINDOWS, loadConfig, parseUrlFlag } from "./config";
 import { formatDocModel, type DocModel } from "./docmodel";
 import { printWarnings, renderProject, type RenderedModel, type RenderedProject } from "./render";
 import {
@@ -139,21 +139,52 @@ export async function runBuild(
  * Using module resolution rather than probing `node_modules/` directly supports
  * hoisted and workspace installs.
  */
-function resolveFromDocs(req: NodeJS.Require, name: string): string | undefined {
+function resolveFromDocs(req: NodeJS.Require, name: string, docsRoot: string): string | undefined {
 	try {
 		return req.resolve(`${name}/package.json`);
 	} catch (error) {
 		const code = (error as NodeJS.ErrnoException).code;
 		// `ERR_PACKAGE_PATH_NOT_EXPORTED` means Node located `<name>/package.json`
-		// in `node_modules` and read its `exports` map (e.g. `vitepress-plugin-group-icons`).
+		// along `req.resolve.paths(name)` and rejected `./package.json` against its
+		// `exports` map (for example `vitepress-plugin-group-icons`). Walk the same
+		// lookup dirs so hoisted workspace installs still return the real manifest path.
 		if (code === "ERR_PACKAGE_PATH_NOT_EXPORTED") {
-			return name;
+			for (const dir of req.resolve.paths(name) ?? []) {
+				const pkgPath = join(dir, name, "package.json");
+				if (existsSync(pkgPath)) {
+					return pkgPath;
+				}
+			}
+			return join(docsRoot, "node_modules", name, "package.json");
 		}
 		if (code === "MODULE_NOT_FOUND") {
 			return undefined;
 		}
 		throw error;
 	}
+}
+
+function waitForChild(
+	child: ChildProcess,
+	label: string,
+	onSpawnError?: (error: Error) => Error,
+): Promise<void> {
+	return new Promise<void>((settle, reject) => {
+		child.on("error", (error) => reject(onSpawnError ? onSpawnError(error) : error));
+		child.on("exit", (code, signal) => {
+			if (code === 0) {
+				settle();
+			} else {
+				reject(
+					new Error(
+						signal
+							? `${label} was killed by ${signal}`
+							: `${label} failed (exit ${code})`,
+					),
+				);
+			}
+		});
+	});
 }
 
 /**
@@ -164,7 +195,7 @@ function resolveFromDocs(req: NodeJS.Require, name: string): string | undefined 
  */
 export async function ensureVitepress(docsDir: string): Promise<void> {
 	const req = createRequire(join(docsDir, "package.json"));
-	const resolved = resolveFromDocs(req, "vitepress");
+	const resolved = resolveFromDocs(req, "vitepress", docsDir);
 	if (resolved !== undefined) {
 		const { version } = JSON.parse(readFileSync(resolved, "utf8")) as { version: string };
 		// VitePress is pinned to an exact version; the remaining dependencies
@@ -172,7 +203,7 @@ export async function ensureVitepress(docsDir: string): Promise<void> {
 		if (
 			version === pkg.devDependencies.vitepress &&
 			SITE_DEPENDENCIES.every(
-				(name) => name === "vitepress" || resolveFromDocs(req, name) !== undefined,
+				(name) => name === "vitepress" || resolveFromDocs(req, name, docsDir) !== undefined,
 			)
 		) {
 			return;
@@ -185,27 +216,21 @@ export async function ensureVitepress(docsDir: string): Promise<void> {
 		return;
 	}
 	console.log(pc.cyan(`installing the docs site dependencies (npm install in ${docsDir})`));
-	await new Promise<void>((settle, reject) => {
-		// Windows `.cmd` shims require `shell: true` to spawn. Arguments are
-		// static strings, so nothing is subject to shell expansion.
-		const child = spawn("npm", ["install", "--no-fund", "--no-audit"], {
-			cwd: docsDir,
-			stdio: "inherit",
-			shell: process.platform === "win32",
-		});
-		child.on("error", () =>
-			reject(
-				new Error(
-					`could not run npm to install the docs site dependencies; run an install in ${docsDir} yourself`,
-				),
-			),
-		);
-		child.on("exit", (code) =>
-			code === 0
-				? settle()
-				: reject(new Error(`npm install failed (exit ${code}) in ${docsDir}`)),
-		);
+	// Windows `.cmd` shims require `shell: true` to spawn. Arguments are
+	// static strings, so nothing is subject to shell expansion.
+	const child = spawn("npm", ["install", "--no-fund", "--no-audit"], {
+		cwd: docsDir,
+		stdio: "inherit",
+		shell: IS_WINDOWS,
 	});
+	await waitForChild(
+		child,
+		`npm install in ${docsDir}`,
+		() =>
+			new Error(
+				`could not run npm to install the docs site dependencies; run an install in ${docsDir} yourself`,
+			),
+	);
 }
 
 /**
@@ -214,7 +239,11 @@ export async function ensureVitepress(docsDir: string): Promise<void> {
  * extensionless `sh` shim cannot execute and Bun does not create `.cmd` shims).
  */
 function vitepressBin(docsDir: string): string {
-	const pkgPath = resolveFromDocs(createRequire(join(docsDir, "package.json")), "vitepress");
+	const pkgPath = resolveFromDocs(
+		createRequire(join(docsDir, "package.json")),
+		"vitepress",
+		docsDir,
+	);
 	if (!pkgPath) {
 		throw new Error(
 			`vitepress is not installed in ${docsDir}; run \`npm install\` in that directory first`,
@@ -229,28 +258,28 @@ function vitepressBin(docsDir: string): string {
 }
 
 /**
+ * Runs a Git subcommand in `cwd` and returns trimmed stdout, or `undefined`
+ * when Git is unavailable, `cwd` is not a repository, or the command fails.
+ */
+export function execGit(cwd: string, args: string[], timeout = 5_000): Promise<string | undefined> {
+	return new Promise((settle) => {
+		execFile("git", args, { cwd, timeout }, (err, out) => {
+			settle(err ? undefined : out.trim());
+		});
+	});
+}
+
+/**
  * Best-effort unshallows a shallow Git clone (`--depth=1` on Cloudflare Pages
  * or `actions/checkout`) so VitePress's `lastUpdated` timestamps reflect each
  * page's real commit history instead of the HEAD commit. Silently no-ops
  * outside a Git repository, on full clones, or when `git fetch` fails.
  */
-export function unshallowGit(cwd: string): Promise<void> {
-	return new Promise((settle) => {
-		execFile(
-			"git",
-			["rev-parse", "--is-shallow-repository"],
-			{ cwd, timeout: 5_000 },
-			(err, out) => {
-				if (err || out.trim() !== "true") {
-					settle();
-					return;
-				}
-				execFile("git", ["fetch", "--quiet", "--unshallow"], { cwd, timeout: 60_000 }, () =>
-					settle(),
-				);
-			},
-		);
-	});
+export async function unshallowGit(cwd: string): Promise<void> {
+	if ((await execGit(cwd, ["rev-parse", "--is-shallow-repository"])) !== "true") {
+		return;
+	}
+	await execGit(cwd, ["fetch", "--quiet", "--unshallow"], 60_000);
 }
 
 export interface VitepressProcess {
@@ -268,21 +297,5 @@ export function spawnVitepress(
 		cwd: docsDir,
 		stdio: "inherit",
 	});
-	const done = new Promise<void>((settle, reject) => {
-		child.on("error", reject);
-		child.on("exit", (code, signal) => {
-			if (code === 0) {
-				settle();
-			} else {
-				reject(
-					new Error(
-						signal
-							? `vitepress ${command} was killed by ${signal}`
-							: `vitepress ${command} failed (exit ${code})`,
-					),
-				);
-			}
-		});
-	});
-	return { child, done };
+	return { child, done: waitForChild(child, `vitepress ${command}`) };
 }
