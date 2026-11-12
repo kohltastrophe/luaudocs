@@ -1,5 +1,5 @@
 local t = require("./harness")
-local tags = require("../tags")
+local tags = require("../core/tags")
 
 return function()
 	t.suite("tags: prose")
@@ -140,6 +140,22 @@ return function()
 		"blank lines inside dot-field list"
 	)
 
+	doc = tags.parse({
+		"@interface IndentedOptions",
+		"",
+		"    local opts = build()",
+		"",
+		"    .timeout number -- after blank + indented code",
+		"\t.retries number -- tab-indented field",
+	})
+	t.eq({ doc.fields, doc.desc }, {
+		{
+			{ name = "timeout", type = "number", desc = "after blank + indented code" },
+			{ name = "retries", type = "number", desc = "tab-indented field" },
+		},
+		"    local opts = build()",
+	}, "indented .field lines after blank lines and indented code blocks")
+
 	t.suite("tags: metadata and continuation")
 
 	t.eq(
@@ -151,6 +167,17 @@ return function()
 		tags.parse({ "@deprecated v2.0.0 -- use fetchAsync instead" }).deprecated,
 		{ version = "v2.0.0", desc = "use fetchAsync instead" },
 		"deprecated version+desc"
+	)
+	t.eq(tags.parse({ "@deprecated v2.0.0" }).deprecated, { version = "v2.0.0" }, "deprecated single-token version")
+	t.eq(
+		tags.parse({ "@deprecated Use fetchAsync instead." }).deprecated,
+		{ desc = "Use fetchAsync instead." },
+		"deprecated multi-word freeform message without separator"
+	)
+	t.eq(
+		tags.parse({ "@deprecated Use fetchAsync - this blocks the main thread." }).deprecated,
+		{ desc = "Use fetchAsync - this blocks the main thread." },
+		"deprecated multi-word freeform message containing dash separator"
 	)
 	t.eq(tags.parse({ "@deprecated -- gone soon" }).deprecated, { desc = "gone soon" }, "deprecated desc only")
 

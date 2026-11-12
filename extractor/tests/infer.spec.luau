@@ -1,7 +1,7 @@
 local t = require("./harness")
-local infer = require("../infer")
-local segs = require("../segs")
-local surface = require("../surface")
+local infer = require("../core/infer")
+local segs = require("../core/segs")
+local surface = require("../core/surface")
 
 local eval = t.eval
 
@@ -25,7 +25,7 @@ end
 --- datatype and enum lists). It is never committed, so a checkout that has not
 --- run `bun run generate` has nothing for these to prove; the built-in signals
 --- are asserted unconditionally alongside them.
-local engineLists = require("../engine").lists
+local engineLists = require("../core/engine").lists
 local function eqEngine(actual: any, expected: any, name: string)
 	if engineLists ~= nil then
 		t.eq(actual, expected, name)
@@ -102,6 +102,18 @@ return function()
 	t.eq(optionalText({ "A | B" }), "A | B?", "a union needs no parentheses")
 	t.eq(optionalText({ "A & B" }), "(A & B)?", "an intersection is parenthesized")
 	t.eq(optionalText({ "(s) -> R" }), "((s) -> R)?", "a function type is parenthesized")
+	t.eq(optionalText({ "<T>(x: T) -> T" }), "(<T>(x: T) -> T)?", "a generic function type is parenthesized")
+	t.eq(
+		optionalText({ "{ close: () -> () }" }),
+		"{ close: () -> () }?",
+		"a table containing a function needs no parens"
+	)
+	t.eq(
+		optionalText({ segs.ref("Signal", "Signal"), "<() -> ()>" }),
+		"Signal<() -> ()>?",
+		"a generic with a function type argument needs no parens"
+	)
+	t.eq(optionalText({ '"a -> b & c"' }), '"a -> b & c"?', "operators inside string literal types need no parens")
 
 	t.suite("infer: conditional mounts")
 
@@ -174,6 +186,7 @@ return function()
 	t.eq(typeOfExpr("Instance.new"), nil, "an uncalled constructor infers nothing")
 	t.eq(typeOfExpr("Color3.fromRGB"), nil, "an uncalled from-constructor infers nothing")
 	t.eq(typeOfExpr("vector.create(1, 1, 1)"), "vector", "luau library constructor")
+	t.eq(typeOfExpr('buffer.fromstring("abc")'), "buffer", "buffer.fromstring constructor")
 	-- plenty of statics return something else entirely
 	t.eq(typeOfExpr("Color3.toHSV(c)"), nil, "a non-constructor static infers nothing")
 	eqEngine(typeOfExpr("Enum.Material.SmoothPlastic"), "Enum.Material", "enum item")

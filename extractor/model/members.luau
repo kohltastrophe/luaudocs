@@ -1,3 +1,4 @@
+--!strict
 --- Shared assembly context and member builders. Holds the `Ctx` threaded through
 --- every pass, shared helpers (IDs, source spans, badges, visibility, and
 --- memoized doc-block parsing), and the member builders (signatures, functions,
@@ -6,16 +7,16 @@
 --- `Ctx` lives here because both `build` and `finalize` depend on it and Luau
 --- requires cannot cycle.
 
-local comments = require("../comments")
-local detectMod = require("../detect")
-local emitMod = require("../emit")
-local graphMod = require("../graph")
-local inferMod = require("../infer")
-local parseMod = require("../parse")
-local segs = require("../segs")
-local surfaceMod = require("../surface")
-local tagsMod = require("../tags")
-local util = require("../util")
+local comments = require("../core/comments")
+local detectMod = require("../core/detect")
+local emitMod = require("../core/emit")
+local graphMod = require("../core/graph")
+local inferMod = require("../core/infer")
+local parseMod = require("../core/parse")
+local segs = require("../core/segs")
+local surfaceMod = require("../core/surface")
+local tagsMod = require("../core/tags")
+local util = require("../core/util")
 
 type Collector = util.Collector
 export type ParsedDoc = tagsMod.ParsedDoc
@@ -32,9 +33,15 @@ export type SourceSpan = {
 	endLine: number?,
 }
 
+export type DeprecatedBadge = {
+	version: string?,
+	note: string?,
+	__record: boolean?,
+}
+
 export type Badges = {
 	custom: { string },
-	deprecated: { version: string?, note: string? }?,
+	deprecated: DeprecatedBadge?,
 	since: string?,
 	yields: boolean?,
 	unreleased: boolean?,
@@ -58,11 +65,8 @@ export type Signature = {
 	params: { ParamEntry },
 	returns: { ReturnEntry },
 	__generics: { segs.Generic }?,
-	__genericNames: { [string]: boolean }?,
 	__annotationTail: { Seg }?,
 	__tagReturns: boolean?,
-	__hasCodeParams: boolean?,
-	__accessor: string?,
 }
 
 export type FnMember = {
@@ -73,9 +77,9 @@ export type FnMember = {
 	tags: Badges,
 	visibility: string,
 	signature: Signature,
-	errors: { { type: string?, doc: string? } },
+	errors: { { type: string, doc: string? } },
 	source: SourceSpan,
-	__valueSym: SymValue?,
+	__valueSym: any,
 	__constructsSym: SymValue?,
 	__returnedRequire: string?,
 }
@@ -90,7 +94,7 @@ export type PropMember = {
 	visibility: string,
 	readonly: boolean,
 	source: SourceSpan,
-	__valueSym: SymValue?,
+	__valueSym: any,
 	__inferred: boolean?,
 	__inferCall: SymValue?,
 	__mountRealm: boolean?,
@@ -104,12 +108,68 @@ export type ClassEntry = {
 	doc: string?,
 	tags: Badges,
 	constructors: { string },
-	members: { any },
+	members: { Member },
 	within: string?,
 	source: SourceSpan,
-	__kind: string?,
-	__moduleId: string?,
-	__valueSym: SymValue?,
+	__classType: boolean?,
+}
+
+export type TypeFieldEntry = segs.Field
+
+export type TypeDeclEntry = {
+	id: string,
+	name: string,
+	exported: boolean,
+	kind: string,
+	generics: { segs.Generic },
+	definition: { { Seg } }?,
+	params: { Seg }?,
+	fields: { TypeFieldEntry }?,
+	doc: string?,
+	tags: Badges,
+	visibility: string,
+	source: SourceSpan,
+	__within: string?,
+}
+
+export type ReexportEntry = {
+	id: string,
+	name: string,
+	within: string?,
+	targetModule: string,
+	targetMember: string?,
+	targetId: string?,
+	url: string?,
+	realm: { string }?,
+	doc: string?,
+	__external: boolean?,
+	__path: { string }?,
+	__line: number?,
+	__sink: { Member }?,
+	__prop: PropMember?,
+}
+
+export type ModuleEntry = {
+	id: string,
+	name: string,
+	instancePath: { string },
+	doc: string?,
+	aliasOf: string?,
+	classes: { ClassEntry },
+	members: { Member },
+	types: { TypeDeclEntry },
+	reexports: { ReexportEntry },
+	source: SourceSpan,
+}
+
+export type ExternalEntry = string | { url: string?, alias: string, path: string, name: string? }
+
+export type DocModel = {
+	schemaVersion: number,
+	project: { entryPoints: { string } },
+	modules: { ModuleEntry },
+	externals: { [string]: ExternalEntry }?,
+	diagnostics: { util.Diagnostic },
 }
 
 local members = {}
@@ -117,11 +177,9 @@ local members = {}
 local EMPTY_DOC: ParsedDoc = tagsMod.parse({})
 members.EMPTY_DOC = EMPTY_DOC
 
-export type ExternalEntry = string | { url: string?, alias: string, path: string, name: string? }
-
 export type Ctx = {
 	diag: Collector,
-	modules: { any }, -- doc-model Module entries, parallel to g.modules
+	modules: { ModuleEntry }, -- doc-model Module entries, parallel to g.modules
 	containersByName: { [string]: any }, -- class/module name -> container entry
 	containerOfSym: { [any]: ClassEntry }, -- class table SymValue -> class entry
 	classByTypeId: { [string]: ClassEntry }, -- classType type-id -> class entry
@@ -147,6 +205,7 @@ export type Ctx = {
 			targetContainer: any?,
 		}
 	},
+	parsedBlocks: { [DocBlock]: ParsedDoc }, -- memoized tag parses per DocBlock
 	forwardedBlocks: { [DocBlock]: boolean }, -- blocks whose tag diagnostics have already been reported
 	-- Module graph set by `model.assemble` so `detect` can follow calls across
 	-- modules (absent in isolated unit tests).
@@ -164,6 +223,7 @@ function members.newCtx(diag: Collector): Ctx
 		ambientTypes = {},
 		externals = {},
 		pendingMoves = {},
+		parsedBlocks = {},
 		forwardedBlocks = {},
 	}
 end
@@ -175,17 +235,21 @@ function members.span(modId: string, s: Span?): SourceSpan
 	return { file = modId, line = s.beginLine, endLine = if s.endLine ~= s.beginLine then s.endLine else nil }
 end
 
+local function deprecatedBadge(version: string?, note: string?): DeprecatedBadge
+	local dep: DeprecatedBadge = { version = version, note = note }
+	if version == nil and note == nil then
+		-- Mark bare `@deprecated` tables so `emit` encodes `{}` instead of `[]`.
+		dep.__record = true
+	end
+	return dep
+end
+
 function members.buildBadges(doc: ParsedDoc): Badges
 	-- Clone `customTags` because undocumented members share `EMPTY_DOC`, and
 	-- `overlayBadges` mutates `badges.custom` in place.
 	local badges: Badges = { custom = table.clone(doc.customTags) }
 	if doc.deprecated ~= nil then
-		local dep = { version = doc.deprecated.version, note = doc.deprecated.desc }
-		if next(dep) == nil then
-			-- Mark bare `@deprecated` tables so `emit` encodes `{}` instead of `[]`.
-			emitMod.record(dep)
-		end
-		badges.deprecated = dep
+		badges.deprecated = deprecatedBadge(doc.deprecated.version, doc.deprecated.desc)
 	end
 	if doc.since ~= nil then
 		badges.since = doc.since
@@ -243,19 +307,39 @@ end
 --- Mirrors `LUAU_KEYWORDS` in `src/pages.ts`.
 local LUAU_KEYWORDS = parseMod.LUAU_KEYWORDS
 
+local KEY_ESCAPES: { [string]: string } = {
+	['"'] = '\\"',
+	["\\"] = "\\\\",
+	["\b"] = "\\b",
+	["\f"] = "\\f",
+	["\n"] = "\\n",
+	["\r"] = "\\r",
+	["\t"] = "\\t",
+}
+
+local function escapeKeyString(s: string): string
+	local out = s:gsub('[%z\1-\31\\"]', function(c: string)
+		return KEY_ESCAPES[c] or string.format("\\u%04x", string.byte(c) :: number)
+	end)
+	return out
+end
+
 local function isIdentName(name: string): boolean
 	return name:match("^[%a_][%w_]*$") ~= nil and LUAU_KEYWORDS[name] == nil
 end
 
---- Formats a member's callee prefix (`Flux.compute`, `State:Connect`, or bare
---- `name` for a callable module). Non-identifier property names (`"12187368317"`,
---- `"end"`) use bracket syntax `Container["name"]`.
+--- Formats a member's callee prefix (`Flux.compute`, `State:Connect`, `Map[string]`,
+--- or bare `name` for a callable module). Non-identifier string keys (`"12187368317"`,
+--- `"end"`) use single-line escaped bracket syntax `Container["name"]`.
 function members.callee(container: string, accessor: string, name: string): string
 	if container == "" then
 		return name
 	end
-	if accessor == "." and not isIdentName(name) then
-		return string.format("%s[%q]", container, name)
+	if name:sub(1, 1) == "[" and name:sub(-1) == "]" then
+		return container .. name
+	end
+	if not isIdentName(name) then
+		return container .. '["' .. escapeKeyString(name) .. '"]'
 	end
 	return container .. accessor .. name
 end
@@ -321,41 +405,23 @@ function members.byName(list: { any }, name: string): any?
 	return nil
 end
 
---- Converts `segs.fields` output (`desc`) into doc-model `TypeField` entries (`doc`).
-function members.toModelFields(fields: { segs.Field }?): { any }?
-	if fields == nil then
-		return nil
-	end
-	local out = {}
-	for _, f in fields do
-		table.insert(out, {
-			name = f.name,
-			type = f.type,
-			doc = f.desc,
-			line = f.line,
-			docInDisplay = f.docInDisplay,
-		})
-	end
-	return out
-end
-
 --- Merges `@field` tags into table-type fields. Tag types and descriptions
 --- override AST ones, and `@field` entries absent from the AST walk append to
 --- the end (matching `lineFacts` when the field exists in the display).
 function members.mergeTypeFieldTags(
-	fields: { any }?,
+	fields: { TypeFieldEntry }?,
 	tyDoc: ParsedDoc,
-	lineFacts: { [string]: any },
+	lineFacts: segs.LineFacts,
 	genericNames: { [string]: boolean }?
-): { any }?
+): { TypeFieldEntry }?
 	if #tyDoc.fields == 0 then
 		return fields
 	end
-	local merged: { any } = fields or {}
+	local merged: { TypeFieldEntry } = fields or {}
 	for _, f in tyDoc.fields do
 		local existing = members.byName(merged, f.name)
 		if existing ~= nil then
-			existing.desc = f.desc or existing.desc
+			existing.doc = f.desc or existing.doc
 			if f.type ~= nil then
 				existing.type = members.tagType(f.type, genericNames)
 			end
@@ -364,7 +430,7 @@ function members.mergeTypeFieldTags(
 			table.insert(merged, {
 				name = f.name,
 				type = members.tagType(f.type, genericNames),
-				desc = f.desc,
+				doc = f.desc,
 				line = if at ~= nil then at.line else nil,
 				docInDisplay = if at ~= nil and at.docInDisplay then true else nil,
 			})
@@ -373,7 +439,49 @@ function members.mergeTypeFieldTags(
 	return merged
 end
 
-function members.forwardTagDiagnostics(ctx: Ctx, modId: string, block: any, doc: ParsedDoc)
+--- Extracts a Luau `type` / `type function` declaration's effective kind,
+--- multi-line segment `definition`, merged `TypeFieldEntry` list, and `lineFacts`.
+--- Shared between `buildSingleTypeDecl` (`build.luau`) and `expandRespelledTypes`
+--- (`finalize.luau`) so `typeof(...)` `@interface` synthesis and field merging
+--- stay identical across direct and respelled declarations.
+function members.extractTypeBody(
+	parsedFile: parseMod.Parsed,
+	ty: any,
+	tyDoc: ParsedDoc,
+	claimIndex: { [number]: DocBlock },
+	trailingIndex: comments.TrailingIndex,
+	genericNames: { [string]: boolean }
+): (string, { { Seg } }?, { TypeFieldEntry }?, segs.LineFacts)
+	local rawFields, lineFacts, displayBlock = segs.fields(
+		parsedFile,
+		ty.stat.type,
+		claimIndex,
+		trailingIndex,
+		genericNames,
+		if ty.stat.location ~= nil then ty.stat.location.beginLine else nil
+	)
+	local fields = members.mergeTypeFieldTags(rawFields, tyDoc, lineFacts, genericNames)
+	local kind: string = if ty.kind ~= "typefunction"
+			and tyDoc.placing ~= nil
+			and tyDoc.placing.kind == "interface"
+		then "interface"
+		else ty.kind
+	local definition: { { Seg } }? = nil
+	if ty.kind ~= "typefunction" then
+		local fallback: { { Seg } } = { { "unknown" } }
+		definition = displayBlock or fallback
+		-- When an `@interface` with `@field` tags is bound to a `typeof(...)`
+		-- alias, clear `definition` so the renderer synthesizes a table type
+		-- from `fields` instead of printing `typeof(...)`.
+		local isTypeofAlias = ty.stat.type ~= nil and ty.stat.type.tag == "typeof"
+		if isTypeofAlias and #tyDoc.fields > 0 and kind == "interface" then
+			definition = nil
+		end
+	end
+	return kind, definition, fields, lineFacts
+end
+
+function members.forwardTagDiagnostics(ctx: Ctx, modId: string, block: DocBlock, doc: ParsedDoc)
 	-- Report diagnostics at most once per doc block, even when multiple aliased
 	-- exports share the same `defDoc`.
 	if ctx.forwardedBlocks[block] then
@@ -393,15 +501,20 @@ function members.forwardTagDiagnostics(ctx: Ctx, modId: string, block: any, doc:
 end
 
 --- Parses and caches a doc block's tags (`ParsedDoc` is immutable once parsed).
-function members.parseTags(_ctx: Ctx, block: any): ParsedDoc
-	return tagsMod.parseBlock(block)
+function members.parseTags(ctx: Ctx, block: DocBlock): ParsedDoc
+	local cached = ctx.parsedBlocks[block]
+	if cached == nil then
+		cached = tagsMod.parseBlock(block)
+		ctx.parsedBlocks[block] = cached
+	end
+	return cached
 end
 
-function members.parseBlock(ctx: Ctx, modId: string, block: any?): ParsedDoc
+function members.parseBlock(ctx: Ctx, modId: string, block: DocBlock?): ParsedDoc
 	if block == nil then
 		return EMPTY_DOC
 	end
-	local doc = tagsMod.parseBlock(block)
+	local doc = members.parseTags(ctx, block)
 	members.forwardTagDiagnostics(ctx, modId, block, doc)
 	return doc
 end
@@ -492,8 +605,9 @@ function members.mergeParamTags(
 	local overloadParams = if fnNode ~= nil then fnNode.overloadParams else nil
 	local isSecondary = fnNode ~= nil and fnNode.isSecondaryOverload
 	for _, tagParam in paramTags do
+		local paramName: string = tagParam.name
 		local docText = tagParam.desc or tagParam.doc
-		local found = members.byName(params, tagParam.name)
+		local found = members.byName(params, paramName)
 		if found ~= nil then
 			-- Keep any trailing comment doc when `@param` only supplies a type override.
 			found.doc = docText or found.doc
@@ -502,14 +616,14 @@ function members.mergeParamTags(
 			end
 		elseif not hasCodeParams then
 			table.insert(params, {
-				name = tagParam.name,
+				name = paramName,
 				type = resolveTagType(tagParam.type, genericNames),
 				doc = docText,
 			})
-		elseif not (overloadParams ~= nil and (overloadParams[tagParam.name] or isSecondary)) then
+		elseif not (overloadParams ~= nil and (overloadParams[paramName] or isSecondary)) then
 			diag:warn(
 				"param-mismatch",
-				string.format("@param %s does not match any parameter of %s", tagParam.name, fnName),
+				string.format("@param %s does not match any parameter of %s", paramName, fnName),
 				file,
 				line
 			)
@@ -580,13 +694,13 @@ local function buildSignature(
 	local qualified = if containerName == "" then name else containerName .. "." .. name
 	local parsedFile: any = mod.parsed
 	local trailingIndex: any = mod.trailingIndex
-	local generics: { any } = {}
+	local generics: { segs.Generic } = {}
 	local genericNames: { [string]: boolean } = {}
 	if fnNode ~= nil then
 		generics, genericNames = segs.generics(parsedFile, fnNode.generics, fnNode.genericPacks)
 	end
 
-	local params: { any } = {}
+	local params: { ParamEntry } = {}
 	local paramLines: { [number]: number } = {}
 	if fnNode ~= nil then
 		params, paramLines = segs.paramEntries(parsedFile, fnNode, genericNames)
@@ -598,7 +712,13 @@ local function buildSignature(
 		local retLine = if ra ~= nil and ra.location ~= nil then ra.location.beginLine else nil
 		for i, param in params do
 			local line = paramLines[i]
-			if line ~= nil and line ~= sigLine and line ~= retLine and (i == #params or paramLines[i + 1] ~= line) then
+			if
+				trailingIndex ~= nil
+				and line ~= nil
+				and line ~= sigLine
+				and line ~= retLine
+				and (i == #params or paramLines[i + 1] ~= line)
+			then
 				param.doc = comments.trailingText(trailingIndex, line)
 			end
 		end
@@ -608,7 +728,7 @@ local function buildSignature(
 	end
 
 	local returnAnnotation = if fnNode ~= nil then fnNode.returnAnnotation else nil
-	local returns: { any } = {}
+	local returns: { ReturnEntry } = {}
 	for _, node in members.returnNodes(fnNode) do
 		table.insert(returns, { type = segs.inline(parsedFile, node, genericNames) })
 	end
@@ -639,8 +759,9 @@ local function buildSignature(
 
 	-- Keep `callee` separate from `segs` so re-exports can swap the callee name
 	-- without rebuilding the parameter/return display.
-	local sig = {
+	local sig: Signature = {
 		callee = members.callee(containerName, accessor, name),
+		segs = {},
 		params = params,
 		returns = returns,
 		-- Slice the full return annotation (including outer parentheses on
@@ -661,79 +782,14 @@ function members.pseudoField(name: string, value: any, isColonMethod: boolean, s
 	return { name = name, value = value, isColonMethod = isColonMethod, keySpan = span, defSpan = span }
 end
 
---- Returns the CST local binding for the second argument of `setmetatable(x, Class)`
---- when it is a local variable reference.
-local function setmetatableClassLocal(callNode: any): any?
-	callNode = parseMod.unwrapExpr(callNode, true)
-	if callNode == nil or callNode.tag ~= "call" then
-		return nil
-	end
-	local func = parseMod.unwrapExpr(callNode.func, true)
-	if func == nil or func.tag ~= "global" or func.name.text ~= "setmetatable" then
-		return nil
-	end
-	local args = callNode.arguments
-	local second = if args ~= nil and args[2] ~= nil then parseMod.unwrapExpr(args[2].node, true) else nil
-	if second == nil or second.tag ~= "local" then
-		return nil
-	end
-	return second["local"]
-end
-
 --- Returns the class local referenced by a metatable type alias in either
 --- `typeof(setmetatable(_, Class))` or `setmetatable<_, typeof(Class)>`.
-function members.setmetatableTypeClassLocal(typeNode: any): any?
-	typeNode = parseMod.unwrapType(typeNode)
-	if typeNode == nil then
-		return nil
-	end
-	if typeNode.tag == "typeof" then
-		return setmetatableClassLocal(typeNode.expression)
-	end
-	if typeNode.tag ~= "reference" or typeNode.prefix ~= nil or typeNode.name == nil then
-		return nil
-	end
-	if typeNode.name.text ~= "setmetatable" or typeNode.parameters == nil then
-		return nil
-	end
-	local second = typeNode.parameters[2]
-	local arg = if second ~= nil then parseMod.unwrapType(second.node) else nil
-	local expr = if arg ~= nil and arg.tag == "typeof" then parseMod.unwrapExpr(arg.expression, true) else nil
-	if expr == nil or expr.tag ~= "local" then
-		return nil
-	end
-	return expr["local"]
-end
+members.setmetatableTypeClassLocal = parseMod.setmetatableTypeClassLocal
 
 --- Detects same-module constructors returning `setmetatable(_, Class)` directly
 --- or via `local self = setmetatable(_, Class); ...; return self`.
 local function constructedSym(mod: ModuleData, fnNode: any): any?
-	if fnNode == nil or fnNode.body == nil or fnNode.body.statements == nil then
-		return nil
-	end
-	local stats = fnNode.body.statements
-	local last = stats[#stats]
-	if last == nil or last.tag ~= "return" or last.expressions == nil then
-		return nil
-	end
-	local first = last.expressions[1]
-	if first == nil or first.node == nil then
-		return nil
-	end
-	local retExpr = parseMod.unwrapExpr(first.node, true)
-	local classLocal = setmetatableClassLocal(retExpr)
-	if classLocal == nil and retExpr ~= nil and retExpr.tag == "local" then
-		for _, stat in stats do
-			if stat.tag == "local" and stat.values ~= nil then
-				for i, varPair in stat.variables do
-					if varPair.node == retExpr["local"] and stat.values[i] ~= nil then
-						classLocal = setmetatableClassLocal(stat.values[i].node)
-						break
-					end
-				end
-			end
-		end
-	end
+	local classLocal = parseMod.constructedClassLocal(fnNode)
 	if classLocal == nil or mod.surface == nil then
 		return nil
 	end
@@ -754,7 +810,7 @@ function members.buildFn(
 	local isMetamethod = surfaceMod.isMetamethod(name)
 	local placingKind = if doc.placing ~= nil then doc.placing.kind else nil
 	local fnNode = field.value.fnNode
-	local isSelf = not isColon and surfaceMod.isSelfMethod(fnNode)
+	local isSelf = not isColon and isIdentName(name) and surfaceMod.isSelfMethod(fnNode)
 	local kind = "function"
 	if isMetamethod then
 		kind = "metamethod"
@@ -771,7 +827,7 @@ function members.buildFn(
 	local memberLine = field.defSpan and field.defSpan.beginLine
 	local visibility = members.visibilityOf(name, doc, isMetamethod)
 
-	local fn = {
+	local fn: FnMember = {
 		id = members.memberId(mod.id, "fn", containerName, name),
 		name = name,
 		kind = kind,
@@ -785,10 +841,7 @@ function members.buildFn(
 	if fn.tags.deprecated == nil then
 		local depAttr = parseMod.extractDeprecationAttr(mod.parsed, fnNode)
 		if depAttr ~= nil then
-			fn.tags.deprecated = { note = depAttr.note }
-			if next(fn.tags.deprecated) == nil then
-				emitMod.record(fn.tags.deprecated)
-			end
+			fn.tags.deprecated = deprecatedBadge(nil, depAttr.note)
 		end
 	end
 	for _, err in doc.errors do
@@ -904,7 +957,7 @@ function members.newContainer(
 	sourceSpan: Span?,
 	within: string?
 ): ClassEntry
-	local class = {
+	local class: ClassEntry = {
 		-- Qualify nested class IDs with `within` so same-named nested tables
 		-- under different parents do not collide.
 		id = members.memberId(mod.id, "class", within, name),
@@ -924,9 +977,16 @@ function members.newContainer(
 	return class
 end
 
+export type MemberSink = {
+	members: { Member },
+	classes: { ClassEntry },
+	reexports: { ReexportEntry },
+	within: string?,
+}
+
 --- Routes members to `container.members` while forwarding discovered classes
 --- and re-exports to the enclosing module's lists.
-function members.sinks(container: any, from: any, within: string?): any
+function members.sinks(container: any, from: any, within: string?): MemberSink
 	return {
 		members = container.members,
 		classes = from.classes,
@@ -1035,7 +1095,7 @@ local function resolveFieldDoc(
 	return doc, secondaryDesc, block
 end
 
-local function isNestedContainer(ctx: Ctx, field: any, value: any, doc: ParsedDoc, out: any?): boolean
+local function isNestedContainer(ctx: Ctx, field: any, value: any, doc: ParsedDoc, out: MemberSink?): boolean
 	return out ~= nil
 		and value.kind == "table"
 		and field.declaredType == nil
@@ -1059,10 +1119,21 @@ end
 --- sidecar module). `ownerSym` overrides the table that `self` and readonly
 --- detection resolve against (used when harvesting metamethods from a
 --- metatable attached to `ownerSym`).
-function members.buildMembers(ctx: Ctx, mod: ModuleData, containerName: string, sym: any, out: any?, ownerSym: any?)
+function members.buildMembers(
+	ctx: Ctx,
+	mod: ModuleData,
+	containerName: string,
+	sym: any,
+	out: MemberSink?,
+	ownerSym: any?
+)
 	local owner = ownerSym or sym
 	local overloadCounts: { [string]: number } = {}
-	for _, field in sym.fields or {} do
+	local fieldList: { SymField }? = sym.fields
+	if fieldList == nil then
+		return
+	end
+	for _, field in fieldList do
 		-- Skip string keys containing dots (`M["A.b"]`), which would collide
 		-- with nested container member IDs (`M.A.b`), unless it is a `[K]` indexer.
 		if not (field.name:sub(1, 1) == "[" and field.name:sub(-1) == "]") and field.name:find(".", 1, true) ~= nil then
@@ -1096,7 +1167,7 @@ function members.buildMembers(ctx: Ctx, mod: ModuleData, containerName: string, 
 			if count > 1 then
 				member.id = member.id .. ":" .. tostring(count)
 			end
-		elseif isNestedContainer(ctx, field, value, doc, out) then
+		elseif out ~= nil and isNestedContainer(ctx, field, value, doc, out) then
 			local nestedName = containerName .. "." .. field.name
 			local nested = members.newContainer(ctx, mod, field.name, doc, field.defSpan, containerName)
 			ctx.containerOfSym[members.symKey(value)] = nested

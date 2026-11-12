@@ -4,7 +4,7 @@
 --- codes the policy and tag specs already cover (duplicate-within,
 --- orphaned-within, duplicate-type, the tag-grammar family) stay there.
 local t = require("./harness")
-local util = require("../util")
+local util = require("../core/util")
 local model = require("../model")
 
 return function()

@@ -1,10 +1,26 @@
-local util = require("../util")
+local fs = require("@std/fs")
+local util = require("../core/util")
 local t = require("./harness")
-local requiresMod = require("../requires")
-local graphMod = require("../graph")
+local requiresMod = require("../core/requires")
+local graphMod = require("../core/graph")
 local modelMod = require("../model")
 
 local FIXTURES = t.fixtures
+
+local function rmTree(p: string)
+	local kind = util.pathType(p)
+	if kind == "file" then
+		pcall(fs.remove, p)
+	elseif kind == "dir" then
+		local ok, items = pcall(fs.listDirectory, p)
+		if ok and type(items) == "table" then
+			for _, item in items :: { any } do
+				rmTree(util.joinPath(p, item.name))
+			end
+		end
+		pcall(fs.removeDirectory, p)
+	end
+end
 
 local function buildGraph(fixture: string, entry: string)
 	return t.buildGraph(util.joinPath(FIXTURES, fixture), entry)
@@ -177,18 +193,18 @@ return function()
 
 	local dluauRoot = util.joinPath(FIXTURES, "dluau")
 	local expanded, expandErr = graphMod.expandEntries(dluauRoot, ".")
-	local firstEntry, firstErr = graphMod.expandEntry(dluauRoot, ".")
-	local missingEntry, missingErr = graphMod.expandEntry(dluauRoot, "missing")
+	local missingEntry, missingErr = graphMod.expandEntries(dluauRoot, "missing")
+	local outsideEntry, outsideErr = graphMod.expandEntries(dluauRoot, "../strings")
 	t.eq({
 		expandErr,
 		expanded ~= nil and #expanded or 0,
 		expanded ~= nil and util.relPath(dluauRoot, expanded[1]) or "",
 		expanded ~= nil and util.relPath(dluauRoot, expanded[2]) or "",
 		expanded ~= nil and util.relPath(dluauRoot, expanded[3]) or "",
-		firstErr,
-		firstEntry ~= nil and util.relPath(dluauRoot, firstEntry) or "",
 		missingEntry,
 		missingErr ~= nil,
+		outsideEntry,
+		outsideErr ~= nil,
 	}, {
 		nil,
 		3,
@@ -196,10 +212,10 @@ return function()
 		"beta.d.luau",
 		"nested/gamma.d.luau",
 		nil,
-		"alpha.d.luau",
+		true,
 		nil,
 		true,
-	}, "expandEntries and expandEntry collect nested .d.luau files while skipping dot-files and non-.d.luau files")
+	}, "expandEntries collects nested .d.luau files and rejects missing or outside-root entries")
 
 	local dluauProj = requiresMod.load(dluauRoot)
 	local dluauDiag = util.diagnostics()
@@ -221,4 +237,148 @@ return function()
 		"beta.d.luau#class.Beta",
 		"alpha.d.luau#class.Alpha",
 	}, "graph.build and model.assemble link ambient .d.luau classes across nested directory entries")
+
+	t.suite("requires: JSONC .luaurc, out-of-root aliases, Rojo optional $path, scripts, and @ignore @class")
+
+	local tmpBase =
+		util.joinPath(util.dirname(FIXTURES), string.format(".tmp-requires-spec-%d", math.floor(os.clock() * 1000000)))
+	local tmpProjRoot = util.joinPath(tmpBase, "proj")
+	local tmpOutside = util.joinPath(tmpBase, "outside")
+	local okTmp, tmpErr = pcall(function()
+		fs.createDirectory(tmpBase)
+		fs.createDirectory(tmpOutside)
+		fs.createDirectory(tmpProjRoot)
+		fs.createDirectory(util.joinPath(tmpProjRoot, "sub"))
+		fs.createDirectory(util.joinPath(tmpProjRoot, "opt_present"))
+
+		fs.writeStringToFile(util.joinPath(tmpOutside, "ext.luau"), "return {}")
+		fs.writeStringToFile(util.joinPath(tmpProjRoot, "sub", "mod.luau"), "return {}")
+		fs.writeStringToFile(util.joinPath(tmpProjRoot, "opt_present", "init.luau"), "return {}")
+		fs.writeStringToFile(util.joinPath(tmpProjRoot, "Boot.server.luau"), "print('server')")
+		fs.writeStringToFile(util.joinPath(tmpProjRoot, "Hud.client.lua"), "print('client')")
+		fs.writeStringToFile(util.joinPath(tmpProjRoot, "server.luau"), "return {}")
+		fs.writeStringToFile(util.joinPath(tmpProjRoot, "client.lua"), "return {}")
+		fs.writeStringToFile(
+			util.joinPath(tmpProjRoot, "ignored_attached.luau"),
+			"--- @class IgnoredAttached\n--- @ignore\nlocal C = {}\nreturn C"
+		)
+		fs.writeStringToFile(
+			util.joinPath(tmpProjRoot, "ignored_floating.luau"),
+			"--- @class IgnoredFloating\n--- @ignore\n\nlocal M = {}\nreturn M"
+		)
+		fs.writeStringToFile(
+			util.joinPath(tmpProjRoot, "ignored_ambient.d.luau"),
+			"--- @ignore\ndeclare class IgnoredAmbient\n\tX: number\nend"
+		)
+		fs.writeStringToFile(
+			util.joinPath(tmpProjRoot, "entry.luau"),
+			table.concat({
+				'local _a = require("./ignored_attached")',
+				'local _b = require("./ignored_floating")',
+				'local _c = require("./ignored_ambient")',
+				'return { Outside = require("@out/ext") }',
+			}, "\n")
+		)
+
+		local unnormAbs = tmpProjRoot .. "/sub/../sub"
+		fs.writeStringToFile(
+			util.joinPath(tmpProjRoot, ".luaurc"),
+			table.concat({
+				"/* Leading JSONC block comment */",
+				"{",
+				"\t// Line comment",
+				'\t"aliases": {',
+				string.format('\t\t"abs": %q, /* inline block comment */', unnormAbs),
+				'\t\t"out": "../outside", -- trailing comma + luau comment',
+				"\t},",
+				"}",
+			}, "\n")
+		)
+		fs.writeStringToFile(
+			util.joinPath(tmpProjRoot, "default.project.json"),
+			table.concat({
+				"{",
+				'\t"name": "TmpPkg",',
+				'\t"tree": {',
+				'\t\t"$className": "Folder",',
+				'\t\t"Entry": { "$path": "entry.luau" },',
+				'\t\t"Boot": { "$path": "Boot.server.luau" },',
+				'\t\t"Hud": { "$path": "Hud.client.lua" },',
+				'\t\t"OptPresent": { "$path": { "optional": "opt_present" } },',
+				'\t\t"OptMissing": { "$path": { "optional": "opt_missing" } }',
+				"\t}",
+				"}",
+			}, "\n")
+		)
+
+		local tmpProj, loadErr = requiresMod.load(tmpProjRoot)
+		local entryFile = util.joinPath(tmpProjRoot, "entry.luau")
+		local absRes = requiresMod.resolve(tmpProj, entryFile, { kind = "string", text = "@abs/mod" }) :: any
+		local outRes = requiresMod.resolve(tmpProj, entryFile, { kind = "string", text = "@out/ext" }) :: any
+		local optOk =
+			requiresMod.resolve(tmpProj, entryFile, { kind = "ipath", segs = { "Parent", "OptPresent" } }) :: any
+		local optMiss =
+			requiresMod.resolve(tmpProj, entryFile, { kind = "ipath", segs = { "Parent", "OptMissing" } }) :: any
+		local bootInst = requiresMod.resolve(tmpProj, entryFile, { kind = "ipath", segs = { "Parent", "Boot" } }) :: any
+		local hudInst = requiresMod.resolve(tmpProj, entryFile, { kind = "ipath", segs = { "Parent", "Hud" } }) :: any
+		local bootStr = requiresMod.resolve(tmpProj, entryFile, { kind = "string", text = "./Boot.server" }) :: any
+		local plainServer = requiresMod.resolve(tmpProj, entryFile, { kind = "string", text = "./server" }) :: any
+		local plainClient = requiresMod.resolve(tmpProj, entryFile, { kind = "string", text = "./client" }) :: any
+
+		t.eq(
+			{
+				loadErr,
+				absRes.ok,
+				absRes.absPath,
+				outRes.ok,
+				optOk.ok,
+				requiresMod.instancePath(tmpProj, util.joinPath(tmpProjRoot, "opt_present", "init.luau")),
+				optMiss.ok,
+				optMiss.reason,
+				bootInst.ok,
+				bootInst.reason,
+				hudInst.ok,
+				hudInst.reason,
+				bootStr.ok,
+				plainServer.ok,
+				plainClient.ok,
+			},
+			{
+				nil,
+				true,
+				util.normPath(util.joinPath(tmpProjRoot, "sub", "mod.luau")),
+				true,
+				true,
+				{ "TmpPkg", "OptPresent" },
+				false,
+				"require-unresolved",
+				false,
+				"require-nonmodule",
+				false,
+				"require-nonmodule",
+				false,
+				true,
+				true,
+			},
+			"JSONC .luaurc, normalized aliases, out-of-root non-hidden alias, Rojo optional $path, and script exclusions"
+		)
+
+		local tmpDiag = util.diagnostics()
+		local tmpGraph = graphMod.build(tmpProj, { entryFile }, tmpDiag)
+		t.eq({
+			#tmpDiag.list,
+			tmpDiag.list[1] and tmpDiag.list[1].code,
+			tmpGraph.byId["ignored_attached.luau"].surfaced,
+			tmpGraph.byId["ignored_floating.luau"].surfaced,
+			tmpGraph.byId["ignored_ambient.d.luau"].surfaced,
+		}, {
+			1,
+			"require-unresolved",
+			false,
+			false,
+			false,
+		}, "out-of-root alias fails in graph.build and @ignore @class modules are not promoted to surfaced")
+	end)
+	rmTree(tmpBase)
+	assert(okTmp, tostring(tmpErr))
 end

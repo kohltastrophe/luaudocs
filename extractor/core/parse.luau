@@ -1,12 +1,17 @@
---- Seam over Lute's @std/syntax/parser. Every CST access quirk lives here:
----   * spans are 1-based {beginLine, beginColumn, endLine, endColumn}
----   * comments are trivia on tokens: leadingTrivia of the next token, or
----     trailingTrivia of the last token on the line for same-line comments
----   * trivia text includes delimiters ("--- x", "--[=[ .. ]=]"), no newline
----   * EOF comments hang off cst.eof.leadingTrivia
----   * statement tags are lowercase: local, function, localfunction, assign,
----     typealias, return, expression, ...
----   * function attributes: stat.func.attributes[i] = {kind="attribute", token, location}
+--!strict
+
+--- Seam over Lute's `@std/syntax/parser`, `.d.luau` declaration normalization,
+--- and `@[deprecated]` attribute extraction. Every CST access quirk lives here:
+---   * spans are 1-based `{beginLine, beginColumn, endLine, endColumn}` (`endColumn` is exclusive)
+---   * comments are trivia on tokens: `leadingTrivia` of the next token, or
+---     `trailingTrivia` of the last token on the line for same-line comments
+---   * trivia text includes delimiters (`"--- x"`, `"--[=[ .. ]=]"`), no newline
+---   * EOF comments hang off `cst.eof.leadingTrivia`
+---   * statement tags are lowercase: `local`, `function`, `localfunction`, `assign`,
+---     `typealias`, `return`, `expression`, ...
+---   * function attributes: `stat.func.attributes[i] = {kind="attribute", token, location}`
+---   * `.d.luau` `declare` constructs are normalized into span-preserving standard Luau
+---     with original declaration metadata recorded in `Parsed.decls`
 
 local parser = require("@std/syntax/parser")
 local util = require("./util")
@@ -36,13 +41,15 @@ export type Parsed = {
 	decls: DeclMeta?,
 }
 
+export type ParsedModule = Parsed
+
 local parse = {}
 
 --- Walks CST nodes rooted at `root`. `visit` returns `false` to skip descending
 --- into a node. `seen` prevents cycles on shared CST nodes, and `location`
 --- span tables are skipped.
 function parse.walkNodes(root: any, visit: (node: any) -> boolean?)
-	local seen = {}
+	local seen: { [any]: boolean } = {}
 	local function walkCst(node: any)
 		if type(node) ~= "table" or seen[node] then
 			return
@@ -60,10 +67,19 @@ function parse.walkNodes(root: any, visit: (node: any) -> boolean?)
 	walkCst(root)
 end
 
---- Lute spells a table-type entry's discriminator as `tag` on some nodes and `kind`
---- on others. Centralizing the check here keeps CST quirks out of individual walkers.
+--- Lute spells a table-type or table-expression entry's discriminator as `tag`
+--- on some CST nodes and `kind` on others. Centralizing these checks keeps CST
+--- quirks out of individual walkers.
+function parse.entryKind(entry: any): string
+	return if type(entry) == "table" then (entry.tag or entry.kind or "") else ""
+end
+
 function parse.isTypeProperty(entry: any): boolean
-	return (entry.tag or entry.kind) == "property"
+	return parse.entryKind(entry) == "property"
+end
+
+function parse.isTypeIndexer(entry: any): boolean
+	return parse.entryKind(entry) == "indexer"
 end
 
 --- Steps past parentheses and explicit type instantiations (`f<<T>>`) to the
@@ -81,6 +97,14 @@ function parse.unwrapExpr(node: any, includeCast: boolean?): any
 		end
 	end
 	return node
+end
+
+--- Steps past parenthesized `(T)` groups only, preserving nullable `T?` unions.
+function parse.unwrapGroup(typeNode: any): any
+	while typeNode ~= nil and typeNode.tag == "group" do
+		typeNode = typeNode.type
+	end
+	return typeNode
 end
 
 --- Steps past parenthesized `(T)` groups and Lute's postfix-`?` union wrapper
@@ -102,6 +126,22 @@ function parse.unwrapType(node: any): any
 		end
 	end
 	return node
+end
+
+--- Slices the source text covered by a 1-based CST `span` (`endColumn` is exclusive)
+--- from `parsed.lines`, joining multi-line spans with `\n`.
+function parse.sliceSpan(parsed: Parsed, span: Span?): string
+	if span == nil then
+		return ""
+	end
+	local parts: { string } = {}
+	for lineNo = span.beginLine, span.endLine do
+		local lineText = parsed.lines[lineNo] or ""
+		local startCol = if lineNo == span.beginLine then span.beginColumn else 1
+		local endCol = if lineNo == span.endLine then span.endColumn - 1 else #lineText
+		table.insert(parts, lineText:sub(startCol, endCol))
+	end
+	return table.concat(parts, "\n")
 end
 
 --- Lute sets an explicit typepack default's `.location` to its opening `(`
@@ -137,8 +177,9 @@ local function collectComments(cstResult: any): { Comment }
 		end
 		for _, tr in list do
 			if tr.tag == "comment" or tr.tag == "blockcomment" then
+				local kind: "line" | "block" = if tr.tag == "comment" then "line" else "block"
 				table.insert(out, {
-					kind = if tr.tag == "comment" then "line" else "block",
+					kind = kind,
 					text = tr.text,
 					span = tr.location,
 					trailing = trailing,
@@ -156,7 +197,7 @@ local function collectComments(cstResult: any): { Comment }
 		-- A token's only table children are the trivia lists harvested above.
 		return false
 	end)
-	table.sort(out, function(a, b)
+	table.sort(out, function(a: Comment, b: Comment)
 		if a.span.beginLine ~= b.span.beginLine then
 			return a.span.beginLine < b.span.beginLine
 		end
@@ -176,10 +217,10 @@ local function describeParseError(raw: string): (string, number?)
 	local first: number? = nil
 	for _, text in util.splitLines(body) do
 		local line, column, message = text:match("^%((%d+), (%d+)%) %- %(%d+, %d+%): (.*)$")
-		if line ~= nil then
-			local oneBased = tonumber(line) :: number + 1
+		if line ~= nil and column ~= nil and message ~= nil then
+			local oneBased = (tonumber(line) :: number) + 1
 			first = first or oneBased
-			table.insert(lines, string.format("%d:%d: %s", oneBased, tonumber(column) :: number + 1, message))
+			table.insert(lines, string.format("%d:%d: %s", oneBased, (tonumber(column) :: number) + 1, message))
 		elseif util.trim(text) ~= "" then
 			table.insert(lines, text)
 		end
@@ -274,10 +315,7 @@ local function updateBracketDepth(code: string, startIdx: number, depth: number,
 		elseif c == "(" or c == "{" or c == "[" or (includeAngles and c == "<") then
 			depth += 1
 			i += 1
-		elseif c == ")" or c == "}" or c == "]" then
-			depth = math.max(0, depth - 1)
-			i += 1
-		elseif includeAngles and c == ">" and code:sub(i - 1, i - 1) ~= "-" then
+		elseif c == ")" or c == "}" or c == "]" or (includeAngles and c == ">" and code:sub(i - 1, i - 1) ~= "-") then
 			depth = math.max(0, depth - 1)
 			i += 1
 		else
@@ -287,8 +325,14 @@ local function updateBracketDepth(code: string, startIdx: number, depth: number,
 	return depth
 end
 
-local function isTypeContinuation(code: string): boolean
-	return code:match("[,|&:]%s*$") ~= nil or code:match("%->%s*$") ~= nil
+local function isTypeContinuation(code: string, nextCode: string?): boolean
+	if code:match("[,|&:]%s*$") ~= nil or code:match("%->%s*$") ~= nil then
+		return true
+	end
+	if nextCode ~= nil then
+		return nextCode:match("^%s*[|&:]") ~= nil or nextCode:match("^%s*%->") ~= nil
+	end
+	return false
 end
 
 --- Scans balanced `openCh`/`closeCh` pairs from `startIdx` until `depth == 0`
@@ -327,7 +371,8 @@ local function advanceFnScan(
 	startIdx: number,
 	stage: string,
 	depth: number,
-	seenReturn: boolean
+	seenReturn: boolean,
+	nextCode: string?
 ): (boolean, string, number, boolean)
 	local n = #code
 	local i = startIdx
@@ -388,8 +433,10 @@ local function advanceFnScan(
 		end
 	end
 	if stage == "afterParams" then
-		return true, "done", 0, false
-	elseif stage == "return" and seenReturn and depth == 0 and not isTypeContinuation(code) then
+		if nextCode == nil or nextCode:match("^%s*:") == nil then
+			return true, "done", 0, false
+		end
+	elseif stage == "return" and seenReturn and depth == 0 and not isTypeContinuation(code, nextCode) then
 		return true, "done", 0, true
 	end
 	return false, stage, depth, seenReturn
@@ -398,6 +445,7 @@ end
 type NormState = {
 	outLines: { string },
 	sliceLines: { string },
+	nextCodes: { [number]: string },
 	decls: DeclMeta,
 	anyDeclared: boolean,
 	inClass: boolean,
@@ -411,7 +459,7 @@ type NormState = {
 
 local function finishFnLine(st: NormState, idx: number, rewrittenCode: string, scanTail: string, comment: string)
 	st.sliceLines[idx] = rewrittenCode .. comment
-	local done, nextStage, nextDepth, nextSeen = advanceFnScan(scanTail, 1, "generics", 0, false)
+	local done, nextStage, nextDepth, nextSeen = advanceFnScan(scanTail, 1, "generics", 0, false, st.nextCodes[idx])
 	if done then
 		st.outLines[idx] = rewrittenCode .. " end" .. comment
 	else
@@ -454,7 +502,7 @@ local function rewriteTopLevelDecl(st: NormState, idx: number, code: string, com
 		st.outLines[idx] = rewrittenCode .. comment
 		st.sliceLines[idx] = rewrittenCode .. comment
 		st.typeDepth = updateBracketDepth(gRest, 1, 0, true)
-		st.pendingType = st.typeDepth == 0 and isTypeContinuation(gRest)
+		st.pendingType = st.typeDepth == 0 and isTypeContinuation(gRest, st.nextCodes[idx])
 		return true
 	end
 
@@ -494,7 +542,7 @@ local function rewriteClassMemberDecl(st: NormState, idx: number, code: string, 
 		st.decls.classIndexers[idx] = { readonly = isRead }
 		st.sliceLines[idx] = "type _={" .. idxBody .. comment
 		local d = updateBracketDepth(idxBody, 1, 0, true)
-		if d == 0 and not isTypeContinuation(idxBody) then
+		if d == 0 and not isTypeContinuation(idxBody, st.nextCodes[idx]) then
 			st.outLines[idx] = "type _={" .. idxBody .. "}" .. comment
 		else
 			st.outLines[idx] = "type _={" .. idxBody .. comment
@@ -513,7 +561,7 @@ local function rewriteClassMemberDecl(st: NormState, idx: number, code: string, 
 		st.outLines[idx] = rewrittenCode .. comment
 		st.sliceLines[idx] = rewrittenCode .. comment
 		st.typeDepth = updateBracketDepth(propRest, 1, 0, true)
-		st.pendingType = st.typeDepth == 0 and isTypeContinuation(propRest)
+		st.pendingType = st.typeDepth == 0 and isTypeContinuation(propRest, st.nextCodes[idx])
 		return true
 	end
 
@@ -524,9 +572,31 @@ end
 --- `declare function`, `declare <name>: <Type>`) into span-preserving standard Luau so
 --- `@std/syntax/parser` can build a full CST with comments and type spans intact.
 local function normalizeDeclarations(lines: { string }): (string, { string }, DeclMeta, boolean)
+	local codeLines: { string } = {}
+	local commentParts: { string } = {}
+	local inBlockComment: string? = nil
+	for idx, line in lines do
+		local code, comment, nextBlockEq = splitCodeAndComment(line, inBlockComment)
+		inBlockComment = nextBlockEq
+		codeLines[idx] = code
+		commentParts[idx] = comment
+	end
+
+	local nextCodes: { [number]: string } = {}
+	local upcoming: string? = nil
+	for idx = #lines, 1, -1 do
+		if upcoming ~= nil then
+			nextCodes[idx] = upcoming
+		end
+		if util.trim(codeLines[idx]) ~= "" then
+			upcoming = codeLines[idx]
+		end
+	end
+
 	local st: NormState = {
 		outLines = table.clone(lines),
 		sliceLines = table.clone(lines),
+		nextCodes = nextCodes,
 		decls = {
 			classes = {},
 			functions = {},
@@ -544,17 +614,18 @@ local function normalizeDeclarations(lines: { string }): (string, { string }, De
 		fnDepth = 0,
 		fnSeenReturn = false,
 	}
-	local inBlockComment: string? = nil
 
-	for idx, line in st.outLines do
-		local code, comment, nextBlockEq = splitCodeAndComment(line, inBlockComment)
-		inBlockComment = nextBlockEq
+	for idx = 1, #lines do
+		local code = codeLines[idx]
+		local comment = commentParts[idx]
 		if util.trim(code) == "" then
 			continue
 		end
 
+		local nextCode = st.nextCodes[idx]
 		if st.fnStage ~= nil then
-			local done, nextStage, nextDepth, nextSeen = advanceFnScan(code, 1, st.fnStage, st.fnDepth, st.fnSeenReturn)
+			local done, nextStage, nextDepth, nextSeen =
+				advanceFnScan(code, 1, st.fnStage, st.fnDepth, st.fnSeenReturn, nextCode)
 			if done then
 				st.outLines[idx] = code .. " end" .. comment
 				st.fnStage = nil
@@ -566,7 +637,7 @@ local function normalizeDeclarations(lines: { string }): (string, { string }, De
 
 		if st.pendingIndexer then
 			st.typeDepth = updateBracketDepth(code, 1, st.typeDepth, true)
-			if st.typeDepth == 0 and not isTypeContinuation(code) then
+			if st.typeDepth == 0 and not isTypeContinuation(code, nextCode) then
 				st.outLines[idx] = code .. "}" .. comment
 				st.pendingIndexer = false
 			end
@@ -575,7 +646,7 @@ local function normalizeDeclarations(lines: { string }): (string, { string }, De
 
 		if st.typeDepth > 0 or st.pendingType then
 			st.typeDepth = updateBracketDepth(code, 1, st.typeDepth, true)
-			st.pendingType = st.typeDepth == 0 and isTypeContinuation(code)
+			st.pendingType = st.typeDepth == 0 and isTypeContinuation(code, nextCode)
 			continue
 		end
 
@@ -584,7 +655,7 @@ local function normalizeDeclarations(lines: { string }): (string, { string }, De
 		else
 			if not rewriteClassMemberDecl(st, idx, code, comment) then
 				st.typeDepth = updateBracketDepth(code, 1, st.typeDepth, true)
-				st.pendingType = st.typeDepth == 0 and isTypeContinuation(code)
+				st.pendingType = st.typeDepth == 0 and isTypeContinuation(code, nextCode)
 			end
 		end
 	end
@@ -610,14 +681,15 @@ function parse.parse(source: string): (Parsed?, string?, number?)
 		end
 	end
 	if not ok then
-		return nil, describeParseError(tostring(result))
+		local errMsg, errLine = describeParseError(tostring(result))
+		return nil, errMsg, errLine
 	end
 	return {
 		cst = result,
 		lines = lines,
 		comments = collectComments(result),
 		decls = decls,
-	}, nil
+	}, nil, nil
 end
 
 --- Returns the line a statement effectively starts on. Leading attributes
@@ -633,7 +705,10 @@ function parse.effectiveStartLine(stat: any): number
 		if first.location and first.location.beginLine < line then
 			line = first.location.beginLine
 		end
-		for _, tr in (if first.token ~= nil then first.token.leadingTrivia else nil) or {} do
+		local trivia: { any } = if first.token ~= nil and type(first.token.leadingTrivia) == "table"
+			then first.token.leadingTrivia
+			else {}
+		for _, tr in trivia do
 			if tr.text ~= nil and tr.text:sub(1, 2) == "@[" and tr.location.beginLine < line then
 				line = tr.location.beginLine
 				break
@@ -656,17 +731,11 @@ function parse.extractDeprecationAttr(parsed: Parsed?, fnNode: any): { note: str
 			continue
 		end
 		local note: string? = nil
-		if parsed ~= nil and attr.location ~= nil and fnNode.location ~= nil then
-			local chunks: { string } = {}
-			local endLine = math.min(#parsed.lines, math.max(attr.location.endLine, fnNode.location.beginLine))
-			for lineNo = attr.location.beginLine, endLine do
-				local lineText = parsed.lines[lineNo] or ""
-				if lineNo == attr.location.beginLine then
-					lineText = lineText:sub(attr.location.beginColumn)
-				end
-				table.insert(chunks, lineText)
-			end
-			local raw = table.concat(chunks, " ")
+		if parsed ~= nil and attr.location ~= nil then
+			-- Lute's attribute span (`[beginColumn, endColumn)`) covers the entire
+			-- `deprecated { ... }` entry and stops before sibling attributes, the
+			-- `function` keyword, parameters, and trailing same-line comments.
+			local raw = parse.sliceSpan(parsed, attr.location)
 			local reason = raw:match('reason%s*=%s*"([^"]+)"') or raw:match("reason%s*=%s*'([^']+)'")
 			local use = raw:match('use%s*=%s*"([^"]+)"') or raw:match("use%s*=%s*'([^']+)'")
 			if reason ~= nil and use ~= nil then
@@ -680,6 +749,82 @@ function parse.extractDeprecationAttr(parsed: Parsed?, fnNode: any): { note: str
 		return { note = note }
 	end
 	return nil
+end
+
+--- Returns the CST local binding for the second argument of `setmetatable(x, Class)`
+--- when it is a local variable reference.
+local function setmetatableClassLocal(callNode: any): any?
+	callNode = parse.unwrapExpr(callNode, true)
+	if callNode == nil or callNode.tag ~= "call" then
+		return nil
+	end
+	local func = parse.unwrapExpr(callNode.func, true)
+	if func == nil or func.tag ~= "global" or func.name.text ~= "setmetatable" then
+		return nil
+	end
+	local args = callNode.arguments
+	local second: any = if args ~= nil and args[2] ~= nil then parse.unwrapExpr(args[2].node, true) else nil
+	if second == nil or second.tag ~= "local" then
+		return nil
+	end
+	return second["local"]
+end
+
+--- Returns the class local referenced by a metatable type alias in either
+--- `typeof(setmetatable(_, Class))` or `setmetatable<_, typeof(Class)>`.
+function parse.setmetatableTypeClassLocal(typeNode: any): any?
+	typeNode = parse.unwrapType(typeNode)
+	if typeNode == nil then
+		return nil
+	end
+	if typeNode.tag == "typeof" then
+		return setmetatableClassLocal(typeNode.expression)
+	end
+	if typeNode.tag ~= "reference" or typeNode.prefix ~= nil or typeNode.name == nil then
+		return nil
+	end
+	if typeNode.name.text ~= "setmetatable" or typeNode.parameters == nil then
+		return nil
+	end
+	local second = typeNode.parameters[2]
+	local arg: any = if second ~= nil then parse.unwrapType(second.node) else nil
+	local expr: any = if arg ~= nil and arg.tag == "typeof" then parse.unwrapExpr(arg.expression, true) else nil
+	if expr == nil or expr.tag ~= "local" then
+		return nil
+	end
+	return expr["local"]
+end
+
+--- Returns the CST local binding constructed by a same-module constructor returning
+--- `setmetatable(_, Class)` directly or via `local self = setmetatable(_, Class); ...; return self`.
+function parse.constructedClassLocal(fnNode: any): any?
+	if fnNode == nil or fnNode.body == nil or fnNode.body.statements == nil then
+		return nil
+	end
+	local stats = fnNode.body.statements
+	local last = stats[#stats]
+	if last == nil or last.tag ~= "return" or last.expressions == nil then
+		return nil
+	end
+	local first = last.expressions[1]
+	if first == nil or first.node == nil then
+		return nil
+	end
+	local retExpr = parse.unwrapExpr(first.node, true)
+	local classLocal = setmetatableClassLocal(retExpr)
+	if classLocal == nil and retExpr ~= nil and retExpr.tag == "local" then
+		for _, stat in stats do
+			if stat.tag == "local" and stat.values ~= nil then
+				for i, varPair in stat.variables do
+					if varPair.node == retExpr["local"] and stat.values[i] ~= nil then
+						classLocal = setmetatableClassLocal(stat.values[i].node)
+						break
+					end
+				end
+			end
+		end
+	end
+	return classLocal
 end
 
 return parse

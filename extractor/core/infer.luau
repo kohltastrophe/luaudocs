@@ -1,3 +1,4 @@
+--!strict
 --- Infers property types from assigned values when no explicit annotation,
 --- cast, or `@prop` type is present.
 ---
@@ -11,6 +12,7 @@
 local engineMod = require("./engine")
 local segsMod = require("./segs")
 local surfaceMod = require("./surface")
+local util = require("./util")
 
 type Seg = segsMod.Seg
 type SymValue = surfaceMod.SymValue
@@ -29,6 +31,7 @@ local LUAU_LIBS: { [string]: boolean } = { vector = true, buffer = true }
 local CONSTRUCTOR_NAMES: { [string]: boolean } = {
 	new = true,
 	create = true,
+	fromstring = true,
 	now = true,
 	Angles = true,
 	lookAt = true,
@@ -103,12 +106,32 @@ end
 
 --- Returns true when `list` must be wrapped in parentheses before appending `?`
 --- (`A & B?` is a syntax error, and `(s) -> R?` would bind `?` to `R` rather
---- than the function type).
+--- than the function type). Nested `&` and `->` inside `{ ... }`, `<...>`, or
+--- string literals do not require outer parentheses.
 local function needsParens(list: { Seg }): boolean
-	for _, seg in list do
-		local text = if type(seg) == "string" then seg else seg.text
-		if text:find("&", 1, true) ~= nil or text:find("->", 1, true) ~= nil then
+	local text = segsMod.text(list)
+	local n = #text
+	local depth = 0
+	local i = 1
+	while i <= n do
+		local c = text:sub(i, i)
+		if c == '"' or c == "'" or c == "`" then
+			i = util.closingQuote(text, i) + 1
+		elseif c == "(" or c == "{" or c == "[" or c == "<" then
+			depth += 1
+			i += 1
+		elseif c == ")" or c == "}" or c == "]" or c == ">" then
+			depth = math.max(0, depth - 1)
+			i += 1
+		elseif c == "-" and text:sub(i + 1, i + 1) == ">" then
+			if depth == 0 then
+				return true
+			end
+			i += 2
+		elseif c == "&" and depth == 0 then
 			return true
+		else
+			i += 1
 		end
 	end
 	return false

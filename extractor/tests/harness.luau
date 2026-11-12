@@ -1,40 +1,49 @@
 --- Minimal deterministic test harness (assert-style, no framework deps).
 
-local parseMod = require("../parse")
-local commentsMod = require("../comments")
-local surfaceMod = require("../surface")
-local utilMod = require("../util")
-local requiresMod = require("../requires")
-local graphMod = require("../graph")
-local segsMod = require("../segs")
+local parseMod = require("../core/parse")
+local commentsMod = require("../core/comments")
+local surfaceMod = require("../core/surface")
+local utilMod = require("../core/util")
+local requiresMod = require("../core/requires")
+local graphMod = require("../core/graph")
+local segsMod = require("../core/segs")
 local membersMod = require("../model/members")
 
---- Deep structural equality (arrays + maps), for `eq` alone. `seen` pairs each
---- table with the one it is compared against, so cyclic values (a surfaced
---- table reachable from its own fields) terminate rather than overflow.
-local function deepEqual(a: any, b: any, seen: { [any]: any }?): boolean
+--- Deep structural equality (arrays + maps), for `eq` alone. Tracks active
+--- ancestor pairs on both sides so cyclic values terminate while shared DAG
+--- subtrees compare structurally on every visit.
+local function deepEqual(a: any, b: any, activeAOpt: { [any]: any }?, activeBOpt: { [any]: any }?): boolean
 	if a == b then
 		return true
 	end
 	if type(a) ~= "table" or type(b) ~= "table" then
 		return false
 	end
-	local visited = seen or {}
-	if visited[a] ~= nil then
-		return visited[a] == b
+	local activeA = activeAOpt or {}
+	local activeB = activeBOpt or {}
+	if activeA[a] ~= nil or activeB[b] ~= nil then
+		return activeA[a] == b and activeB[b] == a
 	end
-	visited[a] = b
+	activeA[a] = b
+	activeB[b] = a
+	local equal = true
 	for k, v in a do
-		if not deepEqual(v, b[k], visited) then
-			return false
+		if not deepEqual(v, b[k], activeA, activeB) then
+			equal = false
+			break
 		end
 	end
-	for k in b do
-		if a[k] == nil then
-			return false
+	if equal then
+		for k in b do
+			if a[k] == nil then
+				equal = false
+				break
+			end
 		end
 	end
-	return true
+	activeA[a] = nil
+	activeB[b] = nil
+	return equal
 end
 
 local here = utilMod.dirname(utilMod.resolvePath(debug.info(1, "s")))
@@ -146,18 +155,19 @@ end
 --- `surface.evaluate` over `parseWithComments`: the one-module evaluation the
 --- surface and detect specs both build their cases on.
 function harness.eval(src: string): any
-	return surfaceMod.evaluate(harness.parseWithComments(src))
+	local parsed, claimIndex, trailingIndex = harness.parseWithComments(src)
+	return surfaceMod.evaluate(parsed, claimIndex, trailingIndex)
 end
 
---- Load + expandEntry + graph.build over a fixture root: the graph every
+--- Load + expandEntries + graph.build over a fixture root: the graph every
 --- whole-fixture spec starts from, with the entry asserted valid.
 function harness.buildGraph(root: string, entry: string, opts: any?): (any, any)
-	local proj = requiresMod.load(root, opts)
+	local proj, projErr = requiresMod.load(root, opts)
+	assert(projErr == nil, tostring(projErr))
 	local diag = utilMod.diagnostics()
-	local entryAbs, err = graphMod.expandEntry(root, entry)
-	assert(entryAbs ~= nil, tostring(err))
-	local g = graphMod.build(proj, { entryAbs :: string }, diag)
-	return g, diag
+	local entries, err = graphMod.expandEntries(root, entry)
+	assert(entries ~= nil, tostring(err))
+	return graphMod.build(proj, entries :: { string }, diag), diag
 end
 
 --- Picking one entry out of a doc-model list (modules, classes, members,

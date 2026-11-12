@@ -1,3 +1,5 @@
+--!strict
+
 --- luaudocs extractor CLI (runs on Lute).
 ---
 --- Usage:
@@ -15,12 +17,11 @@
 --- Exit codes: 0 ok, 2 usage/config error.
 
 local process = require("@std/process")
-local fs = require("@std/fs")
-local util = require("./util")
-local requiresMod = require("./requires")
-local graphMod = require("./graph")
+local util = require("./core/util")
+local requiresMod = require("./core/requires")
+local graphMod = require("./core/graph")
 local modelMod = require("./model")
-local emitMod = require("./emit")
+local emitMod = require("./core/emit")
 
 -- Lute 1.0.0 exposes no stderr API, so fatal messages go to stdout and callers
 -- key off exit code 2. fail() runs before any JSON is emitted, so error text
@@ -59,11 +60,15 @@ while i <= #args do
 		projectFile = nextValue()
 	elseif arg == "--alias" then
 		local spec = nextValue()
-		local name, url = spec:match("^([^=]+)=(.*)$")
-		if name == nil then
-			name = spec
+		local eq = spec:find("=", 1, true)
+		local rawName = if eq ~= nil then spec:sub(1, eq - 1) else spec
+		local rawUrl = if eq ~= nil then spec:sub(eq + 1) else nil
+		local name = (util.trim(rawName):gsub("^@", "")):lower()
+		if name == "" then
+			fail("invalid --alias: " .. spec)
 		end
-		aliases[(name :: string):lower()] = if url ~= nil and url ~= "" then url else true
+		local cleanUrl = if rawUrl ~= nil then (util.trim(rawUrl):gsub("/+$", "")) else ""
+		aliases[name] = if cleanUrl ~= "" then cleanUrl else true
 	elseif arg == "--report-undocumented" then
 		reportUndocumented = true
 	elseif arg == "--pretty" then
@@ -84,8 +89,8 @@ if #entries == 0 then
 end
 
 local rootAbs = util.resolvePath(root :: string)
-if not fs.exists(rootAbs) then
-	fail("root does not exist: " .. rootAbs)
+if not util.isDir(rootAbs) then
+	fail("root directory does not exist: " .. rootAbs)
 end
 
 -- Lute inherits the caller's working directory, which is not necessarily the
@@ -94,21 +99,25 @@ if projectFile ~= nil and not util.isAbsolute(projectFile :: string) then
 	projectFile = util.normPath(util.joinPath(rootAbs, projectFile :: string))
 end
 local proj, projErr = requiresMod.load(rootAbs, { projectFile = projectFile, aliases = aliases })
-if projErr ~= nil then
-	fail(projErr)
+if proj == nil or projErr ~= nil then
+	fail(tostring(projErr))
 end
 local diag = util.diagnostics()
 
 local entryAbsPaths: { string } = {}
 local entryIds: { string } = {}
+local seenEntryAbs: { [string]: boolean } = {}
 for _, entry in entries do
 	local list, err = graphMod.expandEntries(rootAbs, entry)
 	if list == nil then
 		fail(tostring(err))
 	end
 	for _, abs in list :: { string } do
-		table.insert(entryAbsPaths, abs)
-		table.insert(entryIds, util.relPath(rootAbs, abs))
+		if not seenEntryAbs[abs] then
+			seenEntryAbs[abs] = true
+			table.insert(entryAbsPaths, abs)
+			table.insert(entryIds, util.relPath(rootAbs, abs))
+		end
 	end
 end
 

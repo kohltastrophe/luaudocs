@@ -1,3 +1,5 @@
+--!strict
+
 --- Segments the flat comment index into blocks, determines which blocks are
 --- doc-eligible, and resolves which block documents the statement at line N.
 ---
@@ -26,6 +28,7 @@ export type DocBlock = {
 	span: Span,
 	contentLine: number, -- physical source line of content[1]
 	claimed: boolean,
+	parsed: any?,
 }
 
 local comments = {}
@@ -45,17 +48,16 @@ end
 --- lines dropped so callers can map content indices back to source lines.
 local function blockContent(text: string): ({ string }, number)
 	local eq, rest = text:match("^%-%-%[(=*)%[(.*)$")
-	if rest == nil then
+	if eq == nil or rest == nil then
 		return {}, 0
 	end
 	local closing = "]" .. eq .. "]"
 	if rest:sub(-#closing) == closing then
 		rest = rest:sub(1, #rest - #closing)
-		-- A `--` abutting the closing bracket belongs to a `--]]`-style closer,
-		-- not to the content. Content ending in `--` is separated by whitespace.
-		if rest:sub(-2) == "--" then
-			rest = rest:sub(1, -3)
-		end
+		-- Trailing hyphens abutting the closing bracket (`--]]`, `---]]`) belong
+		-- to a decorative closer, not to the content. Content ending in `--` is
+		-- separated by whitespace.
+		rest = rest:gsub("%-+$", "")
 	end
 	local lines = util.splitLines(rest)
 	-- Text on the opener line (`--[=[ Summary.`) sits after the opening bracket
@@ -74,7 +76,7 @@ local function blockContent(text: string): ({ string }, number)
 		start += 1
 		dropped += 1
 	end
-	local body: { string } = if start == 1 then lines else table.move(lines, start, #lines, 1, {})
+	local body: { string } = if start == 1 then lines else table.move(lines, start, #lines, 1, {} :: { string })
 	local content = util.dedent(body)
 	if opener ~= nil then
 		local withOpener: { string } = { opener }
@@ -96,8 +98,9 @@ function comments.segment(parsed: Parsed): { DocBlock }
 	local runDoc: boolean? = nil
 
 	local function flush()
-		if run ~= nil then
-			table.insert(blocks, run)
+		local current = run
+		if current ~= nil then
+			table.insert(blocks, current)
 			run = nil
 		end
 	end
@@ -115,17 +118,20 @@ function comments.segment(parsed: Parsed): { DocBlock }
 			local after = if closerLine ~= nil then closerLine:sub(c.span.endColumn) else ""
 			local codeFollows = after:match("%S") ~= nil and after:match("^%s*%-%-") == nil
 			local isDoc = not codeFollows
-			local content: { string }, droppedLeading = {}, 0
+			local content: { string } = {}
+			local droppedLeading = 0
 			if isDoc then
 				content, droppedLeading = blockContent(c.text)
 			end
-			table.insert(blocks, {
+			local block: DocBlock = {
 				doc = isDoc,
 				content = content,
 				span = table.clone(c.span),
 				contentLine = c.span.beginLine + droppedLeading,
 				claimed = false,
-			})
+				parsed = nil,
+			}
+			table.insert(blocks, block)
 		else
 			local isDoc = isDocLine(c.text)
 			local current = run
@@ -138,13 +144,15 @@ function comments.segment(parsed: Parsed): { DocBlock }
 			else
 				flush()
 				runDoc = isDoc
-				run = {
+				local nextRun: DocBlock = {
 					doc = isDoc,
 					content = if isDoc then { docLineContent(c.text) } else {},
 					span = table.clone(c.span),
 					contentLine = c.span.beginLine,
 					claimed = false,
+					parsed = nil,
 				}
+				run = nextRun
 			end
 		end
 	end
@@ -154,7 +162,7 @@ end
 
 --- Maps the line directly below each doc block (`endLine + 1`) to the block itself.
 function comments.claimIndex(blocks: { DocBlock }): { [number]: DocBlock }
-	local index = {}
+	local index: { [number]: DocBlock } = {}
 	for _, block in blocks do
 		if block.doc then
 			index[block.span.endLine + 1] = block
@@ -194,15 +202,19 @@ function comments.trailingText(index: TrailingIndex, line: number): string?
 		return nil
 	end
 	if c.kind == "line" then
-		local text = c.text:gsub("^%-%-%-? ?", "")
-		return util.trim(text)
+		if c.text:match("^%-%-%-%-") ~= nil then
+			return nil
+		end
+		local trimmed = util.trim((c.text:gsub("^%-%-%-? ?", "")))
+		return if trimmed ~= "" then trimmed else nil
 	end
 	local content = blockContent(c.text)
 	-- Empty content means a whitespace-only `--[[ ]]` trailer.
 	if #content == 0 then
 		return nil
 	end
-	return util.trim(table.concat(content, " "))
+	local trimmed = util.trim(table.concat(content, " "))
+	return if trimmed ~= "" then trimmed else nil
 end
 
 --- Returns the first unclaimed doc block ending before the first statement.

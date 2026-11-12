@@ -1,10 +1,11 @@
+--!strict
 --- Serializes values to deterministic JSON with alphabetically sorted object
 --- keys. (`@std/json.serialize` has unstable key order, which would break
 --- snapshot tests.)
 
 local emit = {}
 
-local ESCAPES = {
+local ESCAPES: { [string]: string } = {
 	['"'] = '\\"',
 	["\\"] = "\\\\",
 	["\b"] = "\\b",
@@ -15,8 +16,8 @@ local ESCAPES = {
 }
 
 local function escapeString(s: string): string
-	local out = s:gsub('[%z\1-\31\\"]', function(c)
-		return ESCAPES[c] or string.format("\\u%04x", string.byte(c))
+	local out = s:gsub('[%z\1-\31\\"]', function(c: string)
+		return ESCAPES[c] or string.format("\\u%04x", string.byte(c) :: number)
 	end)
 	return out
 end
@@ -36,8 +37,8 @@ end
 
 --- `__`-prefixed keys are internal assembler scratch fields (`model/init.luau`)
 --- and are omitted from the serialized doc model.
-local function isScratchKey(k: any): boolean
-	return type(k) == "string" and k:sub(1, 2) == "__"
+local function isScratchKey(k: unknown): boolean
+	return type(k) == "string" and string.sub(k, 1, 2) == "__"
 end
 
 --- Returns true when every value under `keys` is a scalar or an empty/scratch-only
@@ -58,14 +59,15 @@ local function isLeafObject(t: { [any]: any }, keys: { any }): boolean
 end
 
 local function isArray(t: { [any]: any }): boolean
+	local n = #t
 	local count = 0
 	for k in t do
-		if type(k) ~= "number" then
+		if type(k) ~= "number" or k < 1 or k > n or k % 1 ~= 0 then
 			return false
 		end
 		count += 1
 	end
-	return count == #t
+	return count == n
 end
 
 --- Marks a table as a JSON object even when empty (an unmarked empty table
@@ -78,13 +80,13 @@ end
 
 local function encodeValue(value: any, pretty: boolean, indent: string, out: { string })
 	local kind = type(value)
-	if kind == "nil" then
-		table.insert(out, "null")
-	elseif kind == "boolean" then
+	if kind == "boolean" then
 		table.insert(out, tostring(value))
 	elseif kind == "number" then
 		if value ~= value or value == math.huge or value == -math.huge then
 			table.insert(out, "null")
+		elseif value == 0 then
+			table.insert(out, "0")
 		elseif value % 1 == 0 and math.abs(value) < 2 ^ 53 then
 			table.insert(out, string.format("%d", value))
 		else
@@ -112,7 +114,7 @@ local function encodeValue(value: any, pretty: boolean, indent: string, out: { s
 			table.insert(out, if pretty then "\n" .. indent .. "]" else "]")
 			return
 		end
-		local keys = {}
+		local keys: { any } = {}
 		for k in value do
 			if not isScratchKey(k) then
 				table.insert(keys, k)
@@ -156,7 +158,7 @@ local function encodeValue(value: any, pretty: boolean, indent: string, out: { s
 end
 
 function emit.encode(value: any, pretty: boolean?): string
-	local out = {}
+	local out: { string } = {}
 	encodeValue(value, pretty == true, "", out)
 	return table.concat(out)
 end

@@ -1,3 +1,4 @@
+--!strict
 --- Pass 2 across the whole model, executed in six ordered phases:
 ---
 ---   1. moves      -- `@within` relocations (types first, then pending members,
@@ -15,16 +16,21 @@
 ---   6. resolve + constructors -- resolves every reference segment to its target
 ---                    ID and links class constructors using those resolved IDs.
 
-local comments = require("../comments")
-local graphMod = require("../graph")
-local inferMod = require("../infer")
-local parseMod = require("../parse")
-local segs = require("../segs")
-local surfaceMod = require("../surface")
+local comments = require("../core/comments")
+local graphMod = require("../core/graph")
+local inferMod = require("../core/infer")
+local parseMod = require("../core/parse")
+local segs = require("../core/segs")
+local surfaceMod = require("../core/surface")
+local util = require("../core/util")
 local members = require("./members")
 
 type Ctx = members.Ctx
 type Graph = graphMod.Graph
+type ModuleEntry = members.ModuleEntry
+type TypeDeclEntry = members.TypeDeclEntry
+type TypeFieldEntry = members.TypeFieldEntry
+type ReexportEntry = members.ReexportEntry
 
 local finalize = {}
 
@@ -36,14 +42,14 @@ end
 --- target class or container (e.g., a `@within Registry @type X` in `Types.luau`
 --- moves onto `Registry`'s page).
 local function moveTypes(ctx: Ctx)
-	local entryOfContainer: { [any]: any } = {}
+	local entryOfContainer: { [any]: ModuleEntry } = {}
 	for _, entry in ctx.modules do
 		entryOfContainer[entry] = entry
 		for _, class in entry.classes do
 			entryOfContainer[class] = entry
 		end
 	end
-	local typeMoves = {}
+	local typeMoves: { { decl: TypeDeclEntry, from: ModuleEntry, to: ModuleEntry } } = {}
 	for _, entry in ctx.modules do
 		for _, decl in entry.types do
 			local within = decl.__within
@@ -152,7 +158,7 @@ local function applyPending(ctx: Ctx)
 			-- incoming tag stub. If a tag stub arrived first (due to require
 			-- order), promote the incoming code-backed member into the slot and
 			-- merge the stub into it.
-			local into, from = existing, member
+			local into: any, from: any = existing, member
 			if existing.__valueSym == nil and member.__valueSym ~= nil then
 				retarget(member, move.fromModule, canonicalName(target))
 				local idx = table.find(target.members, existing)
@@ -195,8 +201,8 @@ end
 --- a redeclared `type T` or a floating `@interface T` alongside a real `type T`).
 --- An `export type` beats an unexported `type`, and ties go to the first declaration.
 local function dedupeTypes(ctx: Ctx)
-	local winners: { [string]: any } = {}
-	local losers: { any } = {}
+	local winners: { [string]: TypeDeclEntry } = {}
+	local losers: { TypeDeclEntry } = {}
 	for _, entry in ctx.modules do
 		for _, decl in entry.types do
 			local held = winners[decl.id]
@@ -226,7 +232,7 @@ local function dedupeTypes(ctx: Ctx)
 		)
 	end
 	for _, entry in ctx.modules do
-		local kept = {}
+		local kept: { TypeDeclEntry } = {}
 		for _, decl in entry.types do
 			if winners[decl.id] == decl then
 				table.insert(kept, decl)
@@ -287,7 +293,11 @@ local function resolvePath(g: Graph, moduleId: string, path: { string }?, from: 
 	local rest: { string } = path or {}
 	local at = 1
 	local function sliceRest(): { string }
-		return if at == 1 then rest else table.move(rest, at, #rest, 1, {})
+		if at == 1 then
+			return rest
+		end
+		local tail: { string } = {}
+		return table.move(rest, at, #rest, 1, tail)
 	end
 	-- `value == nil` means the current module's root return value, while `indexed`
 	-- tracks whether we have stepped into a member field.
@@ -316,7 +326,7 @@ local function resolvePath(g: Graph, moduleId: string, path: { string }?, from: 
 			value, indexed = nil, false
 			continue
 		end
-		if mounted.kind == "import" then
+		if mounted.kind == "import" and mounted.base ~= nil then
 			if mod.externalRequires[mounted.base] ~= nil then
 				return { moduleId = modId, opaque = true, base = mounted.base, rest = sliceRest() }
 			end
@@ -371,7 +381,7 @@ end
 local function resolveReexports(ctx: Ctx, g: Graph)
 	local bySym = membersByValue(ctx)
 	for _, entry in ctx.modules do
-		local kept = {}
+		local kept: { ReexportEntry } = {}
 		for _, reexport in entry.reexports do
 			-- Runtime alias mounts (`@lute/fs`) already carry their spelling and URL.
 			if reexport.__external then
@@ -477,13 +487,14 @@ local function resolveList(
 		local scope: string = seg.__scope or modId
 		local mod = g.byId[scope]
 		if seg.__prefix ~= nil then
-			seg.id = if mod ~= nil then typeIdIn(ctx, g, mod, seg.__prefix, seg.__name) else nil
+			local refName = seg.__name
+			seg.id = if mod ~= nil and refName ~= nil then typeIdIn(ctx, g, mod, seg.__prefix, refName) else nil
 			-- If `seg.__prefix` is a required runtime alias (`fs.File`), record
 			-- an `ExternalRef` in `ctx.externals` so the renderer can link it.
 			local external = if mod ~= nil and seg.id == nil then mod.localExternals[seg.__prefix] else nil
 			if external ~= nil and ctx.externals[seg.text] == nil then
 				ctx.externals[seg.text] =
-					{ url = external.url, alias = external.alias, path = external.path, name = seg.__name }
+					{ url = external.url, alias = external.alias, path = external.path, name = refName }
 			end
 			continue
 		end
@@ -556,7 +567,7 @@ local function annotatedReturn(parsedFile: any, fnNode: any): { any }?
 	if fnNode.generics ~= nil or fnNode.genericPacks ~= nil then
 		local _, genericNames = segs.generics(parsedFile, fnNode.generics, fnNode.genericPacks)
 		for _, seg in list do
-			if type(seg) == "table" and seg.__prefix == nil and genericNames[seg.__name] then
+			if type(seg) == "table" and seg.__prefix == nil and seg.__name ~= nil and genericNames[seg.__name] then
 				return nil
 			end
 		end
@@ -566,6 +577,7 @@ local function annotatedReturn(parsedFile: any, fnNode: any): { any }?
 				if (n.tag == "generic" or n.tag == "genericpack") and n.name ~= nil and genericNames[n.name.text] then
 					hasUnboundPack = true
 				end
+				return true
 			end)
 			if hasUnboundPack then
 				return nil
@@ -619,23 +631,31 @@ local function inferCallTypes(ctx: Ctx, g: Graph)
 	end
 end
 
---- Returns the resolved ID when `list` is a single reference segment optionally
---- followed by `<...>` type arguments (`Widget` or `State<T>`), or `nil` for
---- optional/union/table wrappers (`Widget?`, `{ Widget }`, `Promise<Widget>`).
+--- Checks whether `rest` is a single `<...>` generic argument list spanning the
+--- entire string, skipping quoted string literal types (`"` / `'` / `` ` ``) and
+--- ignoring `>` in `->`.
 local function hasBalancedTypeArgs(rest: string): boolean
 	if rest:sub(1, 1) ~= "<" then
 		return false
 	end
 	local depth = 0
-	for i = 1, #rest do
+	local n = #rest
+	local i = 1
+	while i <= n do
 		local c = rest:sub(i, i)
-		if c == "<" then
+		if c == '"' or c == "'" or c == "`" then
+			i = util.closingQuote(rest, i) + 1
+		elseif c == "<" then
 			depth += 1
+			i += 1
 		elseif c == ">" and rest:sub(i - 1, i - 1) ~= "-" then
 			depth -= 1
 			if depth == 0 then
-				return i == #rest
+				return i == n
 			end
+			i += 1
+		else
+			i += 1
 		end
 	end
 	return false
@@ -643,8 +663,8 @@ end
 
 --- Returns `list[1].id` if `list` is a bare type reference (`Widget` or
 --- `Widget<T, U>`), or `nil` if any tokens follow (`Widget?`, `Widget | nil`,
---- `{ Widget }`). Ignores `>` in `->` so function-type generic arguments
---- (`Widget<() -> ()>`) do not close `<...>` early.
+--- `{ Widget }`). Ignores `>` in `->` and quoted string literals so generic
+--- arguments (`Widget<() -> ()>`, `Widget<">">`) do not close `<...>` early.
 local function exactClassRef(list: { any }?): string?
 	local head = if list ~= nil then list[1] else nil
 	if type(head) ~= "table" or head.id == nil then
@@ -657,94 +677,190 @@ local function exactClassRef(list: { any }?): string?
 	return if hasBalancedTypeArgs(rest) then head.id else nil
 end
 
---- Returns the single prefixed reference segment if `def` is `Prefix.Name` or
---- `Prefix.Name<...>`, or `nil` otherwise.
-local function respelledSeg(def: { { any } }?): any?
+--- Returns `(line, headSeg)` if `def` is `Prefix.Name` or `Prefix.Name<...>`,
+--- or `(nil, nil)` otherwise.
+local function respelledLine(def: { { segs.Seg } }?): ({ segs.Seg }?, any?)
 	local line = if def ~= nil and #def == 1 then def[1] else nil
 	local head = if line ~= nil then line[1] else nil
-	if type(head) ~= "table" or head.__prefix == nil then
-		return nil
+	if line == nil or type(head) ~= "table" or head.__prefix == nil or head.__name == nil then
+		return nil, nil
 	end
 	if #line == 1 then
-		return head
+		return line, head
 	end
-	return if #line == 2 and type(line[2]) == "string" and hasBalancedTypeArgs(line[2]) then head else nil
+	local argSeg = line[2]
+	if #line == 2 and type(argSeg) == "string" and hasBalancedTypeArgs(argSeg) then
+		return line, head
+	end
+	return nil, nil
+end
+
+--- Returns true only when `decl` forwards its own generic parameter list verbatim
+--- to `ty` (`export type X = Sub.Y` with zero generics on both sides, or
+--- `export type X<G1, G2...> = Sub.Y<G1, G2...>` with identical parameter names
+--- and pack kinds), rejecting partial specializations (`Sub.Foo<{}>`) and
+--- renamed/reordered parameters (`MyFoo<U> = Sub.Foo<U>`).
+local function isIdentityRespelling(
+	line: { segs.Seg },
+	declGenerics: { segs.Generic },
+	targetGenerics: { segs.Generic }
+): boolean
+	if #line == 1 then
+		return #declGenerics == 0 and #targetGenerics == 0
+	end
+	local argText = line[2]
+	if type(argText) ~= "string" or #declGenerics == 0 or #declGenerics ~= #targetGenerics then
+		return false
+	end
+	local expectedParts: { string } = {}
+	for i, dg in declGenerics do
+		local tg = targetGenerics[i]
+		if dg.name ~= tg.name or dg.isPack ~= tg.isPack then
+			return false
+		end
+		table.insert(expectedParts, dg.name .. (if dg.isPack then "..." else ""))
+	end
+	local compactArgs = (argText:gsub("%s+", ""))
+	return compactArgs == "<" .. table.concat(expectedParts, ",") .. ">"
+end
+
+local function mergeWrapperFields(
+	targetFields: { TypeFieldEntry }?,
+	wrapperFields: { TypeFieldEntry }?,
+	lineFacts: segs.LineFacts
+): { TypeFieldEntry }?
+	if wrapperFields == nil then
+		return targetFields
+	end
+	local out: { TypeFieldEntry } = targetFields or {}
+	for _, wf in wrapperFields do
+		local existing = members.byName(out, wf.name)
+		local at = lineFacts[wf.name]
+		if existing ~= nil then
+			existing.doc = wf.doc or existing.doc
+			if wf.type ~= nil then
+				existing.type = wf.type
+			end
+		else
+			table.insert(out, {
+				name = wf.name,
+				type = wf.type,
+				doc = wf.doc,
+				line = wf.line or (if at ~= nil then at.line else nil),
+				docInDisplay = wf.docInDisplay or (if at ~= nil and at.docInDisplay then true else nil),
+			})
+		end
+	end
+	return if #out > 0 then out else nil
+end
+
+local function expandSingleRespelling(
+	ctx: Ctx,
+	g: Graph,
+	decl: TypeDeclEntry,
+	expandedHere: { [string]: boolean },
+	seen: { [string]: boolean }
+): boolean
+	local line, seg = respelledLine(decl.definition)
+	if line == nil or seg == nil then
+		return false
+	end
+	local scope: string = seg.__scope or decl.source.file
+	local writer = g.byId[scope]
+	local targetId = if writer ~= nil then writer.localModules[seg.__prefix] else nil
+	local targetMod = if targetId ~= nil then g.byId[targetId] else nil
+	if
+		targetId == nil
+		or targetMod == nil
+		or targetMod.surfaced
+		or targetMod.surface == nil
+		or targetMod.parsed == nil
+	then
+		return false
+	end
+	local targetKey = targetId .. ":" .. (seg.__name :: string)
+	if seen[targetKey] or (ctx.typesByModule[targetId][seg.__name] ~= nil and not expandedHere[targetKey]) then
+		return false
+	end
+	local ty = members.byName(targetMod.surface.types, seg.__name)
+	if ty == nil or ty.kind == "typefunction" or ty.stat == nil or ty.stat.type == nil then
+		return false
+	end
+	local generics, genericNames = segs.generics(targetMod.parsed, ty.stat.generics, ty.stat.genericPacks)
+	if not isIdentityRespelling(line, decl.generics, generics) then
+		return false
+	end
+	for i, dg in decl.generics do
+		local tg = generics[i]
+		if dg.default == nil and tg ~= nil and tg.default ~= nil then
+			stampScopeList(tg.default, targetMod.id)
+			dg.default = tg.default
+		end
+	end
+	seen[targetKey] = true
+	if ctx.typesByModule[targetId][ty.name] == nil then
+		ctx.typesByModule[targetId][ty.name] = decl.id
+		expandedHere[targetId .. ":" .. ty.name] = true
+	end
+	local tyDoc = if ty.doc ~= nil then members.parseBlock(ctx, targetMod.id, ty.doc) else members.EMPTY_DOC
+	local claimIndex = targetMod.claimIndex or comments.claimIndex(targetMod.blocks or {})
+	local trailingIndex = targetMod.trailingIndex or comments.trailingIndex(targetMod.parsed)
+	if ty.stat.type.location ~= nil then
+		for lineNo = ty.stat.type.location.beginLine, ty.stat.type.location.endLine do
+			local b = claimIndex[lineNo]
+			if b ~= nil then
+				b.claimed = false
+			end
+		end
+	end
+	local targetKind, definition, targetFields, lineFacts =
+		members.extractTypeBody(targetMod.parsed, ty, tyDoc, claimIndex, trailingIndex, genericNames)
+	if decl.kind ~= "interface" and targetKind == "interface" then
+		decl.kind = "interface"
+	end
+	if definition ~= nil then
+		for _, defLine in definition do
+			stampScopeList(defLine, targetMod.id)
+		end
+	end
+	decl.definition = definition
+	if targetFields ~= nil then
+		for _, f in targetFields do
+			stampScopeList(f.type, targetMod.id)
+		end
+	end
+	decl.fields = mergeWrapperFields(targetFields, decl.fields, lineFacts)
+	if
+		ty.stat.type ~= nil
+		and ty.stat.type.tag == "typeof"
+		and decl.kind == "interface"
+		and decl.fields ~= nil
+		and #decl.fields > 0
+	then
+		decl.definition = nil
+	end
+	if decl.doc == nil and ty.doc ~= nil then
+		decl.doc = members.placingDoc(tyDoc)
+	end
+	if ty.doc ~= nil then
+		members.overlayBadges(decl.tags, members.buildBadges(tyDoc))
+	end
+	return true
 end
 
 --- Expands `export type X = Sub.Y` declarations whose `Sub` is a non-surfaced
---- module (`not targetMod.surfaced`), inlining `Y`'s definition, fields, and doc
---- onto `X` and registering `X.id` in `ctx.typesByModule[Sub.id][Y]` so all
---- references to `Sub.Y` link to `X`.
+--- module (`not targetMod.surfaced`), following multi-hop non-surfaced chains
+--- to a fixed point and registering `X.id` in `ctx.typesByModule[Sub.id][Y]`
+--- so all references to `Sub.Y` link to `X`.
 local function expandRespelledTypes(ctx: Ctx, g: Graph)
 	local expandedHere: { [string]: boolean } = {}
 	for _, entry in ctx.modules do
 		for _, decl in entry.types do
-			local seg = respelledSeg(decl.definition)
-			local writer = if seg ~= nil then g.byId[decl.source.file] else nil
-			local targetId = if writer ~= nil then writer.localModules[seg.__prefix] else nil
-			local targetMod = if targetId ~= nil then g.byId[targetId] else nil
-			local targetKey = if targetId ~= nil and seg ~= nil then (targetId :: string) .. ":" .. seg.__name else nil
-			if
-				targetMod == nil
-				or targetMod.surfaced
-				or targetMod.surface == nil
-				or targetMod.parsed == nil
-				or (ctx.typesByModule[targetId :: string][seg.__name] ~= nil and not expandedHere[targetKey :: string])
-			then
-				continue
-			end
-			local ty = members.byName(targetMod.surface.types, seg.__name)
-			if ty == nil or ty.stat == nil or ty.stat.type == nil then
-				continue
-			end
-			if ctx.typesByModule[targetId :: string][ty.name] == nil then
-				ctx.typesByModule[targetId :: string][ty.name] = decl.id
-				expandedHere[(targetId :: string) .. ":" .. ty.name] = true
-			end
-			local generics, genericNames = segs.generics(targetMod.parsed, ty.stat.generics, ty.stat.genericPacks)
-			if #decl.generics == 0 and #generics > 0 then
-				for _, gp in generics do
-					stampScopeList(gp.default, targetMod.id)
+			local seen: { [string]: boolean } = {}
+			for _ = 1, MAX_STEPS do
+				if not expandSingleRespelling(ctx, g, decl, expandedHere, seen) then
+					break
 				end
-				decl.generics = generics
-			end
-			local tyDoc = if ty.doc ~= nil then members.parseBlock(ctx, targetMod.id, ty.doc) else members.EMPTY_DOC
-			local claimIndex: any = targetMod.claimIndex or comments.claimIndex(targetMod.blocks or {})
-			local trailingIndex: any = targetMod.trailingIndex or comments.trailingIndex(targetMod.parsed)
-			if ty.stat.type.location ~= nil then
-				for line = ty.stat.type.location.beginLine, ty.stat.type.location.endLine do
-					local b = claimIndex[line]
-					if b ~= nil then
-						b.claimed = false
-					end
-				end
-			end
-			local rawFields, lineFacts, displayBlock = segs.fields(
-				targetMod.parsed,
-				ty.stat.type,
-				claimIndex,
-				trailingIndex,
-				genericNames,
-				if ty.stat.location ~= nil then ty.stat.location.beginLine else nil
-			)
-			local fields = members.mergeTypeFieldTags(rawFields, tyDoc, lineFacts, genericNames)
-			if displayBlock ~= nil then
-				for _, line in displayBlock do
-					stampScopeList(line, targetMod.id)
-				end
-				decl.definition = displayBlock
-			end
-			if decl.fields == nil and fields ~= nil then
-				for _, f in fields do
-					stampScopeList(f.type, targetMod.id)
-				end
-				decl.fields = members.toModelFields(fields)
-			end
-			if decl.doc == nil and ty.doc ~= nil then
-				decl.doc = members.placingDoc(tyDoc)
-			end
-			if ty.doc ~= nil then
-				members.overlayBadges(decl.tags, members.buildBadges(tyDoc))
 			end
 		end
 	end
@@ -762,7 +878,7 @@ local function detectConstructor(ctx: Ctx, classOfRefId: { [string]: any }, fn: 
 	-- mistaken for constructors).
 	if class == nil and fn.kind == "function" then
 		local firstReturn = fn.signature.returns[1]
-		local head = if firstReturn ~= nil then exactClassRef(firstReturn.type) else nil
+		local head: string? = if firstReturn ~= nil then exactClassRef(firstReturn.type) else nil
 		if head ~= nil then
 			class = classOfRefId[head]
 		end
@@ -778,17 +894,30 @@ local function detectConstructor(ctx: Ctx, classOfRefId: { [string]: any }, fn: 
 	end
 end
 
-local function applyReturnedRequire(member: any, entryById: { [string]: any })
+local function applyReturnedRequire(member: any, entryById: { [string]: ModuleEntry })
 	local reqTargetId = member.__returnedRequire
 	member.__returnedRequire = nil
 	local reqEntry = if reqTargetId ~= nil then entryById[reqTargetId] else nil
+	if reqEntry ~= nil then
+		local seen: { [string]: boolean } = { [reqEntry.id] = true }
+		while reqEntry ~= nil and reqEntry.aliasOf ~= nil do
+			local nextEntry = entryById[reqEntry.aliasOf]
+			if nextEntry == nil or seen[nextEntry.id] then
+				break
+			end
+			seen[nextEntry.id] = true
+			reqEntry = nextEntry
+		end
+	end
 	if reqEntry == nil or #member.signature.returns > 1 then
 		return
 	end
 	local ret = member.signature.returns[1]
 	local retText = if ret ~= nil and ret.type ~= nil then segs.text(ret.type) else ""
 	if retText == "" or retText:find("^typeof%(require%(") ~= nil then
-		local refSeg = { text = reqEntry.name, id = reqEntry.id }
+		local refSeg: segs.Seg = if reqEntry.aliasOf ~= nil
+			then { text = reqEntry.aliasOf }
+			else { text = reqEntry.name, id = reqEntry.id }
 		if ret ~= nil then
 			ret.type = { refSeg }
 		else
@@ -802,11 +931,8 @@ end
 local function resolveRefsAndConstructors(ctx: Ctx, g: Graph)
 	-- Map both `classType` declaration IDs and direct `Class` IDs to their class
 	-- entries so constructor detection works with or without a `classType` alias.
-	local classOfRefId: { [string]: any } = {}
-	for id, class in ctx.classByTypeId do
-		classOfRefId[id] = class
-	end
-	local entryById: { [string]: any } = {}
+	local classOfRefId: { [string]: any } = table.clone(ctx.classByTypeId)
+	local entryById: { [string]: ModuleEntry } = {}
 	for _, entry in ctx.modules do
 		entryById[entry.id] = entry
 		for _, class in entry.classes do
@@ -849,8 +975,10 @@ local function resolveRefsAndConstructors(ctx: Ctx, g: Graph)
 			end
 			resolveList(ctx, g, requiredByMod, modId, decl.params)
 			resolveBlock(ctx, g, requiredByMod, modId, decl.definition)
-			for _, f in decl.fields or {} do
-				resolveList(ctx, g, requiredByMod, modId, f.type)
+			if decl.fields ~= nil then
+				for _, f in decl.fields do
+					resolveList(ctx, g, requiredByMod, modId, f.type)
+				end
 			end
 		end
 	end
@@ -924,8 +1052,7 @@ local function reportUndocumented(ctx: Ctx)
 				return
 			end
 			if member.kind == "prop" then
-				local sep = if member.name:sub(1, 1) == "[" then "" else "."
-				report("property", if owner.name ~= "" then owner.name .. sep .. member.name else member.name, member)
+				report("property", members.callee(owner.name, ".", member.name), member)
 			else
 				report(member.kind, member.signature.callee, member)
 			end

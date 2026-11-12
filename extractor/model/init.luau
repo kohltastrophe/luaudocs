@@ -1,3 +1,4 @@
+--!strict
 --- Doc-model assembly. Combines the module graph, evaluated surfaces, doc
 --- blocks, and tags into the doc model in two passes (`./build` per module,
 --- then `./finalize` across the whole model).
@@ -28,7 +29,7 @@
 ---     `segs` holds everything after the callee (`<T>(x: T): T`). Concatenating
 ---     the two reproduces the full signature.
 ---   Prop   { id, name, kind: "prop", type?, doc?, tags, visibility, readonly, source }
----   Reexport { id, name, targetModule, targetMember?, targetId?, url?,
+---   Reexport { id, name, within?, targetModule, targetMember?, targetId?, url?,
 ---              realm?, doc? }
 ---     Represents a field on a module's surface that came from another module.
 ---     `targetModule` is the final module after resolving require chains and
@@ -73,18 +74,23 @@
 ---   `Diagnostic`: `{ severity: "error"|"warning"|"info", code, message, file?, line? }`.
 --- Ordering: modules in BFS graph order, members in source order (deterministic).
 
-local graphMod = require("./graph")
-local util = require("./util")
+local graphMod = require("./core/graph")
+local util = require("./core/util")
 local buildPass = require("@self/build")
 local finalizePass = require("@self/finalize")
 local members = require("@self/members")
 
 type Graph = graphMod.Graph
 type Collector = util.Collector
+export type DocModel = members.DocModel
 
 local model = {}
 
-function model.assemble(g: Graph, diag: Collector, opts: { entryPoints: { string }, reportUndocumented: boolean? }): any
+function model.assemble(
+	g: Graph,
+	diag: Collector,
+	opts: { entryPoints: { string }, reportUndocumented: boolean? }
+): DocModel
 	local ctx = members.newCtx(diag)
 	ctx.graph = g
 	for _, mod in g.modules do

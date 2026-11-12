@@ -1,3 +1,5 @@
+--!strict
+
 --- Shared helpers for the extractor, including the diagnostic collector,
 --- cross-platform path helpers (`relPath` normalizes separators to `/`), and
 --- string/line utilities.
@@ -26,26 +28,35 @@ export type Collector = {
 
 --- Creates a diagnostic collector that records diagnostics for the doc-model JSON.
 function util.diagnostics(): Collector
-	local collector = { list = {} } :: Collector
-	function collector.add(self, severity, code, message, file, line)
-		table.insert(self.list, {
-			severity = severity,
-			code = code,
-			message = message,
-			file = file,
-			line = line,
-		})
-	end
-	function collector.error(self, code, message, file, line)
-		self:add("error", code, message, file, line)
-	end
-	function collector.warn(self, code, message, file, line)
-		self:add("warning", code, message, file, line)
-	end
-	function collector.info(self, code, message, file, line)
-		self:add("info", code, message, file, line)
-	end
-	return collector
+	local list: { Diagnostic } = {}
+	return {
+		list = list,
+		add = function(
+			self: Collector,
+			severity: Severity,
+			code: string,
+			message: string,
+			file: string?,
+			line: number?
+		)
+			table.insert(self.list, {
+				severity = severity,
+				code = code,
+				message = message,
+				file = file,
+				line = line,
+			})
+		end,
+		error = function(self: Collector, code: string, message: string, file: string?, line: number?)
+			self:add("error", code, message, file, line)
+		end,
+		warn = function(self: Collector, code: string, message: string, file: string?, line: number?)
+			self:add("warning", code, message, file, line)
+		end,
+		info = function(self: Collector, code: string, message: string, file: string?, line: number?)
+			self:add("info", code, message, file, line)
+		end,
+	}
 end
 
 -- `@std/path` returns path objects (tables with `__tostring`); these wrappers
@@ -72,12 +83,26 @@ function util.dirname(p: string): string
 	return tostring(pathlib.dirname(p))
 end
 
+--- Returns the parent directory of `p`, or `nil` when `p` is already a filesystem root.
+function util.parentDir(p: string): string?
+	local norm = util.normPath(p)
+	local parent = util.dirname(norm)
+	return if parent ~= norm then parent else nil
+end
+
 function util.basename(p: string): string
 	return tostring(pathlib.basename(p))
 end
 
 function util.isAbsolute(p: string): boolean
 	return pathlib.isAbsolute(p)
+end
+
+--- True when `abs` lies outside `root` (including cross-drive paths on Windows,
+--- which relativize to an absolute path rather than a `../` prefix).
+function util.isOutsideRoot(root: string, abs: string): boolean
+	local rel = util.relPath(root, abs)
+	return rel == ".." or rel:sub(1, 3) == "../" or util.isAbsolute(rel)
 end
 
 --- Matches `init.luau`, `init.d.luau`, and `init.lua` only, so `init.client.luau` remains a plain module.
@@ -96,7 +121,7 @@ end
 --- Returns the filesystem entry kind for `p`, or `nil` when `p` does not exist.
 function util.pathType(p: string): string?
 	local ok, kind = pcall(fs.type, p)
-	return if ok then kind else nil
+	return if ok then kind :: string else nil
 end
 
 function util.isDir(p: string): boolean
@@ -110,13 +135,13 @@ end
 --- Reads `p` as a string, returning `nil` if the file is missing or unreadable.
 function util.readFileSafe(p: string): string?
 	local ok, text = pcall(fs.readFileToString, p)
-	return if ok then text else nil
+	return if ok then text :: string else nil
 end
 
 --- Returns the arguments after `--` in `process.args` (Lute places its own runner arguments before `--`).
 function util.argsAfterSeparator(processArgs: { string }): { string }
 	local sep = table.find(processArgs, "--")
-	return if sep ~= nil then table.move(processArgs, sep + 1, #processArgs, 1, {}) else {}
+	return if sep ~= nil then table.move(processArgs, sep + 1, #processArgs, 1, {} :: { string }) else {}
 end
 
 function util.trim(s: string): string
@@ -145,7 +170,7 @@ function util.trimEmptyLines(lines: { string }): { string }
 	while last >= first and util.trim(lines[last]) == "" do
 		last -= 1
 	end
-	return if first <= last then table.move(lines, first, last, 1, {}) else {}
+	return if first <= last then table.move(lines, first, last, 1, {} :: { string }) else {}
 end
 
 --- Returns the longest whitespace prefix shared by all non-blank lines. Compares
@@ -180,7 +205,7 @@ function util.dedent(lines: { string }): { string }
 	if prefix == nil or prefix == "" then
 		return lines
 	end
-	local out = {}
+	local out: { string } = {}
 	for _, line in lines do
 		if util.trim(line) == "" then
 			table.insert(out, "")
@@ -220,7 +245,7 @@ function util.commentEnd(text: string, i: number): number
 	local n = #text
 	local eq = text:match("^%[(=*)%[", i + 2)
 	if eq ~= nil then
-		local closeAt = text:find("]" .. eq .. "]", i + 2, true)
+		local closeAt = text:find("]" .. eq .. "]", i + 4 + #eq, true)
 		return if closeAt ~= nil then closeAt + #eq + 2 else n + 1
 	end
 	return text:find("\n", i, true) or (n + 1)

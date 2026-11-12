@@ -19,6 +19,7 @@ local specs: { { name: string, run: () -> () } } = {
 
 -- pcall so one throwing spec still leaves the other results, the report and the
 -- exit code intact
+assert(#specs > 0, "expected registered extractor specs")
 for _, spec in specs do
 	local ok, err = pcall(spec.run)
 	if not ok then
@@ -30,5 +31,4 @@ local ok = harness.report()
 if not ok then
 	process.exit(1)
 end
-assert(ok)
 process.exit(0)

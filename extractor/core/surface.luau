@@ -1,17 +1,24 @@
+--!strict
+
 --- Public-surface discovery. Symbolically evaluates a module chunk's statements
---- and resolves what the module returns, without executing anything.
---- Also owns OOP-class classification (`classify`, `isMetamethod`) over the
---- evaluated `SymValue` tables.
+--- and `.d.luau` ambient declarations (`declare class`, `declare extern type`,
+--- `declare function`, `declare <name>: <Type>`) to resolve what the module
+--- exposes without executing code. Also owns prototype `__index` delegation and
+--- OOP-class classification (`classify`, `isMetamethod`) over `SymValue` tables.
 ---
---- Maps CstLocal *identity* -> SymValue. The parser links every local reference
+--- Maps CstLocal *identity* to `SymValue`. The parser links every local reference
 --- to its binding via `expr.local`, handling shadowing automatically. Evaluates
 --- top-level statements along with `if`/`elseif`/`else` and `do` bodies (a
 --- conditional mount is still public surface), while skipping loops and function
---- bodies. Only the chunk's own trailing `return` defines the surface, ignoring
---- early returns inside branches.
+--- bodies. Only the chunk's own trailing `return` defines the runtime surface,
+--- ignoring early returns inside branches; ambient-only `.d.luau` modules fall
+--- back to their synthesized declaration root.
 
+local util = require("./util")
 local parseMod = require("./parse")
 local comments = require("./comments")
+local requiresMod = require("./requires")
+local tagsMod = require("./tags")
 
 type Span = parseMod.Span
 type Parsed = parseMod.Parsed
@@ -30,7 +37,7 @@ export type SymValue = {
 	isEmptyLiteral: boolean?, -- spelled `{}`, whatever was assigned into it later
 	arrayItemKind: string?, -- literal kind shared by every item of a pure list
 	-- require
-	requireInfo: { kind: "string" | "ipath" | "dynamic", text: string?, segs: { string }? }?,
+	requireInfo: requiresMod.RequireInfo?,
 	-- import (member of a required module: `raw = State.raw`)
 	base: SymValue?,
 	path: { string }?,
@@ -98,6 +105,10 @@ export type SurfaceResult = {
 }
 
 local surface = {}
+
+function surface.isMetamethod(name: string): boolean
+	return name:sub(1, 2) == "__"
+end
 
 local function newTable(span: Span?): SymValue
 	return { kind = "table", fields = {}, fieldIndex = {}, span = span }
@@ -175,17 +186,17 @@ type Ctx = {
 	declaredClassByName: { [string]: DeclaredClassInfo },
 }
 
-local evalExpr -- forward
+local evalExpr: (ctx: Ctx, expr: any) -> SymValue -- forward
 
 local function evalRequireCall(ctx: Ctx, arg: any, span: Span?): SymValue
 	-- Resolve the argument now while the local environment is still in scope.
-	local requireInfo: any = { kind = "dynamic" }
+	local requireInfo: requiresMod.RequireInfo = { kind = "dynamic" }
 	if arg ~= nil then
 		if arg.tag == "string" then
 			requireInfo = { kind = "string", text = arg.token.text }
 		else
 			local argValue = evalExpr(ctx, arg)
-			if argValue.kind == "ipath" then
+			if argValue.kind == "ipath" and argValue.segs ~= nil then
 				requireInfo = { kind = "ipath", segs = argValue.segs }
 			end
 		end
@@ -197,7 +208,10 @@ local function evalRequireExpr(ctx: Ctx, expr: any): SymValue?
 	expr = unwrapExpr(expr, true)
 	if expr ~= nil and expr.tag == "call" and calleePath(expr.func) == "require" then
 		local first = expr.arguments and expr.arguments[1]
-		return evalRequireCall(ctx, first and first.node, expr.location)
+		local req = evalRequireCall(ctx, first and first.node, expr.location)
+		if req.requireInfo ~= nil and req.requireInfo.kind ~= "dynamic" then
+			return req
+		end
 	end
 	return nil
 end
@@ -241,7 +255,8 @@ local function indexValue(base: SymValue, indexText: string, expr: any): SymValu
 		-- Preserve a global's dotted path (`Enum.Material`, `Color3.new`) so type
 		-- inference can recognize engine library roots. A shadowed local never
 		-- reaches this branch because it evaluates to its own binding above.
-		return { kind = "opaque", callee = base.callee .. "." .. indexText, span = expr.location }
+		local callee = base.callee :: string
+		return { kind = "opaque", callee = callee .. "." .. indexText, span = expr.location }
 	end
 	return opaque(expr)
 end
@@ -327,7 +342,7 @@ local function addDeclaredProp(
 end
 
 local function fnNodeFromType(fnType: any): any
-	local params = {}
+	local params: { any } = {}
 	for i, pair in fnType.parameters or {} do
 		local p = pair.node
 		if p ~= nil then
@@ -354,7 +369,7 @@ local function fnNodeFromType(fnType: any): any
 end
 
 local function collectFunctionTypes(typeNode: any): { any }?
-	typeNode = parseMod.unwrapType(typeNode)
+	typeNode = parseMod.unwrapGroup(typeNode)
 	if typeNode == nil then
 		return nil
 	end
@@ -364,7 +379,7 @@ local function collectFunctionTypes(typeNode: any): { any }?
 	if typeNode.tag == "intersection" and typeNode.types ~= nil and #typeNode.types > 0 then
 		local out: { any } = {}
 		for _, pair in typeNode.types do
-			local branch = parseMod.unwrapType(pair.node)
+			local branch = parseMod.unwrapGroup(pair.node)
 			if branch == nil or branch.tag ~= "function" then
 				return nil
 			end
@@ -380,14 +395,7 @@ local function sliceIndexerKey(parsed: Parsed, keyNode: any): string
 	if span == nil then
 		return "[unknown]"
 	end
-	local parts: { string } = {}
-	for lineNo = span.beginLine, span.endLine do
-		local lineText = parsed.lines[lineNo] or ""
-		local startCol = if lineNo == span.beginLine then span.beginColumn else 1
-		local endCol = if lineNo == span.endLine then span.endColumn - 1 else #lineText
-		table.insert(parts, lineText:sub(startCol, endCol))
-	end
-	local raw = table.concat(parts, " "):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+	local raw = util.trim((parseMod.sliceSpan(parsed, span):gsub("%s+", " ")))
 	return "[" .. raw .. "]"
 end
 
@@ -400,7 +408,7 @@ local function evalTable(ctx: Ctx, expr: any): SymValue
 	local itemKind: string? = nil
 	local readable = true
 	for _, entry in expr.entries do
-		local entryKind = entry.tag or entry.kind
+		local entryKind = parseMod.entryKind(entry)
 		local name: string? = nil
 		local keyToken: any = nil
 		if entryKind == "record" then
@@ -571,9 +579,18 @@ local function evalOperatorExpr(ctx: Ctx, expr: any): SymValue
 	return { kind = "literal", valueKind = valueKind, span = expr.location }
 end
 
+--- Stamps table-level metadata onto `target` and mirrors it to `target.origin`
+--- when `target` is a shallow `:: T` cast clone.
+local function setTableState(target: SymValue, apply: (t: SymValue) -> ())
+	apply(target)
+	if target.origin ~= nil then
+		apply(target.origin)
+	end
+end
+
 local function evalCallExpr(ctx: Ctx, expr: any): SymValue
 	local callee = calleePath(expr.func)
-	local args = {}
+	local args: { any } = {}
 	for _, pair in expr.arguments do
 		table.insert(args, pair.node)
 	end
@@ -582,20 +599,21 @@ local function evalCallExpr(ctx: Ctx, expr: any): SymValue
 	elseif callee == "setmetatable" then
 		local target = evalExpr(ctx, args[1])
 		if target.kind == "table" then
-			local mt = evalExpr(ctx, args[2])
-			target.metatable = mt
-			if target.origin ~= nil then
-				target.origin.metatable = mt
-			end
+			local rawMt = if args[2] ~= nil then evalExpr(ctx, args[2]) else nil
+			local mt = if rawMt ~= nil and not (rawMt.kind == "literal" and rawMt.valueKind == "nil")
+				then rawMt
+				else nil
+			setTableState(target, function(t)
+				t.metatable = mt
+			end)
 		end
 		return target
 	elseif callee == "table.freeze" then
 		local target = evalExpr(ctx, args[1])
 		if target.kind == "table" then
-			target.frozen = true
-			if target.origin ~= nil then
-				target.origin.frozen = true
-			end
+			setTableState(target, function(t)
+				t.frozen = true
+			end)
 		end
 		return target
 	elseif callee == "game:GetService" then
@@ -801,20 +819,19 @@ local function processAssignStat(ctx: Ctx, stat: any)
 			-- it would make `T.__index = T` list the class as a field of itself.
 			-- Record `selfIndexing = true` instead (see `isSelfIndexing`).
 			if target ~= nil and fieldName == "__index" then
+				local indexTarget: SymValue = rhs
 				if rhs.kind == "table" and rhs.fields == target.fields then
-					target.selfIndexing = true
-					if target.origin ~= nil then
-						target.origin.selfIndexing = true
-					end
+					setTableState(target, function(t)
+						t.selfIndexing = true
+					end)
 				elseif rhs.kind == "table" or rhs.kind == "opaque" then
-					target.indexTarget = rhs
-					if target.origin ~= nil then
-						target.origin.indexTarget = rhs
-					end
+					setTableState(target, function(t)
+						t.indexTarget = indexTarget
+					end)
 				end
 			elseif target ~= nil then
-				local rhsNode = if valuePair ~= nil then unwrapExpr(valuePair.node) else nil
-				local declaredType = if rhsNode ~= nil and rhsNode.tag == "cast" then rhsNode.annotation else nil
+				local rhsNode: any = if valuePair ~= nil then unwrapExpr(valuePair.node) else nil
+				local declaredType: any = if rhsNode ~= nil and rhsNode.tag == "cast" then rhsNode.annotation else nil
 				setField(target, fieldName :: string, {
 					name = fieldName :: string,
 					value = rhs,
@@ -830,59 +847,103 @@ local function processAssignStat(ctx: Ctx, stat: any)
 	end
 end
 
-local function postProcessResult(ctx: Ctx, result: SymValue, evalFactoryBody: (statements: any) -> SymValue?)
-	-- Delegate fields from `setmetatable(M, { __index = Proto })` when `Proto`
-	-- is another table or a local factory call (`local Registry = new()`).
-	local mt = result.metatable
-	if mt ~= nil and mt.kind == "table" then
-		local idxField = surface.fieldOf(mt, "__index")
-		local proto = if idxField ~= nil then idxField.value else mt.indexTarget
-		if
-			proto ~= nil
-			and proto.kind == "opaque"
-			and proto.calleeValue ~= nil
-			and proto.calleeValue.kind == "function"
-		then
-			local body = proto.calleeValue.fnNode and proto.calleeValue.fnNode.body
-			if body ~= nil then
-				proto = evalFactoryBody(body.statements) or proto
+local function isOrphanClassProto(ctx: Ctx, result: SymValue, mt: SymValue): boolean
+	if mt.defDoc ~= nil and tagsMod.className(tagsMod.parseBlock(mt.defDoc)) ~= nil then
+		return true
+	end
+	for _, ty in ctx.types do
+		local classLocal = if ty.stat ~= nil then parseMod.setmetatableTypeClassLocal(ty.stat.type) else nil
+		local sym = if classLocal ~= nil then ctx.env[classLocal] else nil
+		if sym ~= nil and sym.fields == mt.fields then
+			return true
+		end
+	end
+	local seen: { [SymValue]: boolean } = {}
+	local function hasConstructorForMt(sym: SymValue): boolean
+		if sym.kind ~= "table" or seen[sym] then
+			return false
+		end
+		seen[sym] = true
+		for _, f in (sym.fields or {}) :: { SymField } do
+			if f.value.kind == "function" then
+				local classLocal = parseMod.constructedClassLocal(f.value.fnNode)
+				local constructed = if classLocal ~= nil then ctx.env[classLocal] else nil
+				if constructed ~= nil and constructed.fields == mt.fields then
+					return true
+				end
+			elseif f.value.kind == "table" and hasConstructorForMt(f.value) then
+				return true
 			end
 		end
-		if proto ~= nil and proto.kind == "table" and proto.fields ~= result.fields then
-			for _, f in proto.fields :: { SymField } do
-				if surface.fieldOf(result, f.name) == nil then
-					setField(result, f.name, f)
-				end
+		return false
+	end
+	return hasConstructorForMt(result)
+end
+
+local function delegateMetatableFields(ctx: Ctx, result: SymValue, evalFactoryBody: (statements: any) -> SymValue?)
+	-- Delegate non-metamethod fields from `setmetatable(M, { __index = Proto })`
+	-- or a non-class `Proto.__index = Proto` prototype table when `Proto` is
+	-- another table or a local factory call (`local Registry = new()`).
+	local mt = result.metatable
+	if mt == nil or mt.kind ~= "table" then
+		return
+	end
+	local idxField = surface.fieldOf(mt, "__index")
+	local proto: SymValue? = if idxField ~= nil
+		then idxField.value
+		elseif mt.indexTarget ~= nil then mt.indexTarget
+		elseif mt.selfIndexing and not isOrphanClassProto(ctx, result, mt) then mt
+		else nil
+	if
+		proto ~= nil
+		and proto.kind == "opaque"
+		and proto.calleeValue ~= nil
+		and proto.calleeValue.kind == "function"
+	then
+		local body = proto.calleeValue.fnNode and proto.calleeValue.fnNode.body
+		if body ~= nil then
+			proto = evalFactoryBody(body.statements) or proto
+		end
+	end
+	if proto ~= nil and proto.kind == "table" and proto.fields ~= result.fields then
+		for _, f in proto.fields :: { SymField } do
+			if not surface.isMetamethod(f.name) and surface.fieldOf(result, f.name) == nil then
+				setField(result, f.name, table.clone(f))
 			end
 		end
 	end
+end
+
+local function synthesizeAnnotatedMounts(ctx: Ctx, result: SymValue)
 	-- Synthesize module mounts declared as `Key: typeof(require(...))` on the
 	-- returned table's type annotation (lazy `__index` module tables).
 	local ann = surface.unwrapTableType(result.annotation or result.castType, ctx.types)
-	if ann ~= nil then
-		for _, entry in ann.entries do
-			if
-				parseMod.isTypeProperty(entry)
-				and entry.key ~= nil
-				and surface.fieldOf(result, entry.key.text) == nil
-			then
-				local valType = parseMod.unwrapType(entry.value)
-				local reqSym = if valType ~= nil and valType.tag == "typeof"
-					then evalRequireExpr(ctx, valType.expression or valType.expr)
-					else nil
-				if reqSym ~= nil then
-					setField(result, entry.key.text, {
-						name = entry.key.text,
-						value = reqSym,
-						isColonMethod = false,
-						fieldDoc = comments.claim(ctx.claimIndex, entry.key.location.beginLine),
-						keySpan = entry.key.location,
-						defSpan = entry.location or entry.key.location,
-					})
-				end
+	if ann == nil then
+		return
+	end
+	for _, entry in ann.entries do
+		if parseMod.isTypeProperty(entry) and entry.key ~= nil and surface.fieldOf(result, entry.key.text) == nil then
+			local valType = parseMod.unwrapType(entry.value)
+			local reqSym = if valType ~= nil and valType.tag == "typeof"
+				then evalRequireExpr(ctx, valType.expression or valType.expr)
+				else nil
+			if reqSym ~= nil then
+				setField(result, entry.key.text, {
+					name = entry.key.text,
+					value = reqSym,
+					isColonMethod = false,
+					fieldDoc = comments.claim(ctx.claimIndex, entry.key.location.beginLine),
+					keySpan = entry.key.location,
+					defSpan = entry.location or entry.key.location,
+				})
 			end
 		end
 	end
+end
+
+local function postProcessResult(ctx: Ctx, result: SymValue, evalFactoryBody: (statements: any) -> SymValue?)
+	delegateMetatableFields(ctx, result, evalFactoryBody)
+	synthesizeAnnotatedMounts(ctx, result)
 end
 
 local function processBranchStatements(stat: any, processStatements: (stats: any, topLevel: boolean) -> ())
@@ -905,14 +966,33 @@ local function processBranchStatements(stat: any, processStatements: (stats: any
 	end
 end
 
-local function syncOrigin(sym: SymValue?)
-	if sym ~= nil and sym.kind == "table" and sym.origin ~= nil then
+local function syncOrigin(sym: SymValue?, seenOpt: { [SymValue]: boolean }?)
+	if sym == nil then
+		return
+	end
+	local seen = seenOpt or {}
+	if seen[sym] then
+		return
+	end
+	seen[sym] = true
+	if sym.guarded ~= nil then
+		syncOrigin(sym.guarded, seen)
+	end
+	if sym.kind ~= "table" then
+		return
+	end
+	if sym.origin ~= nil then
 		local orig = sym.origin
 		sym.metatable = sym.metatable or orig.metatable
 		sym.frozen = sym.frozen or orig.frozen
 		sym.selfIndexing = sym.selfIndexing or orig.selfIndexing
 		sym.indexTarget = sym.indexTarget or orig.indexTarget
 	end
+	for _, field in sym.fields or {} do
+		syncOrigin(field.value, seen)
+	end
+	syncOrigin(sym.metatable, seen)
+	syncOrigin(sym.indexTarget, seen)
 end
 
 local function ensureDeclRoot(ctx: Ctx, span: Span?): SymValue
@@ -930,9 +1010,10 @@ local function ensureDeclaredClass(ctx: Ctx, name: string, span: Span?, doc: Doc
 		local sym = newTable(span)
 		sym.selfIndexing = true
 		sym.defDoc = doc
-		info = { name = name, value = sym, secondaryDoc = nil }
-		ctx.declaredClassByName[name] = info
-		table.insert(ctx.declaredClasses, info)
+		local created: DeclaredClassInfo = { name = name, value = sym, secondaryDoc = nil }
+		ctx.declaredClassByName[name] = created
+		table.insert(ctx.declaredClasses, created)
+		return sym
 	else
 		if isClassBlock and span ~= nil then
 			info.value.span = span
@@ -951,76 +1032,138 @@ local function ensureDeclaredClass(ctx: Ctx, name: string, span: Span?, doc: Doc
 	return info.value
 end
 
+local function declaredEntryMeta(ctx: Ctx, entry: any): (DocBlock?, string?, boolean)
+	local headToken = entry.access or entry.key or entry.indexerOpen
+	local entryLine = if headToken ~= nil and headToken.location ~= nil then headToken.location.beginLine else nil
+	local entryDoc = if entryLine ~= nil then comments.claim(ctx.claimIndex, entryLine) else nil
+	local valEndLine = if entry.value ~= nil and entry.value.location ~= nil
+		then entry.value.location.endLine
+		else entryLine
+	local trailingDesc = if valEndLine ~= nil then comments.trailingText(ctx.trailingIndex, valEndLine) else nil
+	local isRead = entry.access ~= nil and entry.access.text == "read"
+	return entryDoc, trailingDesc, isRead
+end
+
+local function recordFnParamNames(fnNode: any, dest: { [string]: boolean })
+	for _, pair in (fnNode and fnNode.parameters) or {} do
+		local p = pair.node
+		if p ~= nil and p.name ~= nil and p.name.text ~= nil then
+			dest[p.name.text] = true
+		end
+	end
+end
+
+local function addDeclaredFn(
+	ctx: Ctx,
+	target: SymValue,
+	name: string,
+	fnNode: any,
+	doc: DocBlock?,
+	trailingDesc: string?,
+	keySpan: Span,
+	defSpan: Span,
+	isTableEntry: boolean?
+)
+	local existingIdx = (target.fieldIndex :: { [string]: number })[name]
+	local firstField = if existingIdx ~= nil then (target.fields :: { SymField })[existingIdx] else nil
+	if firstField ~= nil and firstField.value.kind == "function" then
+		local firstFn = firstField.value.fnNode
+		if firstFn ~= nil then
+			-- CST function nodes returned by `@std/syntax/parser` are frozen; clone
+			-- before attaching overload parameter sets.
+			if table.isfrozen(firstFn) then
+				firstFn = table.clone(firstFn)
+				firstField.value.fnNode = firstFn
+			end
+			if table.isfrozen(fnNode) then
+				fnNode = table.clone(fnNode)
+			end
+			local shared: { [string]: boolean } = firstFn.overloadParams or {}
+			if firstFn.overloadParams == nil then
+				recordFnParamNames(firstFn, shared)
+				firstFn.overloadParams = shared
+			end
+			if fnNode.overloadParams ~= nil and fnNode.overloadParams ~= shared then
+				for paramName in fnNode.overloadParams do
+					shared[paramName] = true
+				end
+			end
+			recordFnParamNames(fnNode, shared)
+			fnNode.overloadParams = shared
+			if doc == nil then
+				fnNode.isSecondaryOverload = true
+			end
+		end
+	end
+	local fnVal = newFunction(ctx, fnNode, doc, defSpan)
+	addDeclaredField(target, name, {
+		name = name,
+		value = fnVal,
+		isColonMethod = false,
+		fieldDoc = if isTableEntry then doc else nil,
+		defDoc = if isTableEntry then nil else doc,
+		trailingDesc = trailingDesc,
+		keySpan = keySpan,
+		defSpan = defSpan,
+		isDeclared = true,
+	})
+end
+
+local function addDeclaredFnOverloads(
+	ctx: Ctx,
+	target: SymValue,
+	fieldName: string,
+	fnTypes: { any },
+	doc: DocBlock?,
+	trailingDesc: string?,
+	keySpan: Span,
+	isTableEntry: boolean?
+)
+	local fnNodes: { any } = {}
+	local overloadParams: { [string]: boolean }? = if #fnTypes > 1 then {} else nil
+	for _, ft in fnTypes do
+		local fnNode = fnNodeFromType(ft)
+		table.insert(fnNodes, fnNode)
+		if overloadParams ~= nil then
+			recordFnParamNames(fnNode, overloadParams)
+		end
+	end
+	for i, fnNode in fnNodes do
+		fnNode.overloadParams = overloadParams
+		fnNode.isSecondaryOverload = i > 1
+		local defSpan = fnTypes[i].location or keySpan
+		addDeclaredFn(
+			ctx,
+			target,
+			fieldName,
+			fnNode,
+			doc,
+			if i == 1 then trailingDesc else nil,
+			keySpan,
+			defSpan,
+			isTableEntry
+		)
+	end
+end
+
 local function populateDeclaredTableType(ctx: Ctx, target: SymValue, tblType: any)
 	for _, entry in tblType.entries or {} do
-		local headToken = entry.access or entry.key or entry.indexerOpen
-		local entryLine = if headToken ~= nil and headToken.location ~= nil then headToken.location.beginLine else nil
-		local entryDoc = if entryLine ~= nil then comments.claim(ctx.claimIndex, entryLine) else nil
-		local valEndLine = if entry.value ~= nil and entry.value.location ~= nil
-			then entry.value.location.endLine
-			else entryLine
-		local trailingDesc = if valEndLine ~= nil then comments.trailingText(ctx.trailingIndex, valEndLine) else nil
-		local isRead = entry.access ~= nil and entry.access.text == "read"
-
+		local entryDoc, trailingDesc, isRead = declaredEntryMeta(ctx, entry)
 		if parseMod.isTypeProperty(entry) and entry.key ~= nil then
 			local fieldName = entry.key.text
 			local keySpan = entry.key.location
 			local fnTypes = collectFunctionTypes(entry.value)
 			if fnTypes ~= nil then
-				local overloadParams: { [string]: boolean }? = nil
-				if #fnTypes > 1 then
-					overloadParams = {}
-					for _, ft in fnTypes do
-						for j, pair in ft.parameters or {} do
-							local p = pair.node
-							if p ~= nil then
-								local pName = if p.name ~= nil then p.name.text else "arg" .. tostring(j);
-								(overloadParams :: { [string]: boolean })[pName] = true
-							end
-						end
-					end
-				end
-				for i, ft in fnTypes do
-					local fnNode = fnNodeFromType(ft)
-					fnNode.overloadParams = overloadParams
-					fnNode.isSecondaryOverload = i > 1
-					local fnVal = newFunction(ctx, fnNode, entryDoc, ft.location)
-					addDeclaredField(target, fieldName, {
-						name = fieldName,
-						value = fnVal,
-						isColonMethod = false,
-						fieldDoc = entryDoc,
-						trailingDesc = if i == 1 then trailingDesc else nil,
-						keySpan = keySpan,
-						defSpan = ft.location or keySpan,
-						isDeclared = true,
-					})
-				end
+				addDeclaredFnOverloads(ctx, target, fieldName, fnTypes, entryDoc, trailingDesc, keySpan, true)
 			else
-				addDeclaredProp(
-					target,
-					fieldName,
-					entry.value,
-					isRead,
-					entryDoc,
-					trailingDesc,
-					keySpan,
-					(entry.value and entry.value.location) or keySpan
-				)
+				local defSpan = (entry.value and entry.value.location) or keySpan
+				addDeclaredProp(target, fieldName, entry.value, isRead, entryDoc, trailingDesc, keySpan, defSpan)
 			end
-		elseif (entry.tag or entry.kind) == "indexer" and entry.key ~= nil then
+		elseif parseMod.isTypeIndexer(entry) and entry.key ~= nil then
 			local idxName = sliceIndexerKey(ctx.parsed, entry.key)
 			local span = entry.location or entry.key.location
-			addDeclaredProp(
-				target,
-				idxName,
-				entry.value,
-				isRead,
-				entryDoc,
-				trailingDesc,
-				span,
-				(entry.value and entry.value.location) or span
-			)
+			local defSpan = (entry.value and entry.value.location) or span
+			addDeclaredProp(target, idxName, entry.value, isRead, entryDoc, trailingDesc, span, defSpan)
 		end
 	end
 end
@@ -1040,28 +1183,42 @@ local function processDeclaredClassBlock(ctx: Ctx, stat: any, classMeta: { name:
 		local propMeta = decls and decls.classProps[innerLine]
 		local idxMeta = decls and decls.classIndexers[innerLine]
 		if inner.tag == "function" and methodMeta ~= nil then
-			local fnVal = newFunction(ctx, inner.func, innerDoc, inner.location)
-			addDeclaredField(classSym, methodMeta.name, {
-				name = methodMeta.name,
-				value = fnVal,
-				isColonMethod = false,
-				defDoc = innerDoc,
-				trailingDesc = trailingDesc,
-				keySpan = inner.location,
-				defSpan = inner.location,
-				isDeclared = true,
-			})
-		elseif inner.tag == "typealias" and propMeta ~= nil then
-			addDeclaredProp(
+			addDeclaredFn(
+				ctx,
 				classSym,
-				propMeta.name,
-				inner.type,
-				propMeta.readonly,
+				methodMeta.name,
+				inner.func,
 				innerDoc,
 				trailingDesc,
 				inner.location,
-				inner.location
+				inner.location,
+				false
 			)
+		elseif inner.tag == "typealias" and propMeta ~= nil then
+			local fnTypes = collectFunctionTypes(inner.type)
+			if fnTypes ~= nil then
+				addDeclaredFnOverloads(
+					ctx,
+					classSym,
+					propMeta.name,
+					fnTypes,
+					innerDoc,
+					trailingDesc,
+					inner.location,
+					false
+				)
+			else
+				addDeclaredProp(
+					classSym,
+					propMeta.name,
+					inner.type,
+					propMeta.readonly,
+					innerDoc,
+					trailingDesc,
+					inner.location,
+					inner.location
+				)
+			end
 		elseif inner.tag == "typealias" and idxMeta ~= nil then
 			local entry = inner.type and inner.type.entries and inner.type.entries[1]
 			if entry ~= nil and entry.key ~= nil then
@@ -1095,17 +1252,17 @@ local function processDeclaredTopLevel(ctx: Ctx, stat: any): boolean
 		return true
 	elseif tag == "localfunction" and fnMeta ~= nil then
 		local doc = comments.claim(ctx.claimIndex, parseMod.effectiveStartLine(stat))
-		local fnVal = newFunction(ctx, stat.func, doc, stat.location)
-		addDeclaredField(ensureDeclRoot(ctx, stat.location), fnMeta.name, {
-			name = fnMeta.name,
-			value = fnVal,
-			isColonMethod = false,
-			defDoc = doc,
-			trailingDesc = comments.trailingText(ctx.trailingIndex, stat.location.endLine),
-			keySpan = stat.location,
-			defSpan = stat.location,
-			isDeclared = true,
-		})
+		addDeclaredFn(
+			ctx,
+			ensureDeclRoot(ctx, stat.location),
+			fnMeta.name,
+			stat.func,
+			doc,
+			comments.trailingText(ctx.trailingIndex, stat.location.endLine),
+			stat.location,
+			stat.location,
+			false
+		)
 		return true
 	elseif tag == "local" and decls.globals[statLine] ~= nil then
 		local gMeta = decls.globals[statLine]
@@ -1117,23 +1274,37 @@ local function processDeclaredTopLevel(ctx: Ctx, stat: any): boolean
 			local classSym = ensureDeclaredClass(ctx, gMeta.name, stat.location, doc, false)
 			populateDeclaredTableType(ctx, classSym, unwrapped)
 		else
-			addDeclaredProp(
-				ensureDeclRoot(ctx, stat.location),
-				gMeta.name,
-				typeNode,
-				nil,
-				doc,
-				comments.trailingText(ctx.trailingIndex, stat.location.endLine),
-				stat.location,
-				stat.location
-			)
+			local fnTypes = collectFunctionTypes(typeNode)
+			if fnTypes ~= nil then
+				addDeclaredFnOverloads(
+					ctx,
+					ensureDeclRoot(ctx, stat.location),
+					gMeta.name,
+					fnTypes,
+					doc,
+					comments.trailingText(ctx.trailingIndex, stat.location.endLine),
+					stat.location,
+					false
+				)
+			else
+				addDeclaredProp(
+					ensureDeclRoot(ctx, stat.location),
+					gMeta.name,
+					typeNode,
+					nil,
+					doc,
+					comments.trailingText(ctx.trailingIndex, stat.location.endLine),
+					stat.location,
+					stat.location
+				)
+			end
 		end
 		return true
 	end
 	return false
 end
 
-local processStatements -- forward
+local processStatements: (ctx: Ctx, stats: any, topLevel: boolean) -> () -- forward
 
 local function processStatement(ctx: Ctx, stat: any, topLevel: boolean)
 	local tag = stat.tag
@@ -1156,10 +1327,11 @@ local function processStatement(ctx: Ctx, stat: any, topLevel: boolean)
 		processAssignStat(ctx, stat)
 	elseif tag == "typealias" or tag == "typefunction" then
 		local doc = comments.claim(ctx.claimIndex, parseMod.effectiveStartLine(stat))
+		local kind: "alias" | "typefunction" = if tag == "typealias" then "alias" else "typefunction"
 		table.insert(ctx.types, {
 			name = stat.name.text,
 			exported = stat.export ~= nil,
-			kind = if tag == "typealias" then "alias" else "typefunction",
+			kind = kind,
 			stat = stat,
 			doc = doc,
 		})
@@ -1170,7 +1342,7 @@ local function processStatement(ctx: Ctx, stat: any, topLevel: boolean)
 		local doc = if firstNode ~= nil and not isRebindExpr(firstNode)
 			then comments.claim(ctx.claimIndex, parseMod.effectiveStartLine(stat))
 			else nil
-		local res = if firstNode ~= nil
+		local res: SymValue = if firstNode ~= nil
 			then evalExpr(ctx, firstNode)
 			else { kind = "literal", valueKind = "nil", span = stat.location }
 		if doc ~= nil and res.defDoc == nil then
@@ -1214,9 +1386,10 @@ function surface.evaluate(
 	}
 
 	processStatements(ctx, parsed.cst.root.statements, true)
-	syncOrigin(ctx.result)
+	local synced: { [SymValue]: boolean } = {}
+	syncOrigin(ctx.result, synced)
 	for _, sym in ctx.env do
-		syncOrigin(sym)
+		syncOrigin(sym, synced)
 	end
 
 	if ctx.result ~= nil and ctx.result.kind == "table" then
@@ -1244,10 +1417,6 @@ function surface.evaluate(
 		firstStatLine = ctx.firstStatLine,
 		env = ctx.env,
 	}
-end
-
-function surface.isMetamethod(name: string): boolean
-	return name:sub(1, 2) == "__"
 end
 
 --- Checks for `function T.f(self: T, ...)`, the explicitly typed form of a

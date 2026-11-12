@@ -1,6 +1,7 @@
 local t = require("./harness")
-local parseMod = require("../parse")
-local comments = require("../comments")
+local util = require("../core/util")
+local parseMod = require("../core/parse")
+local comments = require("../core/comments")
 
 return function()
 	t.suite("comments: segmentation")
@@ -69,6 +70,12 @@ return function()
 	t.eq(blocks[1].doc, true, "--[[ block with --]] closer is doc")
 	t.eq(blocks[1].content, { "Module overview prose.", "More prose." }, "--]] closer stripped from content")
 
+	parsed = t.parse("--[[ Decorative closer. ----]]\nlocal function g2() end\nreturn g2")
+	blocks = comments.segment(parsed)
+	t.eq(blocks[1].content, { "Decorative closer." }, "all abutting trailing hyphens stripped before block closer")
+	t.eq(util.commentEnd("--[[]]x", 1), 7, "util.commentEnd starts closer scan past opening brackets")
+	t.eq(util.commentEnd("--[=[]=]x", 1), 9, "util.commentEnd handles = level brackets")
+
 	-- text on the opener line is not at the body's indentation: it must not
 	-- stop the tab-indented body from dedenting, or the `@param` below the
 	-- blank line reads as an indented code line
@@ -135,6 +142,9 @@ return function()
 		"	other = 2,",
 		"	block = 3, --[[ block trailer ]]",
 		"	blank = 4, --[[   ]]",
+		"	emptyLine = 5, --   ",
+		"	emptyDoc = 6, ---",
+		"	divider = 7, --------",
 		"}",
 		"return M",
 	}, "\n"))
@@ -143,6 +153,9 @@ return function()
 	t.eq(comments.trailingText(trailing, 3), nil, "no trailing comment")
 	t.eq(comments.trailingText(trailing, 4), "block trailer", "block-comment trailer text")
 	t.eq(comments.trailingText(trailing, 5), nil, "whitespace-only block trailer is no description")
+	t.eq(comments.trailingText(trailing, 6), nil, "whitespace-only line trailer is nil")
+	t.eq(comments.trailingText(trailing, 7), nil, "empty --- line trailer is nil")
+	t.eq(comments.trailingText(trailing, 8), nil, "---- divider line trailer is nil")
 
 	t.suite("comments: module doc")
 

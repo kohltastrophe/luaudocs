@@ -1,3 +1,4 @@
+--!strict
 --- Represents type displays as segment arrays of plain text interleaved with
 --- reference segments cut at CST `reference` node positions. Joined segment
 --- texts form the display directly, so nothing downstream tracks character
@@ -17,22 +18,57 @@ local comments = require("./comments")
 type Parsed = parseMod.Parsed
 type Span = parseMod.Span
 
---- Either a plain string or a reference candidate. `__name` and `__prefix` are
---- the resolution keys (`finalize` rewrites reference segments to `{ text, id? }`).
+--- Either a plain string or a reference segment. `__name` and `__prefix` are
+--- the resolution keys (`finalize` adds `id?` and `emit` strips `__`-prefixed keys).
 --- `__tag` marks tag-authored references, which receive extra resolution fallbacks.
 --- `__scope` overrides the module a reference resolves in for inferred return
 --- types written in the callee's file rather than the referencing member's file.
-export type Seg = string | { text: string, __name: string, __prefix: string?, __tag: boolean?, __scope: string? }
+export type Seg = string | {
+	text: string,
+	id: string?,
+	__name: string?,
+	__prefix: string?,
+	__tag: boolean?,
+	__scope: string?,
+}
+
+export type Generic = {
+	name: string,
+	isPack: boolean,
+	default: { Seg }?,
+}
 
 export type Field = {
 	name: string,
 	type: { Seg }?,
-	desc: string?,
+	doc: string?,
 	line: number?,
 	docInDisplay: boolean?,
 }
 
 export type LineFacts = { [string]: { line: number?, docInDisplay: boolean } }
+
+type RefSpan = {
+	name: string,
+	prefix: string?,
+	line: number,
+	column: number,
+	endLine: number,
+	endColumn: number,
+}
+
+type FieldScanState = {
+	parsed: Parsed,
+	typeSpan: Span,
+	claimIndex: { [number]: comments.DocBlock },
+	trailingIndex: comments.TrailingIndex,
+	generics: { [string]: boolean }?,
+	lineOf: { [number]: number },
+	fields: { Field },
+	facts: LineFacts,
+	ambiguous: { [string]: boolean },
+	usedLines: { [number]: boolean },
+}
 
 local segs = {}
 
@@ -45,7 +81,7 @@ function segs.ref(text: string, name: string, prefix: string?, tag: boolean?): S
 end
 
 function segs.text(list: { Seg }, from: number?): string
-	local parts = {}
+	local parts: { string } = {}
 	for i = from or 1, #list do
 		local seg = list[i]
 		table.insert(parts, if type(seg) == "string" then seg else seg.text)
@@ -53,25 +89,28 @@ function segs.text(list: { Seg }, from: number?): string
 	return table.concat(parts)
 end
 
---- A reference's location starts at its prefix, and its spelled text is
---- `prefix.name` rather than the full node span (which includes generic type arguments).
-local function collectRefs(typeNode: any): { { name: string, prefix: string?, line: number, column: number } }
-	local found = {}
+--- A reference's location starts at its prefix, and its head ends at `name`'s
+--- closing column rather than the full node span (which includes generic type arguments).
+local function collectRefs(typeNode: any): { RefSpan }
+	local found: { RefSpan } = {}
 	parseMod.walkNodes(typeNode, function(node)
 		if node.kind == "token" then
 			return false
 		end
 		if node.tag == "reference" and node.name ~= nil then
+			local nameLoc = node.name.location
 			table.insert(found, {
 				name = node.name.text,
 				prefix = if node.prefix ~= nil then node.prefix.text else nil,
 				line = node.location.beginLine,
 				column = node.location.beginColumn,
+				endLine = if nameLoc ~= nil then nameLoc.endLine else node.location.endLine,
+				endColumn = if nameLoc ~= nil then nameLoc.endColumn else node.location.endColumn,
 			})
 		end
 		return true
 	end)
-	table.sort(found, function(a, b)
+	table.sort(found, function(a: RefSpan, b: RefSpan): boolean
 		if a.line ~= b.line then
 			return a.line < b.line
 		end
@@ -81,11 +120,20 @@ local function collectRefs(typeNode: any): { { name: string, prefix: string?, li
 end
 
 --- Slices `typeNode` into per-line segment lists before any display transforms.
-local function cutLines(parsed: Parsed, typeNode: any, generics: { [string]: boolean }?): { { Seg } }
+--- Returns a second table marking line indices whose trailing newline fell inside
+--- a multi-line `Prefix . Name` reference so `joinLines` does not inject a synthetic break.
+local function cutLines(
+	parsed: Parsed,
+	typeNode: any,
+	generics: { [string]: boolean }?
+): ({ { Seg } }, { [number]: boolean })
 	local span = parseMod.typeSpan(typeNode) :: Span
 	local refs = collectRefs(typeNode)
 	local refIndex = 1
 	local out: { { Seg } } = {}
+	local midRef: { [number]: boolean } = {}
+	local pendingEndLine: number? = nil
+	local pendingEndCol = 0
 	for lineNo = span.beginLine, span.endLine do
 		local lineText = parsed.lines[lineNo] or ""
 		local startCol = if lineNo == span.beginLine then span.beginColumn else 1
@@ -93,30 +141,65 @@ local function cutLines(parsed: Parsed, typeNode: any, generics: { [string]: boo
 		local trimmed = lineText:sub(startCol, endCol)
 		local pieces: { Seg } = {}
 		local cursor = 1
+		local outIdx = lineNo - span.beginLine + 1
+		if pendingEndLine ~= nil then
+			if lineNo < pendingEndLine then
+				cursor = #trimmed + 1
+				midRef[outIdx] = true
+			else
+				cursor = math.max(1, pendingEndCol - startCol + 1)
+				pendingEndLine = nil
+				pendingEndCol = 0
+			end
+		end
 		while refIndex <= #refs and refs[refIndex].line == lineNo do
 			local ref = refs[refIndex]
 			refIndex += 1
 			local spelled = if ref.prefix ~= nil then ref.prefix .. "." .. ref.name else ref.name
 			local pos = ref.column - startCol + 1
-			if pos < cursor or pos + #spelled - 1 > #trimmed then
-				continue -- Outside the slice; leave as plain text.
+			if ref.endLine == lineNo then
+				local endPos = ref.endColumn - startCol + 1
+				if pos < cursor or endPos - 1 > #trimmed or endPos <= pos then
+					continue -- Outside the slice; leave as plain text.
+				end
+				if pos > cursor then
+					table.insert(pieces, trimmed:sub(cursor, pos - 1))
+				end
+				if ref.prefix == nil and generics ~= nil and generics[ref.name] then
+					table.insert(pieces, spelled)
+				else
+					table.insert(pieces, segs.ref(spelled, ref.name, ref.prefix))
+				end
+				cursor = endPos
+			elseif ref.endLine > lineNo then
+				if
+					pos < cursor
+					or pos > #trimmed
+					or ref.endLine > span.endLine
+					or (ref.endLine == span.endLine and ref.endColumn > span.endColumn)
+				then
+					continue
+				end
+				if pos > cursor then
+					table.insert(pieces, trimmed:sub(cursor, pos - 1))
+				end
+				if ref.prefix == nil and generics ~= nil and generics[ref.name] then
+					table.insert(pieces, spelled)
+				else
+					table.insert(pieces, segs.ref(spelled, ref.name, ref.prefix))
+				end
+				cursor = #trimmed + 1
+				pendingEndLine = ref.endLine
+				pendingEndCol = ref.endColumn
+				midRef[outIdx] = true
 			end
-			if pos > cursor then
-				table.insert(pieces, trimmed:sub(cursor, pos - 1))
-			end
-			if ref.prefix == nil and generics ~= nil and generics[ref.name] then
-				table.insert(pieces, spelled)
-			else
-				table.insert(pieces, segs.ref(spelled, ref.name, ref.prefix))
-			end
-			cursor = pos + #spelled
 		end
 		if cursor <= #trimmed then
 			table.insert(pieces, trimmed:sub(cursor))
 		end
 		table.insert(out, pieces)
 	end
-	return out
+	return out, midRef
 end
 
 --- Strips Luau comments while respecting quoted string literals and keeping a
@@ -127,13 +210,13 @@ local function stripComments(text: string): string
 	if text:find("--", 1, true) == nil then
 		return text
 	end
-	local kept = {}
+	local kept: { string } = {}
 	local runStart = 1
 	local i = 1
 	local n = #text
 	while i <= n do
 		local c = text:sub(i, i)
-		if c == '"' or c == "'" then
+		if c == '"' or c == "'" or c == "`" then
 			i = util.closingQuote(text, i) + 1
 		elseif c == "-" and text:sub(i + 1, i + 1) == "-" then
 			if i > runStart then
@@ -149,6 +232,37 @@ local function stripComments(text: string): string
 		table.insert(kept, text:sub(runStart, n))
 	end
 	return table.concat(kept)
+end
+
+--- Strips comments and collapses whitespace runs outside quoted string literals
+--- (`"..."`, `'...'`, `` `...` ``) so singleton string types keep exact spaces.
+local function cleanInline(seg: string): string
+	local text = stripComments(seg)
+	if text:find("[\"'`]") == nil then
+		return (text:gsub("%s+", " "))
+	end
+	local parts: { string } = {}
+	local n = #text
+	local cursor = 1
+	local i = 1
+	while i <= n do
+		local c = text:sub(i, i)
+		if c == '"' or c == "'" or c == "`" then
+			if i > cursor then
+				table.insert(parts, (text:sub(cursor, i - 1):gsub("%s+", " ")))
+			end
+			local closeAt = util.closingQuote(text, i)
+			table.insert(parts, text:sub(i, closeAt))
+			i = closeAt + 1
+			cursor = i
+		else
+			i += 1
+		end
+	end
+	if cursor <= n then
+		table.insert(parts, (text:sub(cursor, n):gsub("%s+", " ")))
+	end
+	return table.concat(parts)
 end
 
 --- Merges adjacent non-empty string segments so at most one string segment
@@ -174,11 +288,12 @@ function segs.canonical(list: { Seg }): { Seg }
 	return out
 end
 
---- Flattens per-line segment lists into a single list with `"\n"` between lines.
-local function joinLines(lines: { { Seg } }): { Seg }
+--- Flattens per-line segment lists into a single list with `"\n"` between lines
+--- unless the preceding line ended inside a multi-line qualified reference.
+local function joinLines(lines: { { Seg } }, midRef: { [number]: boolean }?): { Seg }
 	local flat: { Seg } = {}
 	for lineIndex, line in lines do
-		if lineIndex > 1 then
+		if lineIndex > 1 and (midRef == nil or not midRef[lineIndex - 1]) then
 			table.insert(flat, "\n")
 		end
 		for _, piece in line do
@@ -189,17 +304,18 @@ local function joinLines(lines: { { Seg } }): { Seg }
 end
 
 --- Produces a single-line segment display for inline signature positions, or `nil` when `typeNode` is absent.
-function segs.inline(parsed: Parsed, typeNode: any, generics: { [string]: boolean }?): { Seg }?
-	if typeNode == nil or typeNode.location == nil then
+function segs.inline(parsed: Parsed?, typeNode: any, generics: { [string]: boolean }?): { Seg }?
+	if parsed == nil or typeNode == nil or typeNode.location == nil then
 		return nil
 	end
 	-- Merge adjacent string pieces across line breaks before stripping comments
 	-- and collapsing whitespace so multi-line block comments and whitespace runs
 	-- are processed as contiguous strings.
-	local out: { Seg } = segs.canonical(joinLines(cutLines(parsed, typeNode, generics)))
+	local lines, midRef = cutLines(parsed, typeNode, generics)
+	local out: { Seg } = segs.canonical(joinLines(lines, midRef))
 	for i, seg in out do
 		if type(seg) == "string" then
-			out[i] = (stripComments(seg):gsub("%s+", " "))
+			out[i] = cleanInline(seg)
 		end
 	end
 	local first = out[1]
@@ -217,21 +333,36 @@ end
 --- blank lines (which would terminate `markdown-it`'s `html_block` downstream).
 --- The second return maps each source line number to its 1-based display line index.
 function segs.block(
-	parsed: Parsed,
+	parsed: Parsed?,
 	typeNode: any,
 	generics: { [string]: boolean }?,
 	declLine: number?
 ): ({ { Seg } }?, { [number]: number })
-	if typeNode == nil or typeNode.location == nil then
+	if parsed == nil or typeNode == nil or typeNode.location == nil then
 		return nil, {}
 	end
-	local lines = cutLines(parsed, typeNode, generics)
+	local rawLines, midRef = cutLines(parsed, typeNode, generics)
+	local lines: { { Seg } } = {}
+	local srcLines: { { number } } = {}
+	for k, rawLine in rawLines do
+		local srcLine = typeNode.location.beginLine + k - 1
+		if k > 1 and midRef[k - 1] then
+			local prev = lines[#lines]
+			for _, piece in rawLine do
+				table.insert(prev, piece)
+			end
+			table.insert(srcLines[#srcLines], srcLine)
+		else
+			table.insert(lines, rawLine)
+			table.insert(srcLines, { srcLine })
+		end
+	end
 	-- Line 1 starts mid-line (after `= `), so dedent only lines 2..N, and
 	-- never by more than the declaration line's own indentation. That strips
 	-- outer block indentation while preserving the one-level continuation indent
 	-- of a multi-line union or table type.
 	if #lines > 1 then
-		local texts = {}
+		local texts: { string } = {}
 		for i = 2, #lines do
 			table.insert(texts, segs.text(lines[i]))
 		end
@@ -262,7 +393,9 @@ function segs.block(
 		local text = segs.text(line)
 		if util.trim(text) ~= "" then
 			table.insert(out, segs.canonical(line))
-			lineOf[typeNode.location.beginLine + i - 1] = #out
+			for _, srcLine in srcLines[i] do
+				lineOf[srcLine] = #out
+			end
 		end
 	end
 	return out, lineOf
@@ -286,7 +419,7 @@ local function lexicalSegs(display: string): { Seg }
 	local n = #display
 	while i <= n do
 		local c = display:sub(i, i)
-		if c == '"' or c == "'" then
+		if c == '"' or c == "'" or c == "`" then
 			-- Quoted string literal types are never type references.
 			i = util.closingQuote(display, i) + 1
 		elseif c:match("[%a_]") ~= nil then
@@ -303,7 +436,7 @@ local function lexicalSegs(display: string): { Seg }
 					stop = e2
 				end
 			end
-			local after = display:match("^%s*:", (stop :: number) + 1)
+			local after = display:match("^%s*%??%s*:", (stop :: number) + 1)
 			if after == nil then
 				if start :: number > cursor then
 					table.insert(out, display:sub(cursor, (start :: number) - 1))
@@ -331,10 +464,12 @@ local function cloneForTag(list: { Seg }, generics: { [string]: boolean }?): { S
 	for _, seg in list do
 		if type(seg) == "string" then
 			table.insert(out, seg)
-		elseif seg.__prefix == nil and generics ~= nil and generics[seg.__name] then
+		elseif seg.__name ~= nil and seg.__prefix == nil and generics ~= nil and generics[seg.__name] then
 			table.insert(out, seg.text)
-		else
+		elseif seg.__name ~= nil then
 			table.insert(out, segs.ref(seg.text, seg.__name, seg.__prefix, true))
+		else
+			table.insert(out, { text = seg.text, id = seg.id })
 		end
 	end
 	return segs.canonical(out)
@@ -346,17 +481,19 @@ function segs.fromTag(display: string, generics: { [string]: boolean }?): { Seg 
 		local parsed = parseMod.parse("type _ = " .. display)
 		if parsed ~= nil then
 			local statements = parsed.cst.root.statements
-			local stat = if #statements == 1 then statements[1] else nil
+			local stat: any = if #statements == 1 then statements[1] else nil
 			if stat ~= nil and stat.tag == "typealias" and stat.type ~= nil then
 				-- Slice verbatim without inline whitespace collapsing so the
 				-- author's tag formatting is preserved.
-				cached = segs.canonical(joinLines(cutLines(parsed, stat.type, nil)))
+				local lines, midRef = cutLines(parsed, stat.type, nil)
+				cached = segs.canonical(joinLines(lines, midRef))
 			end
 		end
-		cached = cached or lexicalSegs(display)
-		tagCache[display] = cached :: { Seg }
+		local resolved = cached or lexicalSegs(display)
+		tagCache[display] = resolved
+		cached = resolved
 	end
-	return cloneForTag(cached :: { Seg }, generics)
+	return cloneForTag(cached, generics)
 end
 
 local function hasTrailingComment(
@@ -374,6 +511,81 @@ local function hasTrailingComment(
 		return false
 	end
 	return not (line == typeSpan.endLine and tr.span.beginColumn >= typeSpan.endColumn)
+end
+
+local function recordLineFact(state: FieldScanState, name: string, keyLine: number, inDisplay: boolean)
+	if state.ambiguous[name] then
+		return
+	end
+	if state.facts[name] ~= nil then
+		state.facts[name] = nil
+		state.ambiguous[name] = true
+		return
+	end
+	if state.usedLines[keyLine] then
+		return
+	end
+	state.usedLines[keyLine] = true
+	state.facts[name] = { line = state.lineOf[keyLine], docInDisplay = inDisplay }
+end
+
+local function entryKeyLine(entry: any): number?
+	return if entry ~= nil then entry.key.location.beginLine else nil
+end
+
+local function recordTableEntry(state: FieldScanState, propEntries: { any }, idx: number, own: boolean)
+	local entry = propEntries[idx]
+	local name = entry.key.text
+	local keyLine = entry.key.location.beginLine
+	local valLoc = if entry.value ~= nil then entry.value.location else nil
+	local endLine = if valLoc ~= nil then valLoc.endLine else keyLine
+	local hasTrailing = hasTrailingComment(
+		state.trailingIndex,
+		state.typeSpan,
+		endLine,
+		entryKeyLine(propEntries[idx - 1]),
+		entryKeyLine(propEntries[idx + 1])
+	)
+	if not own then
+		recordLineFact(state, name, keyLine, state.claimIndex[keyLine] ~= nil or hasTrailing)
+		return
+	end
+	local block = comments.claim(state.claimIndex, keyLine)
+	local doc = if block ~= nil
+		then util.joinDesc(block.content)
+		elseif hasTrailing then comments.trailingText(state.trailingIndex, endLine)
+		else nil
+	local inDisplay = block ~= nil or hasTrailing
+	table.insert(state.fields, {
+		name = name,
+		type = segs.inline(state.parsed, entry.value, state.generics),
+		doc = doc,
+		line = state.lineOf[keyLine],
+		docInDisplay = if inDisplay then true else nil,
+	})
+	recordLineFact(state, name, keyLine, inDisplay)
+end
+
+local function gatherTableFieldFacts(state: FieldScanState, rawNode: any, own: boolean)
+	local node = parseMod.unwrapType(rawNode)
+	if node == nil then
+		return
+	end
+	if node.tag == "table" and node.entries ~= nil then
+		local propEntries: { any } = {}
+		for _, entry in node.entries do
+			if parseMod.isTypeProperty(entry) and entry.key ~= nil then
+				table.insert(propEntries, entry)
+			end
+		end
+		for idx = 1, #propEntries do
+			recordTableEntry(state, propEntries, idx, own)
+		end
+	elseif (node.tag == "intersection" or node.tag == "union") and node.types ~= nil then
+		for _, pair in node.types do
+			gatherTableFieldFacts(state, pair.node, false)
+		end
+	end
 end
 
 --- Collects per-field docs and display-line facts for a table-type definition in two tiers:
@@ -402,88 +614,32 @@ function segs.fields(
 	end
 	local typeSpan = parseMod.typeSpan(typeNode) :: Span
 	local blockLines, lineOf = segs.block(parsed, typeNode, generics, declLine)
-	local fields: { Field } = {}
-	local ambiguous: { [string]: boolean } = {}
-	local usedLines: { [number]: boolean } = {}
-
-	local function fact(name: string, keyLine: number, inDisplay: boolean)
-		if ambiguous[name] then
-			return
-		end
-		if facts[name] ~= nil then
-			facts[name] = nil
-			ambiguous[name] = true
-			return
-		end
-		if usedLines[keyLine] then
-			return
-		end
-		usedLines[keyLine] = true
-		facts[name] = { line = lineOf[keyLine], docInDisplay = inDisplay }
-	end
-
-	local function gather(node: any, own: boolean)
-		node = parseMod.unwrapType(node)
-		if node == nil then
-			return
-		end
-		if node.tag == "table" and node.entries ~= nil then
-			local propEntries = {}
-			for _, entry in node.entries do
-				if parseMod.isTypeProperty(entry) and entry.key ~= nil then
-					table.insert(propEntries, entry)
-				end
-			end
-			for idx, entry in propEntries do
-				local name = entry.key.text
-				local keyLine = entry.key.location.beginLine
-				local endLine = if entry.value ~= nil and entry.value.location ~= nil
-					then entry.value.location.endLine
-					else keyLine
-				local prevEntry = propEntries[idx - 1]
-				local prevKeyLine = if prevEntry ~= nil then prevEntry.key.location.beginLine else nil
-				local nextEntry = propEntries[idx + 1]
-				local nextKeyLine = if nextEntry ~= nil then nextEntry.key.location.beginLine else nil
-				local hasTrailing = hasTrailingComment(trailingIndex, typeSpan, endLine, prevKeyLine, nextKeyLine)
-				if own then
-					local block = comments.claim(claimIndex, keyLine)
-					local inDisplay = block ~= nil or hasTrailing
-					table.insert(fields, {
-						name = name,
-						type = segs.inline(parsed, entry.value, generics),
-						desc = if block ~= nil
-							then util.joinDesc(block.content)
-							elseif hasTrailing then comments.trailingText(trailingIndex, endLine)
-							else nil,
-						line = lineOf[keyLine],
-						docInDisplay = if inDisplay then true else nil,
-					})
-					fact(name, keyLine, inDisplay)
-				else
-					fact(name, keyLine, claimIndex[keyLine] ~= nil or hasTrailing)
-				end
-			end
-		elseif (node.tag == "intersection" or node.tag == "union") and node.types ~= nil then
-			for _, pair in node.types do
-				gather(pair.node, false)
-			end
-		end
-	end
-	gather(typeNode, true)
-	return if #fields > 0 then fields else nil, facts, blockLines
+	local state: FieldScanState = {
+		parsed = parsed,
+		typeSpan = typeSpan,
+		claimIndex = claimIndex,
+		trailingIndex = trailingIndex,
+		generics = generics,
+		lineOf = lineOf,
+		fields = {},
+		facts = facts,
+		ambiguous = {},
+		usedLines = {},
+	}
+	gatherTableFieldFacts(state, typeNode, true)
+	return if #state.fields > 0 then state.fields else nil, facts, blockLines
 end
 
 --- Collects all generic parameter names first so a default type that references
 --- an earlier generic parameter (`<K, V = K>`) is demoted to plain text.
-function segs.generics(
-	parsed: Parsed,
-	genericsList: any,
-	packsList: any
-): ({ { name: string, isPack: boolean, default: { Seg }? } }, { [string]: boolean })
+function segs.generics(parsed: Parsed?, genericsList: any, packsList: any): ({ Generic }, { [string]: boolean })
 	local names: { [string]: boolean } = {}
 	local nodes: { { node: any, isPack: boolean } } = {}
 	local function addList(list: { { node: any } }?, isPack: boolean)
-		for _, pair in list or {} do
+		if list == nil then
+			return
+		end
+		for _, pair in list do
 			local node = pair.node
 			if node ~= nil and node.name ~= nil then
 				names[node.name.text] = true
@@ -493,7 +649,7 @@ function segs.generics(
 	end
 	addList(genericsList, false)
 	addList(packsList, true)
-	local out = {}
+	local out: { Generic } = {}
 	for _, entry in nodes do
 		table.insert(out, {
 			name = entry.node.name.text,
@@ -508,11 +664,11 @@ end
 --- list (including varargs) alongside each parameter's ending source line for
 --- trailing-comment lookup.
 function segs.paramEntries(
-	parsedFile: any,
+	parsedFile: Parsed?,
 	fnNode: any,
 	genericNames: { [string]: boolean }?
-): ({ any }, { [number]: number })
-	local params: { any } = {}
+): ({ { name: string, type: { Seg }?, doc: string? } }, { [number]: number })
+	local params: { { name: string, type: { Seg }?, doc: string? } } = {}
 	local paramLines: { [number]: number } = {}
 	local function add(name: string, annotation: any, fallback: any)
 		table.insert(params, { name = name, type = segs.inline(parsedFile, annotation, genericNames) })
@@ -521,10 +677,13 @@ function segs.paramEntries(
 			paramLines[#params] = span.endLine
 		end
 	end
-	for _, pair in fnNode.parameters or {} do
-		local p = pair.node
-		if p ~= nil and p.name ~= nil then
-			add(p.name.text, p.annotation, p.name)
+	local paramList: { { node: any } }? = fnNode.parameters
+	if paramList ~= nil then
+		for _, pair in paramList do
+			local p = pair.node
+			if p ~= nil and p.name ~= nil then
+				add(p.name.text, p.annotation, p.name)
+			end
 		end
 	end
 	if fnNode.vararg ~= nil then
@@ -554,7 +713,7 @@ end
 --- Builds the post-callee signature display (`<T>(x: T): T`) stored in the doc
 --- model's `segs` field. Reference segments are shared by identity with `generics`,
 --- `params`, and `returnTail`.
-function segs.signature(generics: { any }, params: { any }, returnTail: { Seg }?): { Seg }
+function segs.signature(generics: { Generic }, params: { any }, returnTail: { Seg }?): { Seg }
 	local sig: { Seg } = {}
 	local function pushType(list: { Seg })
 		table.move(list, 1, #list, #sig + 1, sig)

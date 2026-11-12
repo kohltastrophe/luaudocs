@@ -1,3 +1,4 @@
+--!strict
 --- Inspects source code for behavioral badge signals (`@yields`, `@readonly`,
 --- and realm tags) when a doc block does not state them explicitly. Functions
 --- are inspected via their AST body. Properties derive their realm from any
@@ -21,8 +22,6 @@ local inferMod = require("./infer")
 local parseMod = require("./parse")
 local surfaceMod = require("./surface")
 local tagsMod = require("./tags")
-
-type SymValue = surfaceMod.SymValue
 
 local detect = {}
 
@@ -168,10 +167,24 @@ local function resolveValue(world: any?, mod: any, ownerSym: any, selfDef: any, 
 end
 
 --- Resolves a call's callee expression to `(fnNode, ownerSym, module)` when
---- statically known. A table with a `__call` metamethod resolves to that
+--- statically known. Checks body-local helper functions (`localFns`) before
+--- module-level bindings, and unwraps tables with a `__call` metamethod to that
 --- metamethod with the table itself as `ownerSym`.
-local function resolveCallTarget(world: any?, mod: any, ownerSym: any, selfDef: any, funcExpr: any): (any, any, any)
+local function resolveCallTarget(
+	world: any?,
+	mod: any,
+	ownerSym: any,
+	selfDef: any,
+	localFns: { [any]: any }?,
+	funcExpr: any
+): (any, any, any)
 	funcExpr = parseMod.unwrapExpr(funcExpr, true)
+	if funcExpr ~= nil and funcExpr.tag == "local" and localFns ~= nil then
+		local localFn = localFns[funcExpr["local"]]
+		if localFn ~= nil then
+			return localFn, nil, mod
+		end
+	end
 	local value: any, valueMod: any, owner: any = nil, nil, nil
 	if funcExpr ~= nil and funcExpr.tag == "indexname" then
 		-- Resolve `base` once: it serves as both `owner` and the field lookup root.
@@ -248,9 +261,39 @@ type FnSummary = {
 	memberRealms: { MemberRealmSignal },
 	yieldCallees: { Callee },
 	realmCallees: { Callee },
+	localFns: { [any]: any },
+}
+
+type WalkState = {
+	world: any?,
+	visited: { [any]: { [any]: boolean } },
+	hitCycle: boolean,
+}
+
+local SKIP_AST_KEYS: { [any]: boolean } = {
+	location = true,
+	annotation = true,
+	returnAnnotation = true,
+	typeArguments = true,
+	generics = true,
+	genericPacks = true,
 }
 
 local summaryCache: { [any]: FnSummary } = weakTable()
+
+local function combineLocalFns(parent: { [any]: any }?, own: { [any]: any }): { [any]: any }?
+	if next(own) == nil then
+		return parent
+	end
+	if parent == nil then
+		return own
+	end
+	local merged = table.clone(parent)
+	for k, v in own do
+		merged[k] = v
+	end
+	return merged
+end
 
 local function mergeSubSummary(summary: FnSummary, sub: FnSummary, inClosure: boolean)
 	if not inClosure and sub.yields then
@@ -269,6 +312,9 @@ local function mergeSubSummary(summary: FnSummary, sub: FnSummary, inClosure: bo
 	end
 	for _, c in sub.realmCallees do
 		table.insert(summary.realmCallees, c)
+	end
+	for k, fn in sub.localFns do
+		summary.localFns[k] = fn
 	end
 end
 
@@ -304,9 +350,34 @@ local function recordNodeRealms(mod: any, summary: FnSummary, node: any)
 	end
 end
 
---- Walks `fnNode.body` once to collect direct yield/realm signals and callee
---- expressions, partitioning callees inside nested closures (which contribute to
---- `realm` but not `yields`).
+local function recordLocalVarFns(summary: FnSummary, stat: any)
+	local values = stat.values
+	if stat.variables == nil or values == nil then
+		return
+	end
+	for i, varPair in stat.variables do
+		local valPair = values[i]
+		local valExpr: any = if valPair ~= nil then parseMod.unwrapExpr(valPair.node, true) else nil
+		if varPair.node ~= nil and valExpr ~= nil and valExpr.tag == "function" then
+			summary.localFns[varPair.node] = valExpr
+		end
+	end
+end
+
+local function recordGetServiceRealm(summary: FnSummary, callNode: any)
+	local args = callNode.arguments
+	local first = if args ~= nil and args[1] ~= nil then args[1].node else nil
+	if first ~= nil and first.tag == "string" then
+		local svc = SERVICE_REALM[first.token.text]
+		if svc ~= nil then
+			summary.realms[svc] = true
+		end
+	end
+end
+
+--- Walks `fnNode.body` once to collect direct yield/realm signals, body-local
+--- helper functions, and callee expressions, partitioning callees inside nested
+--- closures (which contribute to `realm` but not `yields`).
 local function summarizeFn(mod: any, fnNode: any): FnSummary
 	local cached = summaryCache[fnNode]
 	if cached ~= nil then
@@ -318,11 +389,17 @@ local function summarizeFn(mod: any, fnNode: any): FnSummary
 		memberRealms = {},
 		yieldCallees = {},
 		realmCallees = {},
+		localFns = {},
 	}
 	if fnNode.body == nil then
 		summaryCache[fnNode] = summary
 		return summary
 	end
+
+	-- Inline closures passed directly as an IIFE callee or to `pcall`/`xpcall`
+	-- are summarized synchronously via `checkCall`; skip re-walking their AST
+	-- subtrees when `walkBody` iterates child fields of the enclosing call node.
+	local summarizedClosures: { [any]: boolean } = {}
 
 	local function checkCall(expr: any, path: string?, asValue: boolean?, inClosure: boolean)
 		expr = parseMod.unwrapExpr(expr, true)
@@ -330,6 +407,7 @@ local function summarizeFn(mod: any, fnNode: any): FnSummary
 			return
 		end
 		if expr.tag == "function" then
+			summarizedClosures[expr] = true
 			mergeSubSummary(summary, summarizeFn(mod, expr), inClosure)
 			return
 		end
@@ -349,27 +427,27 @@ local function summarizeFn(mod: any, fnNode: any): FnSummary
 	end
 
 	local function walkBody(node: any, inClosure: boolean)
-		if node.kind == "token" then
+		if node.kind == "token" or summarizedClosures[node] then
 			return
 		end
 		local tag = node.tag
 		if tag == "typealias" or tag == "typefunction" then
 			return
 		end
-		if tag == "function" or tag == "localfunction" then
+		if tag == "function" then
 			inClosure = true
+		elseif tag == "localfunction" then
+			if node.name ~= nil and node.func ~= nil then
+				summary.localFns[node.name] = node.func
+			end
+			inClosure = true
+		elseif tag == "local" and node.variables ~= nil then
+			recordLocalVarFns(summary, node)
 		elseif tag == "call" then
 			local func = node.func
 			local path = if func ~= nil then surfaceMod.calleePath(func) else nil
 			if path == "game:GetService" then
-				local args = node.arguments
-				local first = if args ~= nil and args[1] ~= nil then args[1].node else nil
-				if first ~= nil and first.tag == "string" then
-					local svc = SERVICE_REALM[first.token.text]
-					if svc ~= nil then
-						summary.realms[svc] = true
-					end
-				end
+				recordGetServiceRealm(summary, node)
 			end
 			checkCall(func, path, nil, inClosure)
 			checkCall(protectedCallee(node, path), nil, true, inClosure)
@@ -377,15 +455,7 @@ local function summarizeFn(mod: any, fnNode: any): FnSummary
 			recordNodeRealms(mod, summary, node)
 		end
 		for key, v in node do
-			if
-				key ~= "location"
-				and key ~= "annotation"
-				and key ~= "returnAnnotation"
-				and key ~= "typeArguments"
-				and key ~= "generics"
-				and key ~= "genericPacks"
-				and type(v) == "table"
-			then
+			if not SKIP_AST_KEYS[key] and type(v) == "table" then
 				walkBody(v, inClosure)
 			end
 		end
@@ -394,6 +464,50 @@ local function summarizeFn(mod: any, fnNode: any): FnSummary
 	walkBody(fnNode.body, false)
 	summaryCache[fnNode] = summary
 	return summary
+end
+
+local function visitFnYields(
+	state: WalkState,
+	curMod: any,
+	curFn: any,
+	curOwner: any,
+	outerLocalFns: { [any]: any }?
+): boolean
+	local hit = cacheGet(yieldCache, curFn, curOwner)
+	if hit ~= nil then
+		return hit
+	end
+	if cacheGet(state.visited, curFn, curOwner) then
+		state.hitCycle = true
+		return false
+	end
+	cachePut(state.visited, curFn, curOwner, true)
+
+	local summary = summarizeFn(curMod, curFn)
+	if summary.yields then
+		cachePut(yieldCache, curFn, curOwner, true)
+		return true
+	end
+	local selfDef = selfDefOf(curFn)
+	local localFns = combineLocalFns(outerLocalFns, summary.localFns)
+	for _, c in summary.yieldCallees do
+		local target, targetOwner, targetMod =
+			resolveCallTarget(state.world, curMod, curOwner, selfDef, localFns, c.expr)
+		if target ~= nil then
+			local nextLocals = if targetMod == curMod then localFns else nil
+			if visitFnYields(state, targetMod, target, targetOwner, nextLocals) then
+				cachePut(yieldCache, curFn, curOwner, true)
+				return true
+			end
+		elseif c.namedYield then
+			cachePut(yieldCache, curFn, curOwner, true)
+			return true
+		end
+	end
+	if not state.hitCycle then
+		cachePut(yieldCache, curFn, curOwner, false)
+	end
+	return false
 end
 
 --- Detects whether `fnNode` yields. `world` is the module graph (`nil` in
@@ -407,43 +521,8 @@ function detect.yields(world: any?, mod: any, fnNode: any, ownerSym: any): boole
 	if cached ~= nil then
 		return cached
 	end
-	local visited: { [any]: { [any]: boolean } } = {}
-	local hitCycle = false
-	local function visit(curMod: any, curFn: any, curOwner: any): boolean
-		local hit = cacheGet(yieldCache, curFn, curOwner)
-		if hit ~= nil then
-			return hit
-		end
-		if cacheGet(visited, curFn, curOwner) then
-			hitCycle = true
-			return false
-		end
-		cachePut(visited, curFn, curOwner, true)
-
-		local summary = summarizeFn(curMod, curFn)
-		if summary.yields then
-			cachePut(yieldCache, curFn, curOwner, true)
-			return true
-		end
-		local selfDef = selfDefOf(curFn)
-		for _, c in summary.yieldCallees do
-			local target, targetOwner, targetMod = resolveCallTarget(world, curMod, curOwner, selfDef, c.expr)
-			if target ~= nil then
-				if visit(targetMod, target, targetOwner) then
-					cachePut(yieldCache, curFn, curOwner, true)
-					return true
-				end
-			elseif c.namedYield then
-				cachePut(yieldCache, curFn, curOwner, true)
-				return true
-			end
-		end
-		if not hitCycle then
-			cachePut(yieldCache, curFn, curOwner, false)
-		end
-		return false
-	end
-	local ans = visit(mod, fnNode, ownerSym)
+	local state: WalkState = { world = world, visited = {}, hitCycle = false }
+	local ans = visitFnYields(state, mod, fnNode, ownerSym, nil)
 	cachePut(yieldCache, fnNode, ownerSym, ans)
 	return ans
 end
@@ -489,7 +568,13 @@ function detect.propRealm(value: any): { string }?
 		return nil
 	end
 	local found: { [string]: boolean } = {}
-	guardRealms(value.guard, found, 0)
+	local cur: any = value
+	local layer = 0
+	while cur ~= nil and cur.guard ~= nil and layer <= GUARD_DEPTH do
+		guardRealms(cur.guard, found, layer)
+		cur = cur.guarded
+		layer += 1
+	end
 	if found.server and found.client then
 		-- Guarded by both `IsServer` and `IsClient`: not locked to a single realm.
 		return nil
@@ -546,6 +631,89 @@ function detect.propReadonly(mod: any, ownerSym: any, name: string): boolean
 	return entry ~= nil and entry.access ~= nil and entry.access.text == "read"
 end
 
+local visitFnRealms: (
+	state: WalkState,
+	curMod: any,
+	curFn: any,
+	curOwner: any,
+	outerLocalFns: { [any]: any }?
+) -> { [string]: boolean }?
+
+local function collectDirectRealms(
+	world: any?,
+	curMod: any,
+	curOwner: any,
+	selfDef: any,
+	summary: FnSummary
+): { [string]: boolean }
+	local curRealms: { [string]: boolean } = {}
+	for r in summary.realms do
+		curRealms[r] = true
+	end
+	for _, mr in summary.memberRealms do
+		-- Skip engine member-realm attribution when the receiver resolves
+		-- to a project table (`self` or a local/required module table).
+		local base = resolveValue(world, curMod, curOwner, selfDef, mr.baseExpr)
+		if base == nil or base.kind ~= "table" then
+			curRealms[mr.realm] = true
+		end
+	end
+	return curRealms
+end
+
+local function collectCalleeRealms(
+	state: WalkState,
+	curMod: any,
+	curOwner: any,
+	selfDef: any,
+	localFns: { [any]: any }?,
+	summary: FnSummary,
+	curRealms: { [string]: boolean }
+)
+	for _, c in summary.realmCallees do
+		local target, targetOwner, targetMod =
+			resolveCallTarget(state.world, curMod, curOwner, selfDef, localFns, c.expr)
+		if target == nil then
+			continue
+		end
+		local nextLocals = if targetMod == curMod then localFns else nil
+		local subRealms = visitFnRealms(state, targetMod, target, targetOwner, nextLocals)
+		if subRealms ~= nil then
+			for r in subRealms do
+				curRealms[r] = true
+			end
+		end
+	end
+end
+
+visitFnRealms = function(
+	state: WalkState,
+	curMod: any,
+	curFn: any,
+	curOwner: any,
+	outerLocalFns: { [any]: any }?
+): { [string]: boolean }?
+	local hit = cacheGet(realmCache, curFn, curOwner)
+	if hit ~= nil then
+		return hit
+	end
+	if cacheGet(state.visited, curFn, curOwner) then
+		state.hitCycle = true
+		return nil
+	end
+	cachePut(state.visited, curFn, curOwner, true)
+
+	local summary = summarizeFn(curMod, curFn)
+	local selfDef = selfDefOf(curFn)
+	local localFns = combineLocalFns(outerLocalFns, summary.localFns)
+	local curRealms = collectDirectRealms(state.world, curMod, curOwner, selfDef, summary)
+	collectCalleeRealms(state, curMod, curOwner, selfDef, localFns, summary, curRealms)
+	if not state.hitCycle then
+		cachePut(realmCache, curFn, curOwner, curRealms)
+	end
+	return curRealms
+end
+
 --- Detects realm badges for `fnNode`, using the same parameters as `detect.yields`.
 function detect.realm(world: any?, mod: any, fnNode: any, ownerSym: any): { string }?
 	if mod == nil or mod.surface == nil or fnNode == nil then
@@ -553,50 +721,8 @@ function detect.realm(world: any?, mod: any, fnNode: any, ownerSym: any): { stri
 	end
 	local raw = cacheGet(realmCache, fnNode, ownerSym)
 	if raw == nil then
-		local visited: { [any]: { [any]: boolean } } = {}
-		local hitCycle = false
-		local function visit(curMod: any, curFn: any, curOwner: any): { [string]: boolean }?
-			local hit = cacheGet(realmCache, curFn, curOwner)
-			if hit ~= nil then
-				return hit
-			end
-			if cacheGet(visited, curFn, curOwner) then
-				hitCycle = true
-				return nil
-			end
-			cachePut(visited, curFn, curOwner, true)
-
-			local curRealms: { [string]: boolean } = {}
-			local summary = summarizeFn(curMod, curFn)
-			for r in summary.realms do
-				curRealms[r] = true
-			end
-			local selfDef = selfDefOf(curFn)
-			for _, mr in summary.memberRealms do
-				-- Skip engine member-realm attribution when the receiver resolves
-				-- to a project table (`self` or a local/required module table).
-				local base = resolveValue(world, curMod, curOwner, selfDef, mr.baseExpr)
-				if base == nil or base.kind ~= "table" then
-					curRealms[mr.realm] = true
-				end
-			end
-			for _, c in summary.realmCallees do
-				local target, targetOwner, targetMod = resolveCallTarget(world, curMod, curOwner, selfDef, c.expr)
-				if target ~= nil then
-					local subRealms = visit(targetMod, target, targetOwner)
-					if subRealms ~= nil then
-						for r in subRealms do
-							curRealms[r] = true
-						end
-					end
-				end
-			end
-			if not hitCycle then
-				cachePut(realmCache, curFn, curOwner, curRealms)
-			end
-			return curRealms
-		end
-		raw = visit(mod, fnNode, ownerSym) or {}
+		local state: WalkState = { world = world, visited = {}, hitCycle = false }
+		raw = visitFnRealms(state, mod, fnNode, ownerSym, nil) or {}
 		cachePut(realmCache, fnNode, ownerSym, raw)
 	end
 	-- Clone `raw` before clearing `server`/`client` so the cached set retains

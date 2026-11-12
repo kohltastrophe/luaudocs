@@ -2,8 +2,8 @@
 --- the checked-in captures are diffed in. The diagnostics collector is pinned
 --- here too: its list lands verbatim in the emitted JSON.
 local t = require("./harness")
-local emit = require("../emit")
-local util = require("../util")
+local emit = require("../core/emit")
+local util = require("../core/util")
 
 return function()
 	t.suite("emit: determinism")
@@ -65,10 +65,21 @@ return function()
 	t.suite("emit: numbers and scalars")
 
 	t.eq(emit.encode({ n = 42 }), '{"n":42}', "integers emit without a decimal point")
+	t.eq(emit.encode({ n = -0.0 }), '{"n":0}', "-0.0 normalizes to 0")
 	t.eq(emit.encode({ n = 1.5 }), '{"n":1.5}', "floats keep their fraction")
 	t.eq(emit.encode({ n = 0 / 0 }), '{"n":null}', "NaN is not valid JSON, so it emits null")
 	t.eq(emit.encode({ n = math.huge }), '{"n":null}', "infinity emits null")
 	t.eq(emit.encode({ true, false }), "[true,false]", "booleans")
+	t.eq(
+		emit.encode({ [0] = "z", [1] = "a", [3] = "b" }),
+		'{"0":"z","1":"a","3":"b"}',
+		"sparse or out-of-range numeric keys encode as valid JSON objects"
+	)
+	t.eq(
+		emit.encode({ [1] = "a", [1.5] = "b" }),
+		'{"1":"a","1.5":"b"}',
+		"fractional numeric keys encode as valid JSON objects"
+	)
 
 	t.suite("emit: pretty printing")
 

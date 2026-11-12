@@ -1,7 +1,8 @@
 local fs = require("@std/fs")
-local util = require("../util")
+local util = require("../core/util")
+local parseMod = require("../core/parse")
 local t = require("./harness")
-local surface = require("../surface")
+local surface = require("../core/surface")
 
 local eval = t.eval
 local field = surface.fieldOf
@@ -160,13 +161,83 @@ return function()
 
 	t.suite("surface: lazy require loaders, __index delegation, and typeof(require) mounts")
 
-	-- Lazy loader functions capture `returnedRequire` from a single `return require(...)` statement.
-	root = eval('local M = {}\nfunction M.server()\n\treturn require("@self/Server")\nend\nreturn M').result :: any
+	-- Lazy loader functions capture `returnedRequire` from a single `return require(...)` statement,
+	-- while dynamic `return require(param)` helpers stay plain functions without false require mounts.
+	root = eval(table.concat({
+		"local M = {}",
+		"function M.server()",
+		'\treturn require("@self/Server")',
+		"end",
+		"function M.load(mod)",
+		"\treturn require(mod)",
+		"end",
+		"M.bad = require(unknownTarget)",
+		"return M",
+	}, "\n")).result :: any
 	local loader = field(root, "server").value
+	local dynHelper = field(root, "load").value
+	local dynMount = field(root, "bad").value
+	t.eq({
+		loader.kind,
+		loader.returnedRequire and loader.returnedRequire.requireInfo,
+		dynHelper.kind,
+		dynHelper.returnedRequire,
+		dynMount.kind,
+		dynMount.requireInfo,
+	}, {
+		"function",
+		{ kind = "string", text = "@self/Server" },
+		"function",
+		nil,
+		"require",
+		{ kind = "dynamic" },
+	}, "returnedRequire ignores dynamic helper requires while top-level dynamic require stays a mount")
+
+	-- Non-`@class` `Proto.__index = Proto` delegates cloned fields, while `@class`-documented
+	-- self-indexing metatables and `setmetatable(t, nil)` do not.
+	local selfProtoEval = eval(table.concat({
+		"local Proto = { shared = 1 }",
+		"Proto.__index = Proto",
+		"function Proto.helper() end",
+		"return Proto",
+	}, "\n")).result :: any
+	local selfProtoMod = eval(table.concat({
+		"local Proto = { shared = 1 }",
+		"Proto.__index = Proto",
+		"function Proto.helper() end",
+		"return setmetatable({ own = 2 }, Proto)",
+	}, "\n")).result :: any
+	local classProtoMod = eval(table.concat({
+		"--- @class Singleton",
+		"local Class = { method = function() end }",
+		"Class.__index = Class",
+		"return setmetatable({ own = 2 }, Class)",
+	}, "\n")).result :: any
+	local clearedMt = eval(table.concat({
+		"local Proto = { shared = 1 }",
+		"Proto.__index = Proto",
+		"local M = setmetatable({ own = 2 }, Proto)",
+		"setmetatable(M, nil)",
+		"return M",
+	}, "\n")).result :: any
 	t.eq(
-		{ loader.kind, loader.returnedRequire and loader.returnedRequire.requireInfo },
-		{ "function", { kind = "string", text = "@self/Server" } },
-		"returnedRequire captured on lazy loader function"
+		{
+			fieldNames(selfProtoMod),
+			field(selfProtoMod, "shared") ~= field(selfProtoMod.metatable, "shared"),
+			fieldNames(selfProtoEval),
+			fieldNames(classProtoMod),
+			clearedMt.metatable,
+			fieldNames(clearedMt),
+		},
+		{
+			{ "own", "shared", "helper" },
+			true,
+			{ "shared", "helper" },
+			{ "own" },
+			nil,
+			{ "own" },
+		},
+		"Proto.__index = Proto delegates cloned fields when undocumented, skips @class metatables, and clears on setmetatable(M, nil)"
 	)
 
 	-- `__index` delegation copies fields from a prototype table or factory function call.
@@ -319,21 +390,42 @@ return function()
 
 	res = eval(table.concat({
 		"type Shape = { own: number }",
+		"type SubShape = { x: number }",
 		"local Proto = { shared = 1 }",
 		"local MT = { __index = Proto }",
-		"local raw = { own = 2 }",
+		"local sub = { x = 1 }",
+		"local raw = { own = 2, Sub = sub :: SubShape }",
 		"local M = raw :: Shape",
+		"raw.Self = M",
 		"raw.__index = raw",
 		"setmetatable(raw, MT)",
 		"table.freeze(raw)",
+		"table.freeze(sub)",
 		"return M",
 	}, "\n"))
 	root = res.result :: any
 	t.eq(
-		{ fieldNames(root), root.frozen, root.selfIndexing, root.metatable ~= nil },
-		{ { "own", "shared" }, true, true, true },
-		"mutations on raw table after type-cast rebind sync to M"
+		{ fieldNames(root), root.frozen, root.selfIndexing, root.metatable ~= nil, field(root, "Sub").value.frozen },
+		{ { "own", "Sub", "Self", "shared" }, true, true, true, true },
+		"mutations on raw and nested cast tables sync through cyclic references"
 	)
+
+	local sharedLeaf = { tag = "leaf" }
+	t.eq(
+		{ first = sharedLeaf, second = sharedLeaf },
+		{ first = { tag = "leaf" }, second = { tag = "leaf" } },
+		"harness deepEqual handles shared DAG subtrees"
+	)
+
+	local depPlain = t.parse('@[deprecated] local function f(reason: string) end -- reason = "spoof", use = "bad"')
+	local depSibling = t.parse('@[deprecated { reason = "real" }, native] local function g() end -- use = "spoof"')
+	t.eq({
+		parseMod.extractDeprecationAttr(depPlain, depPlain.cst.root.statements[1].func),
+		parseMod.extractDeprecationAttr(depSibling, depSibling.cst.root.statements[1].func),
+	}, {
+		{ note = nil },
+		{ note = "real" },
+	}, "extractDeprecationAttr clamps to attribute span without spoofing from params or trailing comments")
 
 	local fnRet = eval("--- Callable module doc.\nreturn function(x: number): number\n\treturn x\nend").result :: any
 	local tblRet = eval("--- Direct table return doc.\nreturn { a = 1 }").result :: any
@@ -497,4 +589,50 @@ return function()
 		},
 		".d.luau normalizer handles block comments, keyword names, multi-line generics/returns/indexers, unnamed/vararg fn types, and class-first doc merging"
 	)
+
+	local dluauCont = eval(table.concat({
+		"declare function unionRet(x: number)",
+		'\t: "a"',
+		'\t| "b"',
+		"declare ArrowFn: (a: number)",
+		"\t-> string",
+		"declare MultiFn: ((a: number) -> string)",
+		"\t& ((b: string) -> number)",
+		"declare Callbacks: {",
+		"\toptionalCb: ((x: number) -> ())?,",
+		"\tgroupedCb: ((x: number) -> ()),",
+		"}",
+		"declare class MultiClass",
+		"\t[",
+		"\t\tstring",
+		"\t]",
+		"\t\t: number",
+		"\t\t| boolean",
+		"\tfunction Add(self, x: number): MultiClass",
+		"\tfunction Add(self, v: MultiClass): MultiClass",
+		"\tMix: ((self: MultiClass, a: number) -> ()) & ((self: MultiClass, b: string) -> ())",
+		"end",
+	}, "\n"))
+	local contRoot = dluauCont.result :: any
+	local cbClass = dluauCont.declaredClasses[1]
+	local multiClass = dluauCont.declaredClasses[2]
+	local addFn = field(multiClass.value, "Add").value.fnNode
+	local mixFn = field(multiClass.value, "Mix").value.fnNode
+	t.eq({
+		fieldNames(contRoot),
+		field(cbClass.value, "optionalCb").value.kind,
+		field(cbClass.value, "optionalCb").declaredType ~= nil,
+		field(cbClass.value, "groupedCb").value.kind,
+		fieldNames(multiClass.value),
+		addFn.overloadParams,
+		mixFn.overloadParams,
+	}, {
+		{ "unionRet", "ArrowFn", "MultiFn", "MultiFn" },
+		"opaque",
+		true,
+		"function",
+		{ "[string]", "Add", "Add", "Mix", "Mix" },
+		{ self = true, x = true, v = true },
+		{ self = true, a = true, b = true },
+	}, ".d.luau leading continuations (|, &, ->, :), nullable grouped callbacks, and declare class method overloads")
 end

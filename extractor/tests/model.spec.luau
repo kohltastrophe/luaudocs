@@ -1,11 +1,11 @@
 local t = require("./harness")
-local util = require("../util")
-local graph = require("../graph")
-local surface = require("../surface")
-local tags = require("../tags")
-local segs = require("../segs")
+local util = require("../core/util")
+local graph = require("../core/graph")
+local surface = require("../core/surface")
+local tags = require("../core/tags")
+local segs = require("../core/segs")
 local model = require("../model")
-local emitMod = require("../emit")
+local emitMod = require("../core/emit")
 local members = require("../model/members")
 local finalize = require("../model/finalize")
 
@@ -135,7 +135,16 @@ return function()
 		members.callee("T", ".", "end"),
 		members.callee("T", ".", "continue"),
 		members.callee("State", ":", "Connect"),
-	}, { 'Fonts["12187368317"]', 'T["end"]', "T.continue", "State:Connect" }, "callee")
+		members.callee("Map", ".", "[string]"),
+		members.callee("T", ".", 'a\nb\rc\t"\\'),
+	}, {
+		'Fonts["12187368317"]',
+		'T["end"]',
+		"T.continue",
+		"State:Connect",
+		"Map[string]",
+		'T["a\\nb\\rc\\t\\"\\\\"]',
+	}, "callee")
 
 	local plain = tags.parse({})
 	local privateDoc = tags.parse({ "@private" })
@@ -364,7 +373,10 @@ return function()
 				"\tinit: () -> (),",
 				"}",
 				"export type Foo<T> = Sub.Foo<T>",
-				"export type Bar = Sub.Bar",
+				"export type Bar<T = string> = Sub.Bar<T>",
+				"export type MonoBar = Sub.Bar",
+				"export type EmptyFoo = Sub.Foo<{}>",
+				"export type MyFoo<U> = Sub.Foo<U>",
 				"export type MaybeFoo<T> = Sub.Foo<T>?",
 				"export type function Inspect(box: Sub.Foo<string>)",
 				"\treturn box",
@@ -424,27 +436,40 @@ return function()
 
 	local fooType = byName(mMod.types, "Foo")
 	local barType = byName(mMod.types, "Bar")
+	local monoBar = byName(mMod.types, "MonoBar")
+	local emptyFoo = byName(mMod.types, "EmptyFoo")
+	local myFoo = byName(mMod.types, "MyFoo")
 	local maybeFoo = byName(mMod.types, "MaybeFoo")
 	local inspectFn = byName(mMod.types, "Inspect")
-	t.eq({
-		fooType.doc,
-		t.blockText(fooType.definition),
-		fooType.fields,
-		barType.generics[1].name,
-		wireSegs(barType.generics[1].default),
-		wireSegs(maybeFoo.definition[1]),
-		wireSegs(inspectFn.params),
-		byName(mMod.members, "hidden"),
-	}, {
-		"A generic box.",
-		"{\n\t--- boxed value\n\tvalue: T,\n}",
-		{ { name = "value", type = { "T" }, doc = "boxed value", line = 3, docInDisplay = true } },
-		"T",
-		{ { text = "string" } },
-		{ { text = "Sub.Foo", id = "M.luau#type.Foo" }, "<T>?" },
-		{ "(", "box", ": ", { text = "Sub.Foo", id = "M.luau#type.Foo" }, "<", { text = "string" }, ">", ")" },
-		nil,
-	}, "expandRespelledTypes, composite Sub.Foo<T>?, type function params, and floating @ignore")
+	t.eq(
+		{
+			fooType.doc,
+			t.blockText(fooType.definition),
+			fooType.fields,
+			barType.generics[1].name,
+			wireSegs(barType.generics[1].default),
+			wireSegs(monoBar.definition[1]),
+			wireSegs(emptyFoo.definition[1]),
+			wireSegs(myFoo.definition[1]),
+			wireSegs(maybeFoo.definition[1]),
+			wireSegs(inspectFn.params),
+			byName(mMod.members, "hidden"),
+		},
+		{
+			"A generic box.",
+			"{\n\t--- boxed value\n\tvalue: T,\n}",
+			{ { name = "value", type = { "T" }, doc = "boxed value", line = 3, docInDisplay = true } },
+			"T",
+			{ { text = "string" } },
+			{ { text = "Sub.Bar", id = "M.luau#type.Bar" } },
+			{ { text = "Sub.Foo", id = "M.luau#type.Foo" }, "<{}>" },
+			{ { text = "Sub.Foo", id = "M.luau#type.Foo" }, "<U>" },
+			{ { text = "Sub.Foo", id = "M.luau#type.Foo" }, "<T>?" },
+			{ "(", "box", ": ", { text = "Sub.Foo", id = "M.luau#type.Foo" }, "<", { text = "string" }, ">", ")" },
+			nil,
+		},
+		"expandRespelledTypes, specialization/renamed-generic guards, composite Sub.Foo<T>?, type function params, and floating @ignore"
+	)
 
 	local lpProp = byName(mMod.members, "LocalPlayer")
 	t.eq(
@@ -803,16 +828,32 @@ return function()
 			id = "main.luau",
 			src = table.concat({
 				'local Sub = require("./Sub")',
+				'local Hop = require("./Hop")',
 				'local Mid = require("./Mid")',
 				"export type Opts1 = Sub.Options",
+				"--- @field count string -- wrapper override",
+				"--- @field wrapperOnly number -- wrapper addition",
 				"export type Opts2 = Sub.Options",
+				"--- @interface Manifest",
+				"export type Manifest = Sub.Manifest",
+				"export type Chain<T> = Hop.Chain<T>",
+				'export type QuoteBox = Sub.Box<">">',
 				"--- @interface RenamedBox",
 				"export type RawBox = { value: Mid.Item }",
 				"--- @ignore",
 				"type RenamedBox = string",
+				"--- @class Holder",
+				'local Holder = { ["do-work"] = function(self: any, x: number) return x end }',
+				"export type Holder<K> = typeof(setmetatable({}, Holder))",
 				"local M = {}",
 				"M.prefixedCall = Sub.makePrefixed()",
 				"M.packCall = Sub.makePack()",
+				"function M.viaAlias()",
+				'\treturn require("./Mid")',
+				"end",
+				'function M.makeHolder(): Holder<">">',
+				"\treturn nil :: any",
+				"end",
 				"return M",
 			}, "\n"),
 		},
@@ -828,6 +869,10 @@ return function()
 				"\t--- Count doc.",
 				"\tcount: number,",
 				"}",
+				"local rawManifest = { version = 1 }",
+				"--- @field version number -- schema version",
+				"export type Manifest = typeof(rawManifest)",
+				"export type Box<T> = { v: T }",
 				"local Sub = {}",
 				"function Sub.makePrefixed<T>(): T.Item",
 				"\treturn nil :: any",
@@ -836,6 +881,26 @@ return function()
 				"\treturn nil :: any",
 				"end",
 				"return Sub",
+			}, "\n"),
+		},
+		{
+			id = "Hop.luau",
+			surfaced = false,
+			src = table.concat({
+				'local Leaf = require("./Leaf")',
+				"--- @since 2.0.0",
+				"export type Chain<T> = Leaf.Chain<T>",
+				"return {}",
+			}, "\n"),
+		},
+		{
+			id = "Leaf.luau",
+			surfaced = false,
+			src = table.concat({
+				"--- Leaf chain doc.",
+				"--- @since 1.0.0",
+				"export type Chain<T> = { item: T }",
+				"return {}",
 			}, "\n"),
 		},
 		{
@@ -854,38 +919,80 @@ return function()
 	local regMain = byId(regDoc.modules, "main.luau")
 	local opts1 = byName(regMain.types, "Opts1")
 	local opts2 = byName(regMain.types, "Opts2")
+	local respelledManifest = byName(regMain.types, "Manifest")
+	local chainType = byName(regMain.types, "Chain")
+	local quoteBox = byName(regMain.types, "QuoteBox")
 	local renamedBox = byName(regMain.types, "RenamedBox")
-	t.eq({
-		#regDiag.list,
-		opts1.doc,
-		opts2.doc,
-		opts1.tags.since,
-		opts2.tags.since,
-		#opts1.fields,
-		#opts2.fields,
-		opts1.fields[1].doc,
-		opts2.fields[1].doc,
-		opts1.fields[2].name,
-		opts2.fields[2].name,
-		renamedBox.fields[1].type[1].id,
-		byName(regMain.members, "prefixedCall").type[1].id,
-		byName(regMain.members, "packCall").type,
-	}, {
-		0,
-		"Shared options doc.",
-		"Shared options doc.",
-		"1.2.0",
-		"1.2.0",
-		2,
-		2,
-		"Count doc.",
-		"Count doc.",
-		"extra",
-		"extra",
-		"Real.luau#type.Item",
-		"Real.luau#type.Item",
-		nil,
-	}, "multiple respelled aliases, passthrough typeIdIn, prefixed generic return, and genericPack return rejection")
+	local holderCls = byName(regMain.classes, "Holder")
+	local doWork = byName(holderCls.members, "do-work")
+	local viaAlias = byName(regMain.members, "viaAlias")
+	t.eq(
+		{
+			regDiag.list[1].code,
+			opts1.doc,
+			opts2.doc,
+			opts1.tags.since,
+			opts2.tags.since,
+			#opts1.fields,
+			#opts2.fields,
+			opts1.fields[1].doc,
+			opts2.fields[1].doc,
+			wireSegs(opts2.fields[1].type),
+			opts2.fields[1].line,
+			opts1.fields[2].name,
+			opts2.fields[2].name,
+			opts2.fields[3].name,
+			respelledManifest.kind,
+			respelledManifest.definition,
+			respelledManifest.fields[1].name,
+			chainType.doc,
+			chainType.tags.since,
+			chainType.fields[1].name,
+			t.blockText(quoteBox.definition),
+			renamedBox.fields[1].type[1].id,
+			byName(regMain.members, "prefixedCall").type[1].id,
+			byName(regMain.members, "packCall").type,
+			doWork.kind,
+			doWork.signature.callee,
+			doWork.signature.params[1].name,
+			segs.text(viaAlias.signature.segs),
+			wireSegs(viaAlias.signature.returns[1].type),
+			holderCls.constructors,
+		},
+		{
+			"unreached-types",
+			"Shared options doc.",
+			"Shared options doc.",
+			"1.2.0",
+			"1.2.0",
+			2,
+			3,
+			"Count doc.",
+			"wrapper override",
+			{ { text = "string" } },
+			3,
+			"extra",
+			"extra",
+			"wrapperOnly",
+			"interface",
+			nil,
+			"version",
+			"Leaf chain doc.",
+			"2.0.0",
+			"item",
+			'Sub.Box<">">',
+			"Real.luau#type.Item",
+			"Real.luau#type.Item",
+			nil,
+			"function",
+			'Holder["do-work"]',
+			"self",
+			"(): Real",
+			{ { text = "Real", id = "Real.luau" } },
+			{ "main.luau#fn.main.makeHolder" },
+		},
+		"multiple respelled aliases, wrapper @field merge, typeof @interface, multi-hop chains, quoted type args, non-ident self fn, and aliasOf returnedRequire"
+	)
 
 	local ownerDoc, ownerDiag = assembleInline({
 		{
@@ -1067,6 +1174,8 @@ return function()
 			id = "ambientEdge.d.luau",
 			src = table.concat({
 				"--- Companion Vec2 table doc.",
+				"--- @since 1.1.0",
+				"--- @tag math",
 				"declare Vec2: {",
 				"\tfromPolar: ((r: number, theta: number) -> Vec2) & ((r: number) -> Vec2),",
 				"}",
@@ -1074,6 +1183,12 @@ return function()
 				"--- Primary Vec2 class doc.",
 				"declare class Vec2",
 				"\tread [string]: number",
+				"end",
+				"",
+				"--- @ignore",
+				"declare IgnoredByCompanion: { x: number }",
+				"declare class IgnoredByCompanion",
+				"\tY: number",
 				"end",
 				"",
 				"--- @ignore",
@@ -1118,7 +1233,10 @@ return function()
 	t.eq(
 		{
 			byName(edgeMod.classes, "HiddenClass"),
+			byName(edgeMod.classes, "IgnoredByCompanion"),
 			vec2Cls.doc,
+			vec2Cls.tags.since,
+			vec2Cls.tags.custom,
 			byName(vec2Cls.members, "Unit") ~= nil,
 			byName(vec2Cls.members, "Unit").doc,
 			byName(edgeMod.members, "bareDep").tags.deprecated,
@@ -1129,7 +1247,10 @@ return function()
 		},
 		{
 			nil,
+			nil,
 			"Primary Vec2 class doc.\n\nCompanion Vec2 table doc.",
+			"1.1.0",
+			{ "math" },
 			true,
 			"Normalized copy.",
 			{ __record = true },
@@ -1146,5 +1267,87 @@ return function()
 			},
 		},
 		".d.luau model merges companion docs, honors @ignore, moves sidecar declared class members, parses @deprecated attribute variants, and formats undocumented indexers without duplicate overload warnings"
+	)
+
+	local regDoc, regDiag = assembleInline({
+		{
+			id = "proto.luau",
+			src = table.concat({
+				"--- Shared prototype.",
+				"local Proto = { shared = 1 }",
+				"Proto.__index = Proto",
+				"--- Calls module.",
+				"function Proto:__call() end",
+				"function Proto.helper() end",
+				"return setmetatable({ own = 2 }, Proto)",
+			}, "\n"),
+		},
+		{
+			id = "orphan.luau",
+			src = table.concat({
+				"local Widget = {}",
+				"Widget.__index = Widget",
+				"function Widget:spin() end",
+				"local M = {}",
+				"function M.new()",
+				"\treturn setmetatable({}, Widget)",
+				"end",
+				"return setmetatable(M, Widget)",
+			}, "\n"),
+		},
+		{
+			id = "sub.luau",
+			surfaced = false,
+			src = "export type Default = string\nexport type Bar<T = Default> = { v: T }\nreturn {}",
+		},
+		{
+			id = "wrap.luau",
+			src = 'local Sub = require("./sub")\nexport type Default = Sub.Default\nexport type Bar<T> = Sub.Bar<T>\nreturn {}',
+		},
+		{
+			id = "mix.d.luau",
+			src = table.concat({
+				"declare class Multi",
+				"\t--- Mixed overload.",
+				"\t--- @param a number",
+				"\t--- @param b string",
+				"\t--- @param c boolean",
+				"\tfunction Mix(self, c: boolean): ()",
+				"\tMix: ((self: Multi, a: number) -> ()) & ((self: Multi, b: string) -> ())",
+				"end",
+			}, "\n"),
+		},
+	})
+	local protoMod = byId(regDoc.modules, "proto.luau")
+	local callCount = 0
+	for _, m in protoMod.members do
+		if m.name == "__call" then
+			callCount += 1
+		end
+	end
+	local orphanMod = byId(regDoc.modules, "orphan.luau")
+	local wrapBar = byName(byId(regDoc.modules, "wrap.luau").types, "Bar")
+	t.eq(
+		{
+			byName(protoMod.members, "shared") ~= nil,
+			byName(protoMod.members, "helper") ~= nil,
+			callCount,
+			#orphanMod.classes,
+			orphanMod.classes[1].name,
+			byName(orphanMod.members, "spin"),
+			wireSegs(wrapBar.generics[1].default),
+			regDiag.list,
+		},
+		{
+			true,
+			true,
+			1,
+			1,
+			"Widget",
+			nil,
+			{ { text = "Default", id = "wrap.luau#type.Default" } },
+			{},
+		},
+		"prototype delegation skips metamethods/orphan classes, respelling inherits target generic defaults, and declare+intersection overloads merge param sets"
 	)
 end

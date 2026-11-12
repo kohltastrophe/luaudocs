@@ -1,3 +1,5 @@
+--!strict
+
 --- Parses Moonwave-compatible tags from doc-block content lines.
 ---
 --- A line is a tag line if it matches `@word ...` for one of the 24 known
@@ -116,7 +118,7 @@ local tags = {}
 
 --- Returns the active realm flags from `flags` in canonical badge order, or `nil` when none are set.
 function tags.realmList(flags: { [string]: boolean }): { string }?
-	local realm = {}
+	local realm: { string } = {}
 	for _, flag in REALM_FLAGS do
 		if flags[flag] then
 			table.insert(realm, flag)
@@ -233,6 +235,20 @@ local function collectEntries(content: { string }, report: ReportFn): (string, {
 			continue
 		end
 
+		-- `.fieldName Type -- desc` inside an `@interface` block may be indented
+		-- by 4+ spaces or a tab after a blank line in Moonwave style, so match it
+		-- before CommonMark indented-code detection.
+		if sawInterface then
+			local fieldArg = line:match("^%s*%.([%w_]+.*)$")
+			if fieldArg ~= nil then
+				inIndentedCode = false
+				local entry: Entry = { name = "field", arg = fieldArg, descLines = {}, lineOffset = i }
+				current = entry
+				table.insert(entries, entry)
+				continue
+			end
+		end
+
 		local codeIndent = not blank and (#indent >= 4 or indent:find("\t", 1, true) ~= nil)
 		if inIndentedCode then
 			if blank or codeIndent then
@@ -266,16 +282,6 @@ local function collectEntries(content: { string }, report: ReportFn): (string, {
 			continue
 		end
 
-		-- `.fieldName Type -- desc` inside an `@interface` block.
-		if sawInterface then
-			local fieldArg = line:match("^%s*%.([%w_]+.*)$")
-			if fieldArg ~= nil then
-				current = { name = "field", arg = fieldArg, descLines = {}, lineOffset = i }
-				table.insert(entries, current :: Entry)
-				continue
-			end
-		end
-
 		sink(line)
 	end
 
@@ -288,7 +294,7 @@ local function applyPlacingEntry(doc: ParsedDoc, entry: Entry, kind: PlacingKind
 	if kind == "method" or kind == "function" then
 		-- `Class:method` is the colon-accessor spelling of a qualified name.
 		local qualifier, colonName, colonRest = arg:match("^([%w_%.]+):([%w_]+)%s*(.*)$")
-		if qualifier ~= nil then
+		if qualifier ~= nil and colonName ~= nil then
 			declName = qualifier .. "." .. colonName
 			rest = colonRest
 		end
@@ -300,11 +306,12 @@ local function applyPlacingEntry(doc: ParsedDoc, entry: Entry, kind: PlacingKind
 		report("malformed-tag", "@" .. kind .. " requires a name", entry.lineOffset)
 		return
 	end
-	local memberName = declName
+	local resolvedDecl: string = declName
+	local memberName = resolvedDecl
 	local qualifiedWithin: string? = nil
 	-- `@class` keeps dotted names intact; member placing tags split `Class.name`.
 	if kind ~= "class" then
-		local short, within = splitQualified(declName)
+		local short, within = splitQualified(resolvedDecl)
 		memberName = short
 		qualifiedWithin = within
 	end
@@ -321,7 +328,7 @@ local function applyPlacingEntry(doc: ParsedDoc, entry: Entry, kind: PlacingKind
 		doc.within = doc.within or qualifiedWithin
 	end
 	if kind == "prop" or kind == "type" then
-		local typeStr, desc = splitTypeDesc(rest :: string)
+		local typeStr, desc = splitTypeDesc(rest or "")
 		doc.placingType = typeStr
 		doc.placingDesc = mergeDesc(desc, entry)
 	end
@@ -350,9 +357,10 @@ local function applyEntry(doc: ParsedDoc, entry: Entry, report: ReportFn)
 		local entryName, typeStr, desc = parseNamedEntry(entry)
 		if entryName == nil then
 			report("malformed-tag", "@" .. name .. " requires a name", entry.lineOffset)
+		elseif name == "field" then
+			table.insert(doc.fields, { name = entryName, type = typeStr, desc = desc })
 		else
-			local list = if name == "field" then doc.fields else doc.params
-			table.insert(list, { name = entryName, type = typeStr, desc = desc })
+			table.insert(doc.params, { name = entryName, type = typeStr, desc = desc })
 		end
 	elseif name == "return" then
 		local typeStr, desc = splitTypeDesc(arg)
@@ -361,12 +369,12 @@ local function applyEntry(doc: ParsedDoc, entry: Entry, report: ReportFn)
 		local typeStr, desc = splitTypeDesc(arg)
 		table.insert(doc.errors, { type = typeStr or "unknown", desc = mergeDesc(desc, entry) })
 	elseif name == "deprecated" then
-		local version = arg:match("^([^%s]+)")
-		-- `@deprecated -- note` starts with the separator: no version string.
-		if version ~= nil and version:sub(1, 1) == "-" then
+		local head, desc = splitTypeDesc(arg)
+		local version: string? = head
+		if head ~= nil and head:find("%s") ~= nil then
 			version = nil
+			desc = util.trim(arg)
 		end
-		local _, desc = splitTypeDesc(arg)
 		doc.deprecated = { version = version, desc = mergeDesc(desc, entry) }
 	elseif name == "since" then
 		doc.since = if arg ~= "" then arg else nil

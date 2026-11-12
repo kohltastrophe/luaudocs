@@ -1,5 +1,5 @@
 local t = require("./harness")
-local segs = require("../segs")
+local segs = require("../core/segs")
 
 local function typeAlias(src: string)
 	local parsed, claimIndex, trailingIndex = t.parseWithComments(src)
@@ -37,9 +37,24 @@ return function()
 		{ ref("Map", "Map"), "<", ref("Widget", "Widget"), ", ", ref("A.B", "B", "A"), ">" },
 		"generic head, args, and prefixed ref"
 	)
+	t.eq(
+		inline("Foo . Bar<Baz>"),
+		{ ref("Foo.Bar", "Bar", "Foo"), "<", ref("Baz", "Baz"), ">" },
+		"spaced qualified ref advances by CST token span"
+	)
+	t.eq(
+		inline("{ a: Foo\n\t.Bar<Baz> }"),
+		{ "{ a: ", ref("Foo.Bar", "Bar", "Foo"), "<", ref("Baz", "Baz"), "> }" },
+		"multi-line qualified ref collapses without synthetic break"
+	)
 	t.eq(inline("Foo |\n\t-- legacy\n\tBar"), { ref("Foo", "Foo"), " | ", ref("Bar", "Bar") }, "line comment stripped")
 	t.eq(segs.text(inline("{ a: --[[ first\n\tline ]] number }")), "{ a: number }", "block comment stripped")
 	t.eq(segs.text(inline('"a--b" | Foo')), '"a--b" | Foo', "-- inside string literal preserved")
+	t.eq(
+		segs.text(inline("\"a   b\"   |   'c   d'   |   typeof(`e   f`)")),
+		"\"a   b\" | 'c   d' | typeof(`e   f`)",
+		"internal spaces in string literal singleton types preserved"
+	)
 	t.eq(inline("(T) -> T", { T = true }), { "(T) -> T" }, "generics in scope demoted to plain text")
 
 	t.suite("segs: block")
@@ -68,6 +83,11 @@ return function()
 	t.eq(segs.fromTag("number[]"), { tagRef("number", "number"), "[]" }, "lexical fallback on shorthand")
 	t.eq(segs.fromTag("fn: Callback"), { "fn: ", tagRef("Callback", "Callback") }, "lexical skips field key")
 	t.eq(
+		segs.fromTag("{ fn?: Callback[] }"),
+		{ "{ fn?: ", tagRef("Callback", "Callback"), "[] }" },
+		"lexical skips optional field key"
+	)
+	t.eq(
 		segs.fromTag('"a" | Foo.Bar[]'),
 		{ '"a" | ', tagRef("Foo.Bar", "Bar", "Foo"), "[]" },
 		"lexical quotes and dotted refs"
@@ -83,8 +103,8 @@ return function()
 	local fields7 =
 		select(1, fieldsOf("{\n\t--- lead doc\n\ta: string,\n\tb: number, -- trail doc\n\tc: boolean,\n}")) :: any
 	t.eq(fields7, {
-		{ name = "a", type = { ref("string", "string") }, desc = "lead doc", line = 3, docInDisplay = true },
-		{ name = "b", type = { ref("number", "number") }, desc = "trail doc", line = 4, docInDisplay = true },
+		{ name = "a", type = { ref("string", "string") }, doc = "lead doc", line = 3, docInDisplay = true },
+		{ name = "b", type = { ref("number", "number") }, doc = "trail doc", line = 4, docInDisplay = true },
 		{ name = "c", type = { ref("boolean", "boolean") }, line = 5 },
 	}, "direct table fields claim leading/trailing docs")
 
@@ -101,7 +121,7 @@ return function()
 	local ownOpt = select(1, fieldsOf("{\n\t--- lead doc\n\ta: string,\n}?")) :: any
 	t.eq(
 		ownOpt,
-		{ { name = "a", type = { ref("string", "string") }, desc = "lead doc", line = 3, docInDisplay = true } },
+		{ { name = "a", type = { ref("string", "string") }, doc = "lead doc", line = 3, docInDisplay = true } },
 		"optional table type unwraps and yields own fields"
 	)
 
@@ -115,7 +135,7 @@ return function()
 		{
 			name = "fn",
 			type = { "( x: ", ref("number", "number"), " ) -> ()" },
-			desc = "multi-line trailing doc",
+			doc = "multi-line trailing doc",
 			line = 2,
 			docInDisplay = true,
 		},
@@ -138,4 +158,15 @@ return function()
 	local fnGenerics, fnNames = segs.generics(parsedFn, fnNode.generics, fnNode.genericPacks)
 	local fnParams = segs.paramEntries(parsedFn, fnNode, fnNames)
 	t.eq(segs.text(segs.signature(fnGenerics, fnParams, nil)), "<T...>(...: T...)", "vararg pack signature")
+
+	local parsedBlock = t.parse("do\n\texport type T = {\n\t\ta: Foo\n\t\t\t.Bar<Baz>,\n\t}\nend")
+	local innerStat = parsedBlock.cst.root.statements[1].body.statements[1]
+	local blockLines, blockLineOf = segs.block(parsedBlock, innerStat.type, nil, innerStat.location.beginLine)
+	t.eq({
+		segs.text((blockLines :: any)[1]),
+		segs.text((blockLines :: any)[2]),
+		segs.text((blockLines :: any)[3]),
+		blockLineOf[3],
+		blockLineOf[4],
+	}, { "{", "\ta: Foo.Bar<Baz>,", "}", 2, 2 }, "segs.block merges multi-line qualified references before dedentation")
 end

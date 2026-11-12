@@ -1,8 +1,8 @@
 local t = require("./harness")
-local util = require("../util")
-local detect = require("../detect")
+local util = require("../core/util")
+local detect = require("../core/detect")
 local model = require("../model")
-local surface = require("../surface")
+local surface = require("../core/surface")
 
 local eval = t.eval
 
@@ -40,7 +40,7 @@ return function()
 		detected(res, "grab").yields,
 	}, { true, true, true, false, true, true, false }, "direct calls and method names")
 
-	local engineLists = require("../engine").lists
+	local engineLists = require("../core/engine").lists
 	if engineLists ~= nil then
 		local yieldName: string? = nil
 		for name in engineLists.yieldingMethods do
@@ -119,6 +119,14 @@ return function()
 		"function M.retry() return xpcall(slow, warn) end",
 		"function M.go() runner() end",
 		"function M.guard() task.spawn(slow) end",
+		"function M.inlinePcall(remote) return pcall(function() task.wait(); remote:FireServer() end) end",
+		"function M.iife(remote) return (function() task.wait(); remote:FireAllClients() end)() end",
+		"function M.bodyHelper(remote)",
+		"\tlocal function inner() task.wait(); remote:FireAllClients() end",
+		"\tlocal function outer() inner() end",
+		"\touter()",
+		"end",
+		"function M.varHelper() local step = function() task.wait() end; step() end",
 		"return M",
 	}, "\n"))
 	t.eq({
@@ -126,7 +134,20 @@ return function()
 		detected(res, "retry").yields,
 		detected(res, "go").yields,
 		detected(res, "guard").yields,
-	}, { true, true, true, false }, "pcall, xpcall, and __call vs task.spawn")
+		detected(res, "inlinePcall"),
+		detected(res, "iife"),
+		detected(res, "bodyHelper"),
+		detected(res, "varHelper").yields,
+	}, {
+		true,
+		true,
+		true,
+		false,
+		{ yields = true, realm = { "client" } },
+		{ yields = true, realm = { "server" } },
+		{ yields = true, realm = { "server" } },
+		true,
+	}, "pcall, xpcall, inline closures, IIFEs, body-local helpers, and __call vs task.spawn")
 
 	t.suite("detect: realm from remotes, services, LocalPlayer, plugin, and instantiation")
 
@@ -187,10 +208,13 @@ return function()
 		'\tTools = Server and Server:WaitForChild("Tools"),',
 		"\tUI = Run:IsClient() and script.UI,",
 		"\tStrictUI = if Run:IsClient() then script.UI else nil,",
-		'\tplain = script:WaitForChild("Plain"),',
+		"\tplain = script:WaitForChild(" .. '"Plain"' .. "),",
 		'\tisPrivate = Run:IsServer() and game.PrivateServerId ~= "",',
 		"\tinStudio = Run:IsServer() and Run:IsStudio(),",
 		"\tboth = Run:IsServer() and Run:IsClient() and script.Odd,",
+		"\tnestedServer = flag and (Run:IsServer() and script.Server),",
+		"\tnestedIfServer = if flag then (if Run:IsServer() then script.Server else nil) else nil,",
+		"\tnestedBoth = if Run:IsServer() then (if Run:IsClient() then script.Odd else nil) else nil,",
 		"}",
 		"return M",
 	}, "\n")).result :: any
@@ -205,7 +229,21 @@ return function()
 		propRealm("plain"),
 		propRealm("isPrivate"),
 		propRealm("both"),
-	}, { { "server" }, { "server" }, { "client" }, { "client" }, nil, nil, nil }, "conditional mount propRealm")
+		propRealm("nestedServer"),
+		propRealm("nestedIfServer"),
+		propRealm("nestedBoth"),
+	}, {
+		{ "server" },
+		{ "server" },
+		{ "client" },
+		{ "client" },
+		nil,
+		nil,
+		nil,
+		{ "server" },
+		{ "server" },
+		nil,
+	}, "conditional mount propRealm")
 	if engineLists ~= nil then
 		t.eq(propRealm("inStudio"), nil, "guard over engine boolean is predicate")
 	end
@@ -242,24 +280,53 @@ return function()
 		member("attempt").tags.yields,
 	}, { true, { "server" }, true, true, true, true }, "cross-module yields and realm")
 
+	local peerShadow = eval(table.concat({
+		"local Peer = { LocalPlayer = true }",
+		"function Peer:FireAllClients() end",
+		"return Peer",
+	}, "\n"))
 	local projectTableShadow = eval(table.concat({
+		'local Peer = require("./peer")',
 		"local FakePlayers = { LocalPlayer = true }",
-		"local FakePlugin = { Toolbar = true }",
+		"local FakePlugin = {}",
+		"function FakePlugin:CreateToolbar() end",
 		"local M = {}",
 		"function M.checkLocal()",
 		"\treturn FakePlayers.LocalPlayer",
 		"end",
 		"function M.checkToolbar()",
-		"\treturn FakePlugin.Toolbar",
+		'\treturn FakePlugin:CreateToolbar("Widgets")',
+		"end",
+		"function M.checkPeer()",
+		"\tPeer:FireAllClients()",
+		"\treturn Peer.LocalPlayer",
+		"end",
+		"function M.realRemote(remote)",
+		"\tremote:FireAllClients()",
 		"end",
 		"return M",
 	}, "\n"))
-	local fakeMod: any = { id = "fake.luau", surface = projectTableShadow, requireTargets = {} }
-	local fakeWorld: any = { byId = { ["fake.luau"] = fakeMod } }
-	local checkLocalFn = (surface.fieldOf(projectTableShadow.result, "checkLocal") :: any).value
-	local checkToolbarFn = (surface.fieldOf(projectTableShadow.result, "checkToolbar") :: any).value
+	local requireTargets: { [any]: string } = {}
+	for _, reqVal in projectTableShadow.requireLocals do
+		requireTargets[reqVal] = "peer.luau"
+	end
+	local peerMod: any = { id = "peer.luau", surface = peerShadow, requireTargets = {} }
+	local fakeMod: any = { id = "fake.luau", surface = projectTableShadow, requireTargets = requireTargets }
+	local fakeWorld: any = { byId = { ["fake.luau"] = fakeMod, ["peer.luau"] = peerMod } }
+	local checkLocalFn = (surface.fieldOf(projectTableShadow.result, "checkLocal") :: any).value.fnNode
+	local checkToolbarFn = (surface.fieldOf(projectTableShadow.result, "checkToolbar") :: any).value.fnNode
+	local checkPeerFn = (surface.fieldOf(projectTableShadow.result, "checkPeer") :: any).value.fnNode
+	local realRemoteFn = (surface.fieldOf(projectTableShadow.result, "realRemote") :: any).value.fnNode
+	t.check(checkLocalFn ~= nil and checkLocalFn.body ~= nil, "shadow spec inspects real AST bodies")
 	t.eq({
-		detect.realm(fakeWorld, fakeMod, projectTableShadow.result, checkLocalFn),
-		detect.realm(fakeWorld, fakeMod, projectTableShadow.result, checkToolbarFn),
-	}, { nil, nil }, "project tables with LocalPlayer or Toolbar fields do not trigger false engine realms")
+		detect.realm(fakeWorld, fakeMod, checkLocalFn, projectTableShadow.result),
+		detect.realm(fakeWorld, fakeMod, checkToolbarFn, projectTableShadow.result),
+		detect.realm(fakeWorld, fakeMod, checkPeerFn, projectTableShadow.result),
+		detect.realm(fakeWorld, fakeMod, realRemoteFn, projectTableShadow.result),
+	}, {
+		nil,
+		nil,
+		nil,
+		{ "server" },
+	}, "project tables with LocalPlayer, CreateToolbar, or required FireAllClients do not trigger false engine realms")
 end
