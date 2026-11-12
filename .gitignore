@@ -16,6 +16,7 @@ extractor/generated/
 *.tgz
 
 # editors / OS
+.claude/
 .vscode/
 .idea/
 .DS_Store

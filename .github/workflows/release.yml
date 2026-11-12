@@ -32,34 +32,20 @@ jobs:
       pull-requests: write
     outputs:
       should_release: ${{ steps.release.outputs.should_release }}
+      should_build: ${{ steps.release.outputs.should_build }}
       version: ${{ steps.release.outputs.version }}
-      tag: ${{ steps.release.outputs.tag }}
-      prerelease: ${{ steps.release.outputs.prerelease }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "22"
 
       - name: Release PR or Release
         id: release
-        uses: kohltastrophe/release@v1.0.0
+        uses: kohltastrophe/release@v1
         with:
-          dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
           wait-for-ci: ci.yml
-
-      - name: Upload release notes
-        if: steps.release.outputs.should_release == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: release-notes
-          path: ${{ steps.release.outputs.notes_file }}
 
   publish:
     needs: check
-    if: needs.check.outputs.should_release == 'true' || github.event_name == 'workflow_dispatch'
+    if: needs.check.outputs.should_build == 'true'
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -67,11 +53,9 @@ jobs:
       id-token: write # npm provenance
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          fetch-depth: 0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "22"
+          node-version: "22.12"
           registry-url: "https://registry.npmjs.org"
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
@@ -82,13 +66,6 @@ jobs:
         with:
           path: ~/.cache/luaudocs
           key: lute-${{ runner.os }}-${{ hashFiles('src/lute.ts') }}
-
-      - name: Download release notes
-        if: needs.check.outputs.should_release == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: release-notes
-          path: .
 
       - run: bun install --frozen-lockfile
 
@@ -101,20 +78,7 @@ jobs:
       # Same guard as CI: drive the CLI out of an extracted tarball with
       # production deps only, so a packaging gap fails before publish, not after.
       - name: Packed tarball smoke test
-        run: |
-          set -euo pipefail
-          tarball="$(npm pack --ignore-scripts | tail -n1)"
-          smoke="$(mktemp -d)"
-          tar -xzf "$tarball" -C "$smoke"
-          pkg="$smoke/package"
-          npm install --omit=dev --ignore-scripts --no-audit --no-fund --prefix "$pkg"
-          proj="$smoke/project"
-          cp -r test/fixtures/sample-project "$proj"
-          cd "$proj"
-          node "$pkg/dist/cli.js" init . --title Smoke --force
-          node "$pkg/dist/cli.js" build . --emit-only
-          ls .luaudocs/api/*.md
-          ls .github/workflows/docs.yml
+        run: bun run test:pack
 
       # --ignore-scripts: publish the dist/ and src/generated/ the steps above
       # tested, not a fresh prepare rebuild nothing exercised.
@@ -136,25 +100,6 @@ jobs:
 
       - name: GitHub Release
         if: needs.check.outputs.should_release == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ needs.check.outputs.tag }}
-          NOTES_FILE: release-notes.md
-          PRERELEASE: ${{ needs.check.outputs.prerelease }}
-        run: |
-          set -euo pipefail
-          flags=(--title "$RELEASE_TAG" --notes-file "$NOTES_FILE")
-          if [ "$PRERELEASE" = "true" ]; then
-            flags+=(--prerelease)
-          fi
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release edit "$RELEASE_TAG" \
-              --title "$RELEASE_TAG" \
-              --notes-file "$NOTES_FILE"
-          elif git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release create "$RELEASE_TAG" "${flags[@]}"
-          else
-            gh release create "$RELEASE_TAG" \
-              --target "$GITHUB_SHA" \
-              "${flags[@]}"
-          fi
+        uses: kohltastrophe/release@v1
+        with:
+          mode: publish

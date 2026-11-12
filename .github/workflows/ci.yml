@@ -9,8 +9,8 @@ on:
       - main
 
 concurrency:
-  group: "ci-${{ github.ref }}-${{ contains(github.event.head_commit.message, 'chore: release') && github.sha || '' }}"
-  cancel-in-progress: "${{ !contains(github.event.head_commit.message, 'chore: release') }}"
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
 
 jobs:
   test:
@@ -30,10 +30,8 @@ jobs:
     steps:
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
       # the exact engines floor, so the matrix proves the minimum we claim
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22.12"
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
@@ -64,10 +62,9 @@ jobs:
         run: bun run format:check && bun run format:luau:check
 
       - name: Conventional Commits and CHANGELOG.md check
-        uses: kohltastrophe/release@v1.0.0
+        uses: kohltastrophe/release@v1
         with:
           mode: check
-          pr-title: ${{ github.event.pull_request.title }}
 
       - name: Extractor specs (lute)
         run: bun run test:lute
@@ -81,7 +78,7 @@ jobs:
       # one leg suffices for the badge
       - name: Upload coverage to Codecov
         if: runner.os == 'Linux'
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: coverage/lcov.info
           use_oidc: true
@@ -100,24 +97,4 @@ jobs:
       # packaging gaps. Linux only: packaging is platform-independent.
       - name: Packed tarball smoke test
         if: runner.os == 'Linux'
-        run: |
-          set -euo pipefail
-          # --ignore-scripts: dist/ and src/generated already exist from the
-          # steps above; prepare would only rebuild them
-          tarball="$(npm pack --ignore-scripts | tail -n1)"
-          smoke="$(mktemp -d)"
-          tar -xzf "$tarball" -C "$smoke"
-          pkg="$smoke/package"
-          # production deps only, and --ignore-scripts again: the shipped
-          # prepare script needs devDependencies (tsup) that must not be pulled
-          npm install --omit=dev --ignore-scripts --no-audit --no-fund --prefix "$pkg"
-          proj="$smoke/project"
-          cp -r test/fixtures/sample-project "$proj"
-          cd "$proj"
-          node "$pkg/dist/cli.js" init . --title Smoke --force
-          node "$pkg/dist/cli.js" build . --emit-only
-          # at least one generated API page proves extract -> emit ran
-          ls .luaudocs/api/*.md
-          # the templates/project tree scaffolds into a dot-directory, which is
-          # the kind of path an npm tarball is apt to drop
-          ls .github/workflows/docs.yml
+        run: bun run test:pack
