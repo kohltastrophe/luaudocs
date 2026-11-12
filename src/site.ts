@@ -21,6 +21,7 @@ import { packageRoot } from "./extract";
 import {
 	frontmatter,
 	frontmatterField as field,
+	HTML_COMMENT_INLINE,
 	imageReferenceLabels,
 	LANGUAGES,
 	mapOutsideCodeSpans,
@@ -94,13 +95,23 @@ function humanize(name: string): string {
 	return name.replace(/[-_]+/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
-/** Finds the first `# ` heading outside fenced code so a `# install` shell
- * comment in an opening fence is never mistaken for the page title. */
+/**
+ * Finds the first `# ` heading outside fenced code and HTML comments so a
+ * `# install` shell comment or commented-out draft heading is never mistaken
+ * for the page title. Strips trailing ATX `#` runs and `{#id}` attribute blocks.
+ */
 function firstHeading(text: string): string | undefined {
 	for (const segment of outsideFences(text)) {
-		const heading = segment.match(/^#\s+(.+)$/m)?.[1]?.trim();
-		if (heading !== undefined) {
-			return heading;
+		const cleaned = segment.replace(HTML_COMMENT_INLINE, "");
+		for (const match of cleaned.matchAll(/^ {0,3}#[ \t]+(.+)$/gm)) {
+			const heading = match[1]!
+				.replace(/[ \t]+#+[ \t]*$/, "")
+				.replace(/(?<!\\)\{[^{}\r\n]+\}[ \t]*$/, "")
+				.replace(/[ \t]+#+[ \t]*$/, "")
+				.trim();
+			if (heading) {
+				return heading;
+			}
 		}
 	}
 	return undefined;
@@ -315,6 +326,11 @@ function inlined(value: unknown, depth: number): string {
 	return JSON.stringify(value, null, "\t").replace(/\n/g, `\n${"\t".repeat(depth)}`);
 }
 
+/** Formats a generated TypeScript module with its header banner, imports, and blank-separated statements. */
+function generatedModule(imports: string[], statements: string[]): string {
+	return [GENERATED_NOTE, ...imports, "", ...statements.flatMap((stmt) => [stmt, ""])].join("\n");
+}
+
 /**
  * Builds the default navbar items when `[[site.nav]]` is not set. Also used by
  * the Moonwave converter, which prepends these default links before any custom
@@ -425,42 +441,40 @@ function apiNavModule(
 	apiSidebar: SidebarItem[],
 	apiTrails: Record<string, TrailSegment[]>,
 ): string {
-	return [
-		GENERATED_NOTE,
-		'import type { DefaultTheme } from "vitepress";',
-		'import type { PageTrails } from "./markup.ts";',
-		"",
-		`export const apiSidebar: DefaultTheme.SidebarItem[] = ${inlined(apiSidebar, 0)};`,
-		"",
-		`export const apiTrails: PageTrails = ${inlined(apiTrails, 0)};`,
-		"",
-	].join("\n");
+	return generatedModule(
+		[
+			'import type { DefaultTheme } from "vitepress";',
+			'import type { PageTrails } from "./markup.ts";',
+		],
+		[
+			`export const apiSidebar: DefaultTheme.SidebarItem[] = ${inlined(apiSidebar, 0)};`,
+			`export const apiTrails: PageTrails = ${inlined(apiTrails, 0)};`,
+		],
+	);
 }
 
 /** Renders `trails.ts`, merging the guide trails with `apiTrails` from `api-nav.ts`. */
 function trailsModule(guideTrails: Record<string, TrailSegment[]>): string {
-	return [
-		GENERATED_NOTE,
-		'import type { PageTrails } from "./markup.ts";',
-		`import { apiTrails } from "./${API_NAV}";`,
-		"",
-		`const guideTrails: PageTrails = ${inlined(guideTrails, 0)};`,
-		"",
-		"export const pageTrails: PageTrails = { ...guideTrails, ...apiTrails };",
-		"",
-	].join("\n");
+	return generatedModule(
+		[
+			'import type { PageTrails } from "./markup.ts";',
+			`import { apiTrails } from "./${API_NAV}";`,
+		],
+		[
+			`const guideTrails: PageTrails = ${inlined(guideTrails, 0)};`,
+			"export const pageTrails: PageTrails = { ...guideTrails, ...apiTrails };",
+		],
+	);
 }
 
 function sidebarModule(guideSidebar: SidebarItem[]): string {
-	return [
-		GENERATED_NOTE,
-		'import type { DefaultTheme } from "vitepress";',
-		"",
-		`export { apiSidebar } from "./${API_NAV}";`,
-		"",
-		`export const guideSidebar: DefaultTheme.SidebarItem[] = ${inlined(guideSidebar, 0)};`,
-		"",
-	].join("\n");
+	return generatedModule(
+		['import type { DefaultTheme } from "vitepress";'],
+		[
+			`export { apiSidebar } from "./${API_NAV}";`,
+			`export const guideSidebar: DefaultTheme.SidebarItem[] = ${inlined(guideSidebar, 0)};`,
+		],
+	);
 }
 
 /**
@@ -584,15 +598,14 @@ function renderConfigMts(
 		`\t\tlanguages: [${LANGUAGES.map((lang) => JSON.stringify(lang)).join(", ")}],`,
 		// Pass `base` explicitly because signature links are injected as raw HTML in Shiki's
 		// HAST, which VitePress does not prefix with `base`.
-		`\t\tcodeTransformers: [decodeLinks(), signatureLinks(${JSON.stringify(base ?? "/")})],`,
+		`\t\tcodeTransformers: [signatureLinks(${JSON.stringify(base ?? "/")})],`,
 		"\t\tshikiSetup(shiki) {",
 		"\t\t\thighlighter = shiki;",
 		"\t\t},",
 		"\t\tconfig(md) {",
-		"\t\t\t// Run markup rewrites (`<Frame>`, `<Tabs>`, `:::note`) and prepend",
-		"\t\t\t// page trails on the raw markdown source before block parsing;",
-		"\t\t\t// fenced code blocks showing that syntax are left untouched.",
-		`\t\t\tinstallMarkupRule(md, pageTrails${base !== undefined ? `, ${JSON.stringify(base)}` : ""});`,
+		"\t\t\t// Run markup rewrites (`<Frame>`, `<Tabs>`, `:::note`), prepend",
+		"\t\t\t// page trails, and unlist framed headings before anchor generation.",
+		"\t\t\tinstallMarkupRule(md, pageTrails);",
 		"\t\t\tinlineHighlightPlugin(md, () => highlighter);",
 		"\t\t\t// Preserve inline whitespace that Vue's template compiler would otherwise drop.",
 		"\t\t\twhitespacePlugin(md);",
@@ -624,7 +637,7 @@ function renderConfigMts(
 		'import { inlineHighlightPlugin } from "./generated/inline-highlight.ts";',
 		'import { searchIndexCachePlugin } from "./generated/search-cache.ts";',
 		'import { whitespacePlugin } from "./generated/whitespace.ts";',
-		'import { decodeLinks, relayLinks, signatureLinks } from "./generated/signature-links.ts";',
+		'import { relayLinks, signatureLinks } from "./generated/signature-links.ts";',
 		'import { apiSidebar, guideSidebar } from "./generated/sidebar.ts";',
 		'import { pageTrails } from "./generated/trails.ts";',
 		"",
@@ -831,6 +844,10 @@ export function heroActions(
 	];
 }
 
+const YAML_RESERVED = /^(?:true|false|null|~|yes|no|on|off|y|n|[+-]?\.inf|\.nan)$/i;
+const YAML_NUMERIC =
+	/^[+-]?(?:0[xXoObB][\da-fA-F_]+|(?:\d[\d_]*(?:\.[\d_]*)?|\.\d[\d_]*)(?:[eE][+-]?\d+)?)$/;
+
 /**
  * Renders a VitePress `layout: home` landing page, shared by the generated
  * fallback landing page and Moonwave homepage conversion.
@@ -847,7 +864,12 @@ export function homeLayoutPage(options: {
 	includeReadme?: boolean;
 }): string {
 	const scalar = (value: string): string =>
-		/[:#"'\[\]{}&*!|>%@`\n\r,]|^[?-]|^\s|\s$/.test(value) ? JSON.stringify(value) : value;
+		value === "" ||
+		/[:#"'\[\]{}&*!|>%@`\\\n\r,\t]|^[?-]|^\s|\s$/.test(value) ||
+		YAML_RESERVED.test(value) ||
+		YAML_NUMERIC.test(value)
+			? JSON.stringify(value)
+			: value;
 	const lines = [
 		"---",
 		...(options.marker ?? []),
@@ -1034,11 +1056,11 @@ export function syncSite(context: BuildContext, options: SiteSyncOptions): strin
 	const guideLink = firstGuidePage(options.guides);
 	const changelog = changelogEnabled(context);
 	// Include the API navbar link and hero button only when API pages exist.
-	// On error builds or `init` (`apiSidebar === undefined`), check `api/` on disk.
+	// On error builds or `init` (`apiSidebar === undefined`), check `api/index.md` on disk.
 	const hasApi =
 		options.apiSidebar !== undefined
 			? options.apiSidebar.length > 0
-			: existsSync(context.apiDir);
+			: existsSync(join(context.apiDir, "index.md"));
 	// Supply `index.md` only while the user has not created or unmarked their own.
 	const indexPath = join(docsDir, "index.md");
 	const existingIndex = existsSync(indexPath) ? readFileSync(indexPath, "utf8") : undefined;

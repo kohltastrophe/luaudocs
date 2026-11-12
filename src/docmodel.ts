@@ -2,12 +2,14 @@
  * The doc model, which defines the JSON wire contract with the Lute extractor
  * (`schemaVersion: 1`, documented in `extractor/model/init.luau`).
  *
- * Intentionally omits a field-by-field runtime schema validator because the sole
- * producer is this repo's own extractor, and `regen:docmodels --check` pins both
- * fixture captures byte-for-byte in CI. `parseDocModel` validates what a user
- * can actually hit in practice: invalid JSON, a non-object payload, or a
- * mismatched `schemaVersion`.
+ * `parseDocModel` validates the top-level envelope and per-module spine
+ * (`schemaVersion`, `project.entryPoints`, `modules` records and member arrays,
+ * `diagnostics`, and optional `externals`) because `build --model` and fetched
+ * `[source] aliases` models cross an external input boundary, while omitting a
+ * deep AST-segment schema check because `regen:docmodels --check` pins the
+ * extractor's own output byte-for-byte in CI.
  */
+import { compareCodePoints, errorMessage, isRecord } from "./config";
 
 /**
  * One segment of a rendered type or signature display. `id` names a declaration
@@ -203,43 +205,67 @@ export interface DocModel {
 
 const SCHEMA_VERSION = 1;
 
+function isStringArray(value: unknown): value is string[] {
+	return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+}
+
+function isModuleSpine(value: unknown): boolean {
+	return (
+		isRecord(value) &&
+		typeof value.id === "string" &&
+		typeof value.name === "string" &&
+		isStringArray(value.instancePath) &&
+		isRecord(value.source) &&
+		Array.isArray(value.classes) &&
+		Array.isArray(value.members) &&
+		Array.isArray(value.types) &&
+		Array.isArray(value.reexports)
+	);
+}
+
 /** Parses extractor JSON output, rejecting anything that is not a current doc model. */
 export function parseDocModel(jsonText: string): DocModel {
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(jsonText);
 	} catch (error) {
-		throw new Error(
-			`doc model is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
-		);
+		throw new Error(`doc model is not valid JSON: ${errorMessage(error)}`);
 	}
-	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+	if (!isRecord(parsed)) {
 		throw new Error("doc model is not a JSON object");
 	}
-	const version = (parsed as { schemaVersion?: unknown }).schemaVersion;
+	const version = parsed.schemaVersion;
 	if (version !== SCHEMA_VERSION) {
 		throw new Error(
 			`doc model schemaVersion is ${String(version)}, expected ${SCHEMA_VERSION}; ` +
 				"regenerate it with the luaudocs build that will consume it",
 		);
 	}
-	return parsed as DocModel;
+	if (!isRecord(parsed.project) || !isStringArray(parsed.project.entryPoints)) {
+		throw new Error("doc model is missing project.entryPoints (string[])");
+	}
+	if (!Array.isArray(parsed.modules) || !parsed.modules.every(isModuleSpine)) {
+		throw new Error("doc model has malformed modules array");
+	}
+	if (!Array.isArray(parsed.diagnostics)) {
+		throw new Error("doc model is missing diagnostics array");
+	}
+	if (parsed.externals !== undefined && !isRecord(parsed.externals)) {
+		throw new Error("doc model externals must be a JSON object");
+	}
+	return parsed as unknown as DocModel;
 }
 
 /**
  * Formats the doc model for `build --model` and `public/docmodel.json`. Sorts
- * object keys alphabetically like `extractor/emit.luau` so dumps diff cleanly
+ * object keys alphabetically like `extractor/core/emit.luau` so dumps diff cleanly
  * by content rather than key order (though `emit.luau` also compacts leaf objects
  * onto single lines).
  */
 export function formatDocModel(model: DocModel): string {
 	const sorted = (_key: string, value: unknown): unknown =>
-		typeof value !== "object" || value === null || Array.isArray(value)
+		!isRecord(value)
 			? value
-			: Object.fromEntries(
-					Object.entries(value as Record<string, unknown>).sort(([a], [b]) =>
-						a < b ? -1 : 1,
-					),
-				);
+			: Object.fromEntries(Object.entries(value).sort(([a], [b]) => compareCodePoints(a, b)));
 	return `${JSON.stringify(model, sorted, "\t")}\n`;
 }

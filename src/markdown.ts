@@ -1,24 +1,31 @@
 /**
- * Markdown text utilities used by the emitter. Re-exports the fence splitter
- * and HTML escaper from `templates/runtime/markup.ts` (which syncs into user
- * sites and cannot import from `src/`).
+ * Markdown text utilities used by the emitter. Re-exports the fence splitter,
+ * code-span builder, URL sanitizer, and HTML escaper from
+ * `templates/runtime/markup.ts` (which syncs into user sites and cannot import
+ * from `src/`).
  */
-import { rewriteMarkup, splitFences } from "../templates/runtime/markup";
+import { rewriteMarkup, splitFences, stripFrames } from "../templates/runtime/markup";
 import { codeIcons } from "../templates/runtime/icons";
 import { ANNOTATION_PATTERN, LANGUAGES } from "../templates/runtime/inline-highlight";
 import { rewriteSearchIndexCache, searchIndexCachePlugin } from "../templates/runtime/search-cache";
 import { LINKS_TOKEN } from "../templates/runtime/signature-links";
 
 export {
+	codeSpan,
 	encodeHref,
 	escapeHtml,
 	escapeMarkdown,
+	isSafeHref,
 	linkDestination,
+	longestBacktickRun,
 	REWRITTEN_COMPONENTS,
 	splitFences,
+	stripFrames,
 	type TrailSegment,
 } from "../templates/runtime/markup";
 export { codeIcons, LANGUAGES, LINKS_TOKEN, rewriteSearchIndexCache, searchIndexCachePlugin };
+
+import { escapeHtml, isSafeHref } from "../templates/runtime/markup";
 
 /**
  * VitePress's heading slugifier, vendored from `@mdit-vue/shared` to avoid an
@@ -138,22 +145,121 @@ const NOT_PARAGRAPH =
 	/^ {0,3}(?:[*+-]\s|\d{1,9}[.)]\s|\||([-*_])(?:[ \t]*\1){2,}[ \t]*$|\[[^\]\n]+\]:)/;
 const REFERENCE_DEFINITION = /^[ \t]*(?:>[ \t]?)*[ \t]{0,3}\[([^\]\n]+)\]:/gm;
 
+const VOID_HTML_TAG = /^<(?:br|wbr|hr|img|input)(?=[\s/>])[^>]*>/i;
+const LOWER_OPEN_TAG = /^<([a-z][a-z0-9-]*)(?=[\s>])[^>]*>/;
+
 /**
- * Extracts every heading written in prose Markdown (outside fenced code blocks)
- * in document order. Prose headings mint anchor IDs in VitePress and therefore
- * claim slugs before any following member headings with the same name.
+ * Escapes identifier-attached generic angle brackets (`Array<T>`,
+ * `Map<string, Signal<number>>`, `[Signal]<T>`) outside inline code spans as
+ * CommonMark `\<` and `\>` escapes so VitePress's Vue template compiler does not
+ * treat type parameters in doc comments as raw HTML/Vue tags, while keeping
+ * heading slugs (`#box-t`) and `aria-label` attributes uncorrupted. Preserves
+ * `<Badge>`, `<Tabs>`, `<TabItem>`, `<Frame>`, HTML comments, autolinks, void
+ * tags (`<br>`), and closed HTML elements (`x<sup>2</sup>`).
+ */
+export function escapeProseGenerics(segment: string): string {
+	if (!segment.includes("<")) {
+		return segment;
+	}
+	let out = "";
+	for (let i = 0; i < segment.length; i += 1) {
+		const ch = segment[i]!;
+		if (ch !== "<") {
+			out += ch;
+			continue;
+		}
+		if (segment.startsWith("<!--", i)) {
+			const end = segment.indexOf("-->", i + 4);
+			if (end === -1) {
+				out += segment.slice(i);
+				break;
+			}
+			out += segment.slice(i, end + 3);
+			i = end + 2;
+			continue;
+		}
+		const prev = i > 0 ? segment[i - 1]! : "";
+		const attached =
+			/[A-Za-z0-9_]/.test(prev) ||
+			(prev === "]" && i >= 2 && /[A-Za-z0-9_]/.test(segment[i - 2]!));
+		const next = segment[i + 1];
+		if (!attached || next === undefined || /[\s/!?]/.test(next)) {
+			out += ch;
+			continue;
+		}
+		const tail = segment.slice(i);
+		const voidMatch = VOID_HTML_TAG.exec(tail);
+		if (voidMatch) {
+			out += voidMatch[0];
+			i += voidMatch[0].length - 1;
+			continue;
+		}
+		const lowerMatch = LOWER_OPEN_TAG.exec(tail);
+		if (lowerMatch) {
+			const tagName = lowerMatch[1]!;
+			const afterOpen = tail.slice(lowerMatch[0].length);
+			const closeIdx = afterOpen.search(new RegExp(`<\\/${tagName}\\s*>`));
+			const reopenIdx = afterOpen.search(new RegExp(`<${tagName}(?=[\\s/>])`));
+			if (closeIdx !== -1 && (reopenIdx === -1 || closeIdx < reopenIdx)) {
+				out += lowerMatch[0];
+				i += lowerMatch[0].length - 1;
+				continue;
+			}
+		}
+
+		// Scan forward for a balanced closing `>` on this line, skipping quotes and `->`.
+		let depth = 1;
+		let quote: string | undefined;
+		let close = -1;
+		for (let j = i + 1; j < segment.length; j += 1) {
+			const c = segment[j]!;
+			if (quote !== undefined) {
+				if (c === "\\") {
+					j += 1;
+				} else if (c === quote) {
+					quote = undefined;
+				}
+				continue;
+			}
+			if (c === '"' || c === "'") {
+				quote = c;
+			} else if (c === "<") {
+				depth += 1;
+			} else if (c === ">" && segment[j - 1] !== "-") {
+				depth -= 1;
+				if (depth === 0) {
+					close = j;
+					break;
+				}
+			}
+		}
+		if (close !== -1) {
+			out += segment.slice(i, close + 1).replace(/(?<!\\)<|(?<![\\-])>/g, "\\$&");
+			i = close;
+		} else {
+			out += ch;
+		}
+	}
+	return out;
+}
+
+/**
+ * Extracts every heading written in prose Markdown (outside fenced code blocks
+ * and `<Frame>` callouts) in document order. Prose headings mint anchor IDs in
+ * VitePress and therefore claim slugs before any following member headings with
+ * the same name.
  *
  * Because `markdown-it-anchor` hooks `heading_open` tokens regardless of syntax,
  * this matches ATX headings (`## Name`), ATX headings inside blockquotes or list
  * items (`> ## Name`, `- ## Name`), and setext headings (`Name` underlined with
  * `===` or `---` at the same blockquote depth), while skipping content inside
- * HTML blocks.
+ * HTML blocks and `<Frame>` blocks.
  */
 export function proseHeadings(markdown: string | undefined): ProseHeading[] {
 	if (!markdown) {
 		return [];
 	}
-	const rewritten = rewriteMarkup(markdown);
+	const rewritten = rewriteMarkup(stripFrames(markdown));
 	const labels = new Set(
 		[...rewritten.matchAll(REFERENCE_DEFINITION)].map((match) => foldLabel(match[1]!)),
 	);
@@ -168,9 +274,10 @@ export function proseHeadings(markdown: string | undefined): ProseHeading[] {
 		// Open HTML block state (`markdown-it` mints no heading anchors inside HTML blocks).
 		let html: { until: RegExp; depth: number } | undefined;
 		for (const rawLine of part.split("\n")) {
-			const markers = BLOCKQUOTE_MARKERS.exec(rawLine)?.[0] ?? "";
+			const escapedLine = mapOutsideCodeSpans(rawLine, escapeProseGenerics);
+			const markers = BLOCKQUOTE_MARKERS.exec(escapedLine)?.[0] ?? "";
 			const depth = markers.split(">").length - 1;
-			const line = rawLine.slice(markers.length);
+			const line = escapedLine.slice(markers.length);
 			// HTML blocks do not support lazy continuation, so shallower quote depth closes the block.
 			if (html !== undefined && depth >= html.depth) {
 				if (html.until.test(line)) {
@@ -243,7 +350,7 @@ const TRAILING_ATTRS = /(?<!\\)\{([^{}]+)(?<!\\)\}[ \t]*$/;
  * `{#id}` attribute sets the explicit anchor `id`.
  */
 function headingText(raw: string, labels: ReadonlySet<string>): ProseHeading {
-	const parts = raw.split(CODE_SPAN);
+	const parts = splitCodeSpans(raw);
 	let id: string | undefined;
 	const last = parts.length - 1;
 	parts[last] = parts[last]!.replace(TRAILING_ATTRS, (_match, attrs: string) => {
@@ -277,7 +384,7 @@ function headingText(raw: string, labels: ReadonlySet<string>): ProseHeading {
 
 /** Strips outer backticks from a code span and removes one symmetric leading/trailing space per CommonMark. */
 function codeSpanContent(span: string): string {
-	const inner = span.replace(/^(`+)([\s\S]*)\1$/, "$2");
+	const inner = span.replace(/^(`+)([\s\S]*)\1$/, "$2").replace(/\r?\n/g, " ");
 	return /^ .*[^ ].* $/.test(inner) ? inner.slice(1, -1) : inner;
 }
 
@@ -301,20 +408,42 @@ export function outsideFences(text: string): string[] {
 	return filterEven(splitFences(text));
 }
 
-// Match double-backtick spans before single-backtick spans so `` `x` `` is
-// matched as one span rather than an empty span followed by prose.
-export const CODE_SPAN = /(``(?:[^`\n]|`(?!`))*``|`[^`\n]*`)/;
+/**
+ * Matches a CommonMark n-backtick inline code span without crossing blank-line
+ * paragraph boundaries. Keeps a single capturing group (`(`+)`) so callers like
+ * `src/moonwave.ts` that combine `CODE_SPAN.source` in an alternation preserve
+ * their capture-group indices and `\1` backreference.
+ */
+export const CODE_SPAN = /(?<!`)(`+)(?!`)(?:[^\n]|\n(?![ \t]*(?:\r?\n|$)))*?(?<!`)\1(?!`)/;
+
+const CODE_SPAN_GLOBAL = new RegExp(CODE_SPAN.source, "g");
+
+/** Splits `text` into segments alternating between prose (even) and full inline code spans (odd). */
+function splitCodeSpans(text: string): string[] {
+	if (!text.includes("`")) {
+		return [text];
+	}
+	const parts: string[] = [];
+	let last = 0;
+	for (const match of text.matchAll(CODE_SPAN_GLOBAL)) {
+		const at = match.index!;
+		parts.push(text.slice(last, at), match[0]);
+		last = at + match[0].length;
+	}
+	parts.push(text.slice(last));
+	return parts;
+}
 
 /**
  * Applies `transform` outside inline code spans so code spans that mention a
  * file path, bracket reference, or HTML tag stay verbatim.
  */
 export function mapOutsideCodeSpans(text: string, transform: (segment: string) => string): string {
-	return mapEven(text.split(CODE_SPAN), transform);
+	return mapEven(splitCodeSpans(text), transform);
 }
 
 export function outsideCodeSpans(text: string): string[] {
-	return filterEven(text.split(CODE_SPAN));
+	return filterEven(splitCodeSpans(text));
 }
 
 /**
@@ -442,8 +571,11 @@ export function docSummary(doc: string | undefined): string {
 	return doc ? (summarize(doc) ?? "") : "";
 }
 
-/** Matches a leading YAML frontmatter block across LF and CRLF line endings. */
-const FRONTMATTER_BLOCK = /^---\r?\n([\s\S]*?)\r?\n---/;
+/**
+ * Matches a leading YAML frontmatter block across LF and CRLF line endings,
+ * including empty frontmatter (`---\n---`) while ignoring `----` horizontal rules.
+ */
+const FRONTMATTER_BLOCK = /^---[ \t]*\r?\n(?:([\s\S]*?)\r?\n)?---[ \t]*(?=\r?\n|$)/;
 
 /** Returns the YAML text inside the frontmatter block, or `""` when absent. */
 export function frontmatter(text: string): string {
@@ -458,7 +590,38 @@ export function frontmatterBlock(text: string): string | undefined {
 /** Strips the frontmatter block and any immediately following blank lines. */
 export function stripFrontmatter(text: string): string {
 	const block = frontmatterBlock(text);
-	return block === undefined ? text : text.slice(block.length).replace(/^\r?\n+/, "");
+	return block === undefined ? text : text.slice(block.length).replace(/^(?:\r?\n)+/, "");
+}
+
+const DOUBLE_QUOTE_ESCAPES: Record<string, string> = {
+	'"': '"',
+	"\\": "\\",
+	"/": "/",
+	b: "\b",
+	f: "\f",
+	n: "\n",
+	r: "\r",
+	t: "\t",
+	"0": "\0",
+};
+
+function unescapeDoubleQuoted(quoted: string, inner: string): string {
+	try {
+		return JSON.parse(quoted) as string;
+	} catch {
+		return inner.replace(
+			/\\(?:u([0-9a-fA-F]{4})|x([0-9a-fA-F]{2})|(.))/g,
+			(_match, u4?: string, x2?: string, ch?: string) => {
+				if (u4 !== undefined) {
+					return String.fromCharCode(Number.parseInt(u4, 16));
+				}
+				if (x2 !== undefined) {
+					return String.fromCharCode(Number.parseInt(x2, 16));
+				}
+				return DOUBLE_QUOTE_ESCAPES[ch!] ?? ch!;
+			},
+		);
+	}
 }
 
 /**
@@ -478,7 +641,7 @@ export function frontmatterField(block: string, key: string, indent = ""): strin
 	// scalars, matching how VitePress's YAML parser reads `title: "Setup" # draft`.
 	const double = raw.match(/^"((?:\\.|[^"\\])*)"/);
 	if (double) {
-		return double[1]!.replace(/\\(["\\])/g, "$1");
+		return unescapeDoubleQuoted(double[0], double[1]!);
 	}
 	const single = raw.match(/^'((?:''|[^'])*)'/);
 	if (single) {
@@ -495,8 +658,11 @@ export function frontmatterField(block: string, key: string, indent = ""): strin
  */
 const SOURCE_LINK_CLASS = "source-link ignore-header";
 export function sourceLinkAnchor(href: string): string {
+	if (!isSafeHref(href)) {
+		return "";
+	}
 	return (
-		`<a class="${SOURCE_LINK_CLASS}" href="${href}" ` +
+		`<a class="${SOURCE_LINK_CLASS}" href="${escapeHtml(href)}" ` +
 		`target="_blank" rel="noopener noreferrer" aria-label="View source"></a>`
 	);
 }
@@ -512,11 +678,11 @@ export const BADGE_LINK_ATTRS = "{.badge-link .ignore-header}";
 // so stripping it leaves no extra blank line behind.
 const SOURCE_LINK_LINE = wholeLine(SOURCE_LINK);
 const SOURCE_LINK_INLINE = new RegExp(SOURCE_LINK.source, "g");
-// Strips `{lang}` / `{.class}` suffixes attached to inline code spans in plain-text output.
-const INLINE_ANNOTATION = new RegExp(`(\`[^\`\\n]*\`)${ANNOTATION_PATTERN}`, "g");
+// Strips `{lang}` / `{.class}` suffixes attached to n-backtick inline code spans in plain-text output.
+const INLINE_ANNOTATION = new RegExp(`${CODE_SPAN.source}${ANNOTATION_PATTERN}`, "g");
 
 // Strips `luaudocs-links=[...]` from signature fence info strings while keeping the code fence itself.
-const SIGNATURE_INFO = new RegExp(`^([ \\t]{0,3}\`{3,}\\S*)[ \\t]+${LINKS_TOKEN}.*$`, "gm");
+const SIGNATURE_INFO = new RegExp(`^( {0,3}\`{3,}\\S*)[ \\t]+${LINKS_TOKEN}.*$`, "gm");
 
 // HTML comments (generated-by notes, region markers, and `@include` directives)
 // are invisible in rendered output and stripped from plain-text output.
@@ -543,13 +709,17 @@ export function region(name: string | undefined, end = false): string {
 export function plainMarkdown(page: string): string {
 	const body = stripFrontmatter(page).replace(SIGNATURE_INFO, "$1");
 	return mapOutsideFences(body, (segment) =>
-		segment
-			.replace(HTML_COMMENT_LINE, "")
-			.replace(HTML_COMMENT_INLINE, "")
-			.replace(SOURCE_LINK_LINE, "")
-			.replace(SOURCE_LINK_INLINE, "")
-			.replaceAll(BADGE_LINK_ATTRS, "")
-			.replace(INLINE_ANNOTATION, "$1")
-			.replace(/[ \t]+$/gm, ""),
+		mapOutsideCodeSpans(
+			segment
+				.replace(HTML_COMMENT_LINE, "")
+				.replace(HTML_COMMENT_INLINE, "")
+				.replace(SOURCE_LINK_LINE, "")
+				.replace(SOURCE_LINK_INLINE, "")
+				.replaceAll(BADGE_LINK_ATTRS, "")
+				.replace(INLINE_ANNOTATION, (match, _ticks: string, lang: string) =>
+					match.slice(0, -(lang.length + 2)),
+				),
+			(part) => part.replace(/\\([<>])/g, "$1"),
+		).replace(/[ \t]+$/gm, ""),
 	).trim();
 }

@@ -11,10 +11,10 @@
  * links identically to the last online build. Caches only valid, parsed models
  * so a bad HTTP response never evicts a working copy.
  */
-import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import type { LuauDocsConfig } from "./config";
+import { compareCodePoints, errorMessage, type LuauDocsConfig } from "./config";
 import { parseDocModel, type DocModel } from "./docmodel";
 import { cacheHome } from "./lute";
 
@@ -37,7 +37,7 @@ export async function loadDependencies(
 	const loaded: LoadedDependency[] = [];
 	const warnings: string[] = [];
 	// Sort aliases alphabetically so warnings appear in a deterministic order across builds.
-	const specs = Object.entries(config.source.aliases).sort(([a], [b]) => (a < b ? -1 : 1));
+	const specs = Object.entries(config.source.aliases).sort(([a], [b]) => compareCodePoints(a, b));
 	const outcomes = await Promise.all(
 		specs.map(async ([alias, { url, model }]) => {
 			// Config validation guarantees that `model` is paired with `url`.
@@ -47,7 +47,7 @@ export async function loadDependencies(
 			try {
 				return { loaded: { alias, url, model: await readModel(model, root) } };
 			} catch (error) {
-				const reason = error instanceof Error ? error.message : String(error);
+				const reason = errorMessage(error);
 				return {
 					warning: `[source] aliases.${alias}: could not load its doc model from ${model} (${reason}); types reached through @${alias} link to their module pages under ${url} instead of their exact entries`,
 				};
@@ -72,25 +72,37 @@ async function readModel(source: string, root: string): Promise<DocModel> {
 }
 
 /**
- * Deduplicates fetches to one per URL per process, since `dev` re-renders on every
- * save and a dependency's published model does not change mid-session. Evicts
- * failed fetches so the next rebuild retries the network.
+ * Deduplicates live online fetches to one per URL per process, since `dev`
+ * re-renders on every save and a dependency's published model does not change
+ * mid-session. Evicts failed fetches and offline cache fallbacks so the next
+ * rebuild retries the network when connectivity returns.
  */
 const fetched = new Map<string, Promise<DocModel>>();
 
 function fetchCached(url: string): Promise<DocModel> {
-	let pending = fetched.get(url);
-	if (pending === undefined) {
-		pending = fetchModel(url);
-		fetched.set(url, pending);
-		pending.catch(() => fetched.delete(url));
+	const existing = fetched.get(url);
+	if (existing !== undefined) {
+		return existing;
 	}
+	const pending = fetchModel(url).then(
+		({ model, live }) => {
+			if (!live) {
+				fetched.delete(url);
+			}
+			return model;
+		},
+		(error) => {
+			fetched.delete(url);
+			throw error;
+		},
+	);
+	fetched.set(url, pending);
 	return pending;
 }
 
-async function fetchModel(url: string): Promise<DocModel> {
+async function fetchModel(url: string): Promise<{ model: DocModel; live: boolean }> {
 	const dir = join(cacheHome(), "luaudocs", "models");
-	const file = join(dir, `${createHash("sha256").update(url).digest("hex")}.json`);
+	const cacheFile = join(dir, `${createHash("sha256").update(url).digest("hex")}.json`);
 	try {
 		const response = await fetch(url, { signal: AbortSignal.timeout(30_000) });
 		if (!response.ok) {
@@ -98,12 +110,30 @@ async function fetchModel(url: string): Promise<DocModel> {
 		}
 		const text = await response.text();
 		const model = parseDocModel(text);
-		mkdirSync(dir, { recursive: true });
-		writeFileSync(file, text);
-		return model;
+		const tempFile = `${cacheFile}.${randomUUID().slice(0, 8)}.tmp`;
+		try {
+			mkdirSync(dir, { recursive: true });
+			writeFileSync(tempFile, text);
+			renameSync(tempFile, cacheFile);
+		} catch {
+			try {
+				rmSync(tempFile, { force: true });
+			} catch {
+				// Best-effort cleanup when the cache directory is unwritable.
+			}
+		}
+		return { model, live: true };
 	} catch (error) {
-		if (existsSync(file)) {
-			return parseDocModel(readFileSync(file, "utf8"));
+		if (existsSync(cacheFile)) {
+			try {
+				return { model: parseDocModel(readFileSync(cacheFile, "utf8")), live: false };
+			} catch {
+				try {
+					rmSync(cacheFile, { force: true });
+				} catch {
+					// Ignore removal errors on read-only filesystems.
+				}
+			}
 		}
 		throw error;
 	}

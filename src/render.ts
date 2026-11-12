@@ -20,22 +20,27 @@ import type {
 	Generic,
 	Inline,
 	Module,
+	Reexport,
 	Seg,
 	SourceSpan,
 	TypeField,
 } from "./docmodel";
 import { parseDocModel } from "./docmodel";
-import { repoFileUrl, validateConfig, type LuauDocsConfig } from "./config";
+import { errorMessage, repoFileUrl, validateConfig, type LuauDocsConfig } from "./config";
 import { loadDependencies, type LoadedDependency } from "./dependencies";
 import { runExtractor } from "./extract";
 import {
 	BADGE_LINK_ATTRS,
+	codeSpan,
 	encodeHref,
 	escapeHtml,
 	escapeMarkdown,
+	escapeProseGenerics,
 	headingSlug,
+	isSafeHref,
 	linkDestination,
 	LINKS_TOKEN,
+	longestBacktickRun,
 	mapOutsideCodeSpans,
 	mapOutsideFences,
 	proseHeadings,
@@ -53,6 +58,8 @@ import {
 	generatedFrontmatter,
 	isPrimaryClass,
 	memberAccess,
+	MEMBER_HEADINGS,
+	membersByKind,
 	toPosix,
 	TYPES_HEADING,
 	type BuildContext,
@@ -73,7 +80,7 @@ import {
 } from "./nav";
 import robloxNames from "./generated/roblox-names.json";
 
-export type { LoadedDependency };
+export { MEMBER_HEADINGS, type LoadedDependency };
 
 /** Luau builtins (never linked). */
 const LUAU_BUILTINS = new Set([
@@ -137,18 +144,18 @@ function robloxUrl(name: string): string | undefined {
 
 /**
  * Resolves a name outside the project, checking the author's `@external` map
- * before the Roblox engine lists. Percent-encoded, since an author's URL can
- * contain characters that link destinations cannot carry raw.
+ * before the Roblox engine lists. Rejects dangerous URL schemes and percent-encodes
+ * whitespace and delimiters that link destinations cannot carry raw.
  */
 function externalUrl(name: string, options: RenderOptions): string | undefined {
 	const external = options.externals?.[name];
 	if (typeof external === "string") {
-		return encodeHref(external);
+		return isSafeHref(external) ? encodeHref(external) : undefined;
 	}
 	if (external !== undefined) {
 		// Resolve the exact entry when the dependency published a model, or fall back to its base URL.
 		const url = options.dependencies?.resolve(external) ?? external.url;
-		return url === undefined ? undefined : encodeHref(url);
+		return url !== undefined && isSafeHref(url) ? encodeHref(url) : undefined;
 	}
 	if (options.config.api.linkRobloxTypes && !LUAU_BUILTINS.has(name)) {
 		return robloxUrl(name);
@@ -170,9 +177,20 @@ function hasBalancedTypeArgs(rest: string): boolean {
 		return false;
 	}
 	let depth = 0;
+	let quote: string | undefined;
 	for (let i = 0; i < rest.length; i++) {
-		const c = rest[i];
-		if (c === "<") {
+		const c = rest[i]!;
+		if (quote !== undefined) {
+			if (c === "\\") {
+				i += 1;
+			} else if (c === quote) {
+				quote = undefined;
+			}
+			continue;
+		}
+		if (c === '"' || c === "'" || c === "`") {
+			quote = c;
+		} else if (c === "<") {
 			depth++;
 		} else if (c === ">" && rest[i - 1] !== "-") {
 			depth--;
@@ -213,22 +231,23 @@ const PROSE_REF_RE = /(?<!\])\[([A-Za-z_]\w*(?:[.:][A-Za-z_]\w*)*)\](?![([:])/g;
 
 function rewriteProseLine(line: string, options: RenderOptions): string {
 	return mapOutsideCodeSpans(line, (part) =>
-		part.replace(PROSE_REF_RE, (match, name: string) => {
+		escapeProseGenerics(part).replace(PROSE_REF_RE, (match, name: string) => {
 			// Try project symbols first. A bare identifier falls back to
 			// `@external` or Roblox, but never a `Class.member` form, which
 			// would fabricate an anchor.
 			const url =
 				options.symbols.linkForName(name) ??
 				(/^[A-Za-z_]\w*$/.test(name) ? externalUrl(name, options) : undefined);
-			return url ? `[\`${name}\`](${linkDestination(url)})` : match;
+			return url ? `[${codeSpan(name)}](${linkDestination(url)})` : match;
 		}),
 	);
 }
 
 /**
  * Resolves Moonwave bracket references in prose markdown (`[Class]`,
- * `[Class.member]`, and `[CFrame]`-style Roblox and `@external` names). Skips
- * fenced and indented code blocks, inline code spans, and existing markdown links.
+ * `[Class.member]`, and `[CFrame]`-style Roblox and `@external` names) and
+ * escapes unclosed identifier-attached generic brackets. Skips fenced and
+ * indented code blocks, inline code spans, and existing markdown links.
  */
 function linkifyProse(markdown: string, options: RenderOptions): string {
 	// Indented code is left verbatim like fenced code. A 4-space or tab-indented
@@ -273,8 +292,14 @@ function linkifyInline(type: Inline, options: RenderOptions): string {
 	const parts: string[] = [];
 	let plain = "";
 	const flush = () => {
-		const [, lead, core, trail] = /^(\s*)([\s\S]*?)(\s*)$/.exec(plain)!;
-		parts.push(core === "" ? plain : `${lead}\`${core}\`${trail}`);
+		const core = plain.trim();
+		if (core === "") {
+			parts.push(plain);
+		} else {
+			const lead = plain.slice(0, plain.length - plain.trimStart().length);
+			const trail = plain.slice(plain.trimEnd().length);
+			parts.push(`${lead}${codeSpan(core)}${trail}`);
+		}
 		plain = "";
 	};
 	for (const seg of type) {
@@ -288,7 +313,7 @@ function linkifyInline(type: Inline, options: RenderOptions): string {
 			continue;
 		}
 		flush();
-		parts.push(`[\`${seg.text}\`](${linkDestination(href)})`);
+		parts.push(`[${codeSpan(seg.text)}](${linkDestination(href)})`);
 	}
 	flush();
 	return parts.join("");
@@ -422,13 +447,6 @@ function* introSteps(page: PageModel, section: PageSection): Generator<PageStep>
 	}
 }
 
-export const MEMBER_HEADINGS = [
-	{ text: "Properties", kind: "prop" },
-	{ text: "Functions", kind: "function" },
-	{ text: "Methods", kind: "method" },
-	{ text: "Metamethods", kind: "metamethod" },
-] as const;
-
 /**
  * Yields a section's members grouped under occupied kind headings. Nested
  * sections skip the kind headings because both the kind heading and member
@@ -438,11 +456,7 @@ export const MEMBER_HEADINGS = [
 function* memberSteps(section: PageSection): Generator<PageStep> {
 	const labeled = section.name === "";
 	const container = section.container;
-	for (const { text, kind } of MEMBER_HEADINGS) {
-		const members = section.members.filter((member) => member.kind === kind);
-		if (members.length === 0) {
-			continue;
-		}
+	for (const { text, members } of membersByKind(section)) {
 		if (labeled) {
 			yield { kind: "heading", level: 2, text, id: `${section.id ?? ""}:${text}` };
 		}
@@ -815,24 +829,25 @@ function buildAnchoredPages(model: DocModel, config: LuauDocsConfig) {
 	return result;
 }
 
-/**
- * Builds each dependency's pages and symbol table the same way its own site
- * built them so references resolve to the exact anchors the dependency minted.
- * Uses default config values and discards the dependency's own build warnings.
- */
-export function buildDependencyLinks(loaded: LoadedDependency[]): DependencyLinks {
-	interface Dependency {
-		url: string;
-		symbols: SymbolTable;
-		/** require path -> module */
-		modules: Map<string, Module>;
-	}
-	const byAlias = new Map<string, Dependency>();
-	for (const dep of loaded) {
-		const { pages, warnings, resolveAlias } = buildAnchoredPages(
-			dep.model,
-			validateConfig({ title: dep.alias }),
-		);
+interface IndexedDependency {
+	url: string;
+	symbols: SymbolTable;
+	byId: Map<string, Module>;
+	resolveAlias: (moduleId: string) => string;
+	/** require path -> module */
+	modules: Map<string, Module>;
+}
+
+function indexLoadedDependency(
+	dep: LoadedDependency,
+	warnings: string[],
+): IndexedDependency | undefined {
+	try {
+		const {
+			pages,
+			warnings: depWarnings,
+			resolveAlias,
+		} = buildAnchoredPages(dep.model, validateConfig({ title: dep.alias }));
 		const byId = new Map(dep.model.modules.map((module) => [module.id, module]));
 		const targetOf = (module: Module): Module => byId.get(resolveAlias(module.id)) ?? module;
 		const modules = new Map(
@@ -844,49 +859,120 @@ export function buildDependencyLinks(loaded: LoadedDependency[]): DependencyLink
 		if (entryModule !== undefined) {
 			modules.set("", entryModule);
 		}
-		byAlias.set(dep.alias, {
+		return {
 			url: dep.url.replace(/\/+$/, ""),
-			symbols: new SymbolTable(dep.model, pages, warnings, resolveAlias),
+			symbols: new SymbolTable(dep.model, pages, depWarnings, resolveAlias),
+			byId,
+			resolveAlias,
 			modules,
-		});
+		};
+	} catch (error) {
+		warnings.push(
+			`[source] aliases.${dep.alias}: could not index its doc model (${errorMessage(error)}); types reached through @${dep.alias} link to their module pages under ${dep.url} instead of their exact entries`,
+		);
+		return undefined;
 	}
+}
 
-	// `@lute/net/client` maps to `lute/net/client.luau` in one repo layout and
-	// `src/net/client.luau` in another, so try an exact match first and then the
-	// shortest module path that ends with `/${path}`.
-	const moduleFor = (dep: Dependency, path: string): Module | undefined => {
-		const exact = dep.modules.get(path);
-		if (exact !== undefined) {
-			return exact;
+/**
+ * `@lute/net/client` maps to `lute/net/client.luau` in one repo layout and
+ * `src/net/client.luau` in another, so try an exact match first and then the
+ * shortest module path that ends with `/${path}`.
+ */
+function dependencyModuleFor(dep: IndexedDependency, path: string): Module | undefined {
+	const exact = dep.modules.get(path);
+	if (exact !== undefined) {
+		return exact;
+	}
+	let best: [string, Module] | undefined;
+	for (const [candidate, module] of dep.modules) {
+		if (
+			candidate.endsWith(`/${path}`) &&
+			(best === undefined || candidate.length < best[0].length)
+		) {
+			best = [candidate, module];
 		}
-		let best: [string, Module] | undefined;
-		for (const [candidate, module] of dep.modules) {
-			if (
-				candidate.endsWith(`/${path}`) &&
-				(best === undefined || candidate.length < best[0].length)
-			) {
-				best = [candidate, module];
+	}
+	return best?.[1];
+}
+
+function findExportedDecl(module: Module, name: string): { id: string } | undefined {
+	return (
+		module.types.find(
+			(ty) => ty.name === name && (ty.exported || ty.kind === "typefunction"),
+		) ?? module.classes.find((cls) => cls.name === name)
+	);
+}
+
+function dependencyReexportHref(dep: IndexedDependency, re: Reexport): string | undefined {
+	if (re.targetId !== undefined) {
+		const direct = dep.symbols.linkForId(re.targetId);
+		if (direct !== undefined) {
+			return direct;
+		}
+	}
+	const targetMod = dep.byId.get(dep.resolveAlias(re.targetModule));
+	if (re.targetMember !== undefined && targetMod !== undefined) {
+		const targetDecl = findExportedDecl(targetMod, re.targetMember);
+		if (targetDecl !== undefined) {
+			const href = dep.symbols.linkForId(targetDecl.id);
+			if (href !== undefined) {
+				return href;
 			}
 		}
-		return best?.[1];
-	};
+	}
+	if (re.targetMember === undefined) {
+		const modHref = dep.symbols.linkForId(re.targetModule);
+		if (modHref !== undefined) {
+			return modHref;
+		}
+	}
+	return dep.symbols.linkForId(re.id);
+}
 
+function dependencyDeclHref(
+	dep: IndexedDependency,
+	module: Module,
+	name: string | undefined,
+): string | undefined {
+	if (name === undefined) {
+		return undefined;
+	}
+	const decl = findExportedDecl(module, name);
+	if (decl !== undefined) {
+		return dep.symbols.linkForId(decl.id);
+	}
+	const re = module.reexports.find((entry) => entry.name === name && !entry.within);
+	return re === undefined ? undefined : dependencyReexportHref(dep, re);
+}
+
+/**
+ * Builds each dependency's pages and symbol table the same way its own site
+ * built them so references resolve to the exact anchors the dependency minted.
+ * Uses default config values and discards the dependency's own build warnings.
+ */
+export function buildDependencyLinks(
+	loaded: LoadedDependency[],
+	warnings: string[] = [],
+): DependencyLinks {
+	const byAlias = new Map<string, IndexedDependency>();
+	for (const dep of loaded) {
+		const indexed = indexLoadedDependency(dep, warnings);
+		if (indexed !== undefined) {
+			byAlias.set(dep.alias, indexed);
+		}
+	}
 	return {
 		resolve(ref) {
 			const dep = byAlias.get(ref.alias);
-			const module = dep && moduleFor(dep, ref.path);
+			const module = dep && dependencyModuleFor(dep, ref.path);
 			if (dep === undefined || module === undefined) {
 				return undefined;
 			}
 			// If the specific type is not documented in the model, fall back to
 			// its module's page rather than guessing an anchor.
-			const decl =
-				ref.name === undefined
-					? undefined
-					: (module.types.find((ty) => ty.name === ref.name && ty.exported) ??
-						module.classes.find((cls) => cls.name === ref.name));
 			const href =
-				(decl && dep.symbols.linkForId(decl.id)) ?? dep.symbols.linkForId(module.id);
+				dependencyDeclHref(dep, module, ref.name) ?? dep.symbols.linkForId(module.id);
 			return href === undefined ? undefined : dep.url + href;
 		},
 	};
@@ -898,7 +984,7 @@ export function buildDependencyLinks(loaded: LoadedDependency[]): DependencyLink
 
 /**
  * Builds a Luau signature code fence while recording link spans at their exact
- * byte offsets as segments are appended.
+ * UTF-16 code-unit offsets as segments are appended.
  */
 class Fence {
 	private body = "";
@@ -941,14 +1027,16 @@ class Fence {
 	}
 
 	/**
-	 * Emits the fence. The info string carries `luaudocs-links=...` (compact JSON
-	 * with no whitespace) only when at least one reference resolved, or emits a
-	 * plain `luau` fence otherwise.
+	 * Emits the fence using enough backticks to out-fence any backtick run in
+	 * `body`. The info string carries `luaudocs-links=...` (compact JSON with no
+	 * whitespace) only when at least one reference resolved, or emits a plain
+	 * `luau` fence otherwise.
 	 */
 	render(): string {
+		const fence = "`".repeat(Math.max(3, longestBacktickRun(this.body) + 1));
 		const info =
 			this.spans.length > 0 ? `luau ${LINKS_TOKEN}${JSON.stringify(this.spans)}` : "luau";
-		return ["```" + info, this.body, "```"].join("\n");
+		return [fence + info, this.body, fence].join("\n");
 	}
 }
 
@@ -1109,9 +1197,23 @@ function sourceLink(span: SourceSpan | undefined, options: RenderOptions): strin
 	return sourceLinkAnchor(`${repoFileUrl(repo, path)}${lines}`);
 }
 
-/** Escapes `|` and replaces newlines with `<br />` inside a markdown table cell. */
+/**
+ * Formats text for a GFM table cell: unwraps soft line breaks within paragraphs,
+ * joins multi-paragraph breaks with `<br><br>`, and escapes unescaped `|` pipes.
+ */
 function cellText(text: string | undefined): string {
-	return text ? text.replace(/\|/g, "\\|").replace(/\n+/g, "<br />") : "";
+	if (!text) {
+		return "";
+	}
+	return text
+		.trim()
+		.split(/\r?\n(?:[ \t]*\r?\n)+/)
+		.map((paragraph) => unwrap(paragraph.trim()))
+		.filter(Boolean)
+		.join("<br><br>")
+		.replace(/(\\*)\|/g, (match, slashes: string) =>
+			slashes.length % 2 === 1 ? match : `${slashes}\\|`,
+		);
 }
 
 /** Flattens a doc string into a single list-item line, resolving prose references. */
@@ -1148,10 +1250,11 @@ function reexportBadge(re: ReexportInfo | undefined, options: RenderOptions): st
 		return "";
 	}
 	const text = reexportLabel(re);
-	const url =
+	const rawUrl =
 		(re.targetId
 			? (options.symbols.linkForId(re.targetId) ?? externalUrl(re.targetId, options))
 			: undefined) ?? re.url;
+	const url = rawUrl !== undefined && isSafeHref(rawUrl) ? rawUrl : undefined;
 	if (url) {
 		return `[${badge("info", text)}](${linkDestination(url)})${BADGE_LINK_ATTRS}`;
 	}
@@ -1188,7 +1291,7 @@ function memberBlock(
 		.filter(Boolean)
 		.join(" ");
 	return [
-		heading(3, `\`${decl.name}\``, badges, sourceLink(decl.source, options)),
+		heading(3, codeSpan(decl.name), badges, sourceLink(decl.source, options)),
 		deprecationNotice(decl.tags, options),
 		fence,
 		decl.doc ? linkifyProse(decl.doc, options) : "",
@@ -1209,7 +1312,7 @@ function renderFn(fn: PageFn, options: RenderOptions): string {
 			"Parameters",
 			fn.signature.params
 				.filter((param) => param.doc)
-				.map((param) => `- \`${param.name}\`: ${itemText(param.doc!, options)}`),
+				.map((param) => `- ${codeSpan(param.name)}: ${itemText(param.doc!, options)}`),
 		),
 		section(
 			"Returns",
@@ -1224,7 +1327,7 @@ function renderFn(fn: PageFn, options: RenderOptions): string {
 			"Errors",
 			fn.errors.map(
 				(err) =>
-					`| \`${cellText(err.type)}\` | ` +
+					`| ${cellText(codeSpan(unwrap(err.type)))} | ` +
 					`${cellText(err.doc && linkifyProse(err.doc, options).trim())} |`,
 			),
 			["| Type | Description |", "| :-- | :-- |"],
@@ -1241,7 +1344,7 @@ function renderType(ty: PageType, options: RenderOptions): string {
 	return memberBlock(ty, fence, options, [
 		section(
 			"Fields",
-			leftovers.map((field) => `- \`${field.name}\`: ${itemText(field.doc!, options)}`),
+			leftovers.map((field) => `- ${codeSpan(field.name)}: ${itemText(field.doc!, options)}`),
 		),
 	]);
 }
@@ -1257,17 +1360,18 @@ function constructorLinks(section: PageSection, options: RenderOptions): string 
 		.map((id) => {
 			const url = options.symbols.linkForId(id);
 			const label = options.symbols.nameForId(id);
-			return url && label ? `[\`${label}\`](${linkDestination(url)})` : undefined;
+			return url && label ? `[${codeSpan(label)}](${linkDestination(url)})` : undefined;
 		})
 		.filter(Boolean);
 	return links.length > 0 ? `**Constructors:** ${links.join(" · ")}` : "";
 }
 
 function renderPage(page: PageModel, options: RenderOptions): string {
+	const safeModuleId = page.moduleId.replace(/--/g, "- -").replace(/>/g, "&gt;");
 	const parts: string[] = [
 		generatedFrontmatter(displayTitle(page), ["outline: [2, 3]"]),
 		// Informational only (nothing parses this comment).
-		`<!-- generated by luaudocs from ${page.moduleId} -->`,
+		`<!-- generated by luaudocs from ${safeModuleId} -->`,
 	];
 
 	// Wrap every heading block and every member in `#region` / `#endregion`
@@ -1514,7 +1618,11 @@ async function renderModel(
 		!skipDependencies && model.modules.length > 0
 			? await loadDependencies(context.config, context.root)
 			: { loaded: [], warnings: [] };
-	const result = emitDocs(model, context.config, buildDependencyLinks(dependencies.loaded));
+	const result = emitDocs(
+		model,
+		context.config,
+		buildDependencyLinks(dependencies.loaded, dependencies.warnings),
+	);
 	result.warnings.unshift(...dependencies.warnings);
 	return { model, result };
 }

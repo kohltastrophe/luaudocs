@@ -10,11 +10,11 @@ lastUpdated: false
 
 <!-- #region reference -->
 
-<div class="luaudocs-tree">
+<nav class="luaudocs-tree" aria-label="API modules">
 
 - [Tagged](/api/Tagged): Tag-torture fixture: every moonwave tag on a path from extractor to rendered page.
     - [Widget](/api/Widget): A stateful widget.
 
-</div>
+</nav>
 
 <!-- #endregion reference -->

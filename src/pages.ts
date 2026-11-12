@@ -10,9 +10,11 @@ import {
 	mkdirSync,
 	readdirSync,
 	readFileSync,
+	realpathSync,
 	renameSync,
 	rmdirSync,
 	rmSync,
+	statSync,
 	writeFileSync,
 } from "node:fs";
 import { dirname, join, relative } from "node:path";
@@ -29,7 +31,7 @@ import type {
 	SourceSpan,
 	TypeDecl,
 } from "./docmodel";
-import { toPosix, type LuauDocsConfig } from "./config";
+import { compareCodePoints, toPosix, type LuauDocsConfig } from "./config";
 import { frontmatter } from "./markdown";
 
 export { toPosix };
@@ -98,18 +100,44 @@ export function syncFile(absPath: string, content: string | undefined): void {
 	}
 }
 
-/** Lists every file under `root`, POSIX-relative and sorted (`[]` if `root` is missing). */
+/**
+ * Lists every file under `root` (following file and directory symlinks while
+ * guarding against symlink cycles), POSIX-relative and sorted (`[]` if `root` is missing).
+ */
 export function filesUnder(root: string): Array<{ abs: string; rel: string }> {
 	if (!existsSync(root)) {
 		return [];
 	}
-	return readdirSync(root, { recursive: true, withFileTypes: true })
-		.filter((entry) => entry.isFile())
-		.map((entry) => {
-			const abs = join(entry.parentPath, entry.name);
-			return { abs, rel: toPosix(relative(root, abs)) };
-		})
-		.sort((a, b) => (a.rel < b.rel ? -1 : 1));
+	const results: Array<{ abs: string; rel: string }> = [];
+	const seenDirs = new Set<string>();
+	const walk = (dir: string) => {
+		try {
+			const real = realpathSync(dir);
+			if (seenDirs.has(real)) {
+				return;
+			}
+			seenDirs.add(real);
+		} catch {
+			return;
+		}
+		for (const entry of readdirSync(dir, { withFileTypes: true })) {
+			const abs = join(dir, entry.name);
+			if (entry.isDirectory()) {
+				walk(abs);
+			} else if (entry.isFile()) {
+				results.push({ abs, rel: toPosix(relative(root, abs)) });
+			} else if (entry.isSymbolicLink()) {
+				const target = statSync(abs, { throwIfNoEntry: false });
+				if (target?.isDirectory()) {
+					walk(abs);
+				} else if (target?.isFile()) {
+					results.push({ abs, rel: toPosix(relative(root, abs)) });
+				}
+			}
+		}
+	};
+	walk(root);
+	return results.sort((a, b) => compareCodePoints(a.rel, b.rel));
 }
 
 export interface SyncSummary {
@@ -160,7 +188,7 @@ export function syncDir(
 			}
 			if (entry.isDirectory()) {
 				subdirs.push(abs);
-			} else if (entry.isFile()) {
+			} else if (entry.isFile() || entry.isSymbolicLink()) {
 				onDisk.push({ abs, rel });
 				present.add(rel);
 			}
@@ -173,7 +201,9 @@ export function syncDir(
 			keepByLower ??= new Map([...keep].map((item) => [item.toLowerCase(), item]));
 			const kept = keepByLower.get(rel.toLowerCase());
 			if (kept !== undefined && !present.has(kept)) {
-				renameSync(abs, join(dir, kept));
+				const dest = join(dir, kept);
+				mkdirSync(dirname(dest), { recursive: true });
+				renameSync(abs, dest);
 				continue;
 			}
 			rmSync(abs);
@@ -189,12 +219,16 @@ export function syncDir(
 		}
 	}
 
-	// Remove directories emptied by the sweep, deepest first (non-empty ones throw and stay).
+	// Remove directories emptied by the sweep (including `dir` itself when
+	// `files.size === 0`), deepest first; non-empty ones throw and stay.
+	if (deleteStale && files.size === 0) {
+		subdirs.push(dir);
+	}
 	for (const emptied of subdirs.sort((a, b) => b.length - a.length)) {
 		try {
 			rmdirSync(emptied);
 		} catch {
-			// Directory still holds kept files.
+			// Directory still holds kept or foreign files.
 		}
 	}
 	return summary;
@@ -231,7 +265,9 @@ export function isGeneratedFile(content: string): boolean {
 }
 
 /**
- * Luau reserved keywords (`continue` is contextual and therefore excluded).
+ * The 21 Luau reserved keywords, which require bracket indexing (`t["end"]`)
+ * rather than dot access. Contextual keywords (`continue`, `type`, `export`,
+ * `typeof`) are valid identifiers after `.` and are intentionally excluded.
  * Mirrors `LUAU_KEYWORDS` in `extractor/model/members.luau`.
  */
 const LUAU_KEYWORDS = new Set([
@@ -286,6 +322,13 @@ export function generatedFrontmatter(title: string, extra: string[] = []): strin
 
 export const TYPES_HEADING = "Types";
 
+export const MEMBER_HEADINGS = [
+	{ text: "Properties", kind: "prop" },
+	{ text: "Functions", kind: "function" },
+	{ text: "Methods", kind: "method" },
+	{ text: "Metamethods", kind: "metamethod" },
+] as const;
+
 /** Provenance metadata for a member inlined from another module. */
 export interface ReexportInfo {
 	/** Defining module's display name (rendered as `"from <from>"`). */
@@ -330,6 +373,16 @@ export interface PageSection {
 	source?: SourceSpan;
 }
 
+/** Groups a section's visible members under occupied kind headings in page render order. */
+export function membersByKind(
+	section: PageSection,
+): Array<{ text: (typeof MEMBER_HEADINGS)[number]["text"]; members: PageMember[] }> {
+	return MEMBER_HEADINGS.flatMap(({ text, kind }) => {
+		const members = section.members.filter((member) => member.kind === kind);
+		return members.length > 0 ? [{ text, members }] : [];
+	});
+}
+
 export interface PageModel {
 	slug: string;
 	title: string;
@@ -363,6 +416,14 @@ export interface PageModel {
 /** Returns the title used in the sidebar, search index, and browser tab (`navTitle ?? title`). */
 export function displayTitle(page: PageModel): string {
 	return page.navTitle ?? page.title;
+}
+
+/**
+ * Returns a page's summary doc source (`page.doc`, falling back to the primary
+ * section's doc when a factory module documents its `@class` block instead).
+ */
+export function pageSummaryDoc(page: PageModel): string | undefined {
+	return page.doc ?? page.sections[0]?.doc;
 }
 
 export interface BuildResult {
@@ -537,6 +598,7 @@ function buildSections(
 		members: visible(module.members, includePrivate),
 	};
 
+	const seenConstructors = new Set<string>();
 	const nested: PageSection[] = [];
 	for (const cls of module.classes) {
 		const section = classToSection(cls, module.name, includePrivate);
@@ -546,7 +608,12 @@ function buildSections(
 			// docs, tags, constructors, and members into `primary`.
 			primary.doc = primary.doc ?? section.doc;
 			primary.tags = primary.tags ?? section.tags;
-			primary.constructors.push(...section.constructors);
+			for (const id of section.constructors) {
+				if (!seenConstructors.has(id)) {
+					seenConstructors.add(id);
+					primary.constructors.push(id);
+				}
+			}
 			primary.members.push(...section.members);
 		} else {
 			nested.push(section);
@@ -613,14 +680,25 @@ interface ReexportContext {
  */
 function withSelf(signature: Fn["signature"]): Fn["signature"] {
 	let depth = 0;
+	let quote: string | undefined;
 	let inserted = false;
 	const segs = signature.segs.map((seg) => {
 		if (inserted || typeof seg !== "string") {
 			return seg;
 		}
 		for (let index = 0; index < seg.length; index += 1) {
-			const char = seg[index];
-			if (char === "<") {
+			const char = seg[index]!;
+			if (quote !== undefined) {
+				if (char === "\\") {
+					index += 1;
+				} else if (char === quote) {
+					quote = undefined;
+				}
+				continue;
+			}
+			if (char === '"' || char === "'" || char === "`") {
+				quote = char;
+			} else if (char === "<") {
 				depth += 1;
 			} else if (char === ">" && seg[index - 1] !== "-") {
 				depth -= 1;
@@ -647,17 +725,32 @@ function inlineReexports(
 	nested: PageSection[],
 	ctx: ReexportContext,
 ): void {
+	const sectionByName = new Map<string, PageSection>();
+	for (const section of nested) {
+		if (!sectionByName.has(section.container)) {
+			sectionByName.set(section.container, section);
+		}
+		if (!sectionByName.has(section.name)) {
+			sectionByName.set(section.name, section);
+		}
+	}
+	const seenIds = new Set<string>(
+		[primary, ...nested].flatMap((section) => section.members.map((member) => member.id)),
+	);
+
 	for (const reexport of module.reexports) {
+		if (seenIds.has(reexport.id)) {
+			continue;
+		}
 		const section =
-			(reexport.within
-				? nested.find((s) => s.container === reexport.within || s.name === reexport.within)
-				: undefined) ?? primary;
+			(reexport.within ? sectionByName.get(reexport.within) : undefined) ?? primary;
 		const target = ctx.modulesById.get(reexport.targetModule);
 		const { member, cls } = (reexport.targetId && ctx.definitions.get(reexport.targetId)) || {};
 		// Skip private definitions when `includePrivate` is false.
 		if (member && !isVisible(member, ctx.includePrivate)) {
 			continue;
 		}
+		seenIds.add(reexport.id);
 		if (member) {
 			const shared = {
 				id: reexport.id,
@@ -678,7 +771,10 @@ function inlineReexports(
 					...member,
 					...shared,
 					kind: "function",
-					signature: { ...signature, callee: `${section.container}.${reexport.name}` },
+					signature: {
+						...signature,
+						callee: memberAccess(section.container, reexport.name),
+					},
 				});
 			}
 		} else if (cls) {
@@ -723,16 +819,16 @@ function inlineReexports(
 }
 
 /**
- * Claims a case-insensitively unique page slug for `module`, appending `-2`,
- * `-3`, ... on collision and skipping any suffix already claimed by a literal
- * `Foo-2` module name.
+ * Claims a case-insensitively unique page slug for `module`, stripping leading
+ * and trailing dots/hyphens and appending `-2`, `-3`, ... on collision while
+ * skipping any suffix already claimed by a literal `Foo-2` module name.
  */
 function claimSlug(
 	module: Module,
 	usedSlugs: Set<string>,
 	warnings: string[],
 ): { slug: string; collided: boolean } {
-	const base = module.name.replace(/[^\w.-]+/g, "-");
+	const base = module.name.replace(/[^\w.-]+/g, "-").replace(/^[.-]+|[.-]+$/g, "") || "module";
 	let slug = base;
 	for (let n = 2; usedSlugs.has(slug.toLowerCase()); n += 1) {
 		slug = `${base}-${n}`;

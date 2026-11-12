@@ -13,9 +13,23 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { parse as parseToml } from "smol-toml";
 
+export const IS_WINDOWS = process.platform === "win32";
+
 /** Normalizes Windows `\` path separators to `/` (Node's `relative()` returns `\` on Windows). */
 export function toPosix(path: string): string {
 	return path.replace(/\\/g, "/");
+}
+
+export function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function errorMessage(err: unknown): string {
+	return err instanceof Error ? err.message : String(err);
+}
+
+export function compareCodePoints(a: string, b: string): number {
+	return a < b ? -1 : a > b ? 1 : 0;
 }
 
 export interface NavItem {
@@ -81,7 +95,7 @@ export interface LuauDocsConfig {
 	};
 }
 
-export const DEFAULT_ENTRIES = ["src"];
+export const DEFAULT_ENTRIES: string[] = Object.freeze(["src"]) as string[];
 export const DEFAULT_BRANCH = "main";
 export const DEFAULT_DOCS_DIR = ".luaudocs";
 /**
@@ -92,11 +106,17 @@ export const DEFAULT_DOCS_DIR = ".luaudocs";
  * `.../lute/fs`). `[source.aliases]` adds to or overrides these defaults, and
  * `false` removes a built-in alias.
  */
-export const DEFAULT_ALIASES: Record<string, AliasConfig> = {
-	lute: { url: "https://lute.luau.org/lute" },
-	std: { url: "https://lute.luau.org/std" },
-	lune: { url: "https://lune-org.github.io/docs/api-reference" },
-};
+export const DEFAULT_ALIASES: Record<string, AliasConfig> = Object.freeze({
+	lute: Object.freeze({ url: "https://lute.luau.org/lute" }),
+	std: Object.freeze({ url: "https://lute.luau.org/std" }),
+	lune: Object.freeze({ url: "https://lune-org.github.io/docs/api-reference" }),
+});
+
+function cloneDefaultAliases(): Record<string, AliasConfig> {
+	return Object.fromEntries(
+		Object.entries(DEFAULT_ALIASES).map(([name, alias]) => [name, { ...alias }]),
+	);
+}
 
 /**
  * Formats a repository file URL on its host for source links and rewritten
@@ -119,10 +139,10 @@ function fail(path: string, expected: string): never {
 }
 
 function table(value: unknown, path: string): Record<string, unknown> {
-	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+	if (!isRecord(value)) {
 		fail(path, "a table");
 	}
-	return value as Record<string, unknown>;
+	return value;
 }
 
 function str(value: unknown, path: string): string {
@@ -146,6 +166,18 @@ function strArray(value: unknown, path: string): string[] {
 	return value as string[];
 }
 
+function modelSource(value: unknown, path: string): string {
+	const text = str(value, path);
+	if (text.trim() === "") {
+		fail(path, "a non-empty path or http(s) URL");
+	}
+	// Multi-letter `scheme:` prefixes are URLs rather than Windows `C:\` drive paths.
+	if (/^[a-z][a-z0-9+.-]+:/i.test(text) && normalizeUrl(text) === undefined) {
+		fail(path, "a local path or http(s) URL");
+	}
+	return text;
+}
+
 /**
  * Validates `[source] aliases` merged over the built-in runtimes. Lowercases
  * names (Luau resolves aliases case-insensitively) and strips any leading `@`,
@@ -155,7 +187,7 @@ function strArray(value: unknown, path: string): string[] {
  */
 function aliases(value: unknown, path: string): Record<string, AliasConfig> {
 	const raw = table(value, path);
-	const merged: Record<string, AliasConfig> = { ...DEFAULT_ALIASES };
+	const merged = cloneDefaultAliases();
 	for (const [key, entry] of Object.entries(raw)) {
 		const name = key.replace(/^@/, "").toLowerCase();
 		const entryPath = keyPath(path, key);
@@ -165,12 +197,11 @@ function aliases(value: unknown, path: string): Record<string, AliasConfig> {
 			merged[name] = {};
 		} else if (typeof entry === "string") {
 			merged[name] = { url: url(entry, entryPath) };
-		} else if (typeof entry === "object" && entry !== null && !Array.isArray(entry)) {
-			const spec = entry as Record<string, unknown>;
-			noUnknownKeys(spec, entryPath, ["url", "model"]);
+		} else if (isRecord(entry)) {
+			noUnknownKeys(entry, entryPath, ["url", "model"]);
 			const alias = {
-				url: opt(spec, entryPath, "url", url),
-				model: opt(spec, entryPath, "model", str),
+				url: opt(entry, entryPath, "url", url),
+				model: opt(entry, entryPath, "model", modelSource),
 			};
 			// A model's links resolve against the site that published it.
 			if (alias.model !== undefined && alias.url === undefined) {
@@ -195,13 +226,38 @@ function aliases(value: unknown, path: string): Record<string, AliasConfig> {
  * `8080`, which would bake `base: "/8080/"`) as well as `ssh://` remotes that
  * cannot open in a browser.
  */
-function normalizeUrl(value: string): string | undefined {
-	const text = value.replace(/\/+$/, "");
+export function normalizeUrl(raw: string): string | undefined {
+	const text = raw.replace(/\/+$/, "");
 	if (!URL.canParse(text)) {
 		return undefined;
 	}
 	const { protocol } = new URL(text);
 	return protocol === "http:" || protocol === "https:" ? text : undefined;
+}
+
+/**
+ * Normalizes a Git remote or `moonwave.toml` `gitRepoUrl` (`ssh://git@github.com/...`,
+ * `git@github.com:...`, or `https://...(.git)`) to a clean HTTPS URL with
+ * credentials, `.git`, and trailing slashes stripped, or returns `undefined`
+ * when the input cannot form an `http(s)` URL.
+ */
+export function normalizeGitRepoUrl(raw: string): string | undefined {
+	const candidate = raw
+		.trim()
+		.replace(/^(?:git@github\.com:|ssh:\/\/(?:[^@/]+@)?github\.com\/)/i, "https://github.com/")
+		.replace(/\/+$/, "")
+		.replace(/\.git$/i, "");
+	const normalized = normalizeUrl(candidate);
+	if (normalized === undefined) {
+		return undefined;
+	}
+	const parsed = new URL(normalized);
+	if (parsed.username !== "" || parsed.password !== "") {
+		parsed.username = "";
+		parsed.password = "";
+		return normalizeUrl(parsed.href);
+	}
+	return normalized;
 }
 
 function url(value: unknown, path: string): string {
@@ -314,11 +370,11 @@ export function validateConfig(data: unknown, fallbackTitle?: string): LuauDocsC
 	const rawSource = rootTable(raw, "source");
 	noUnknownKeys(rawSource, "source", ["entries", "include", "exclude", "projectFile", "aliases"]);
 	const source: LuauDocsConfig["source"] = {
-		entries: opt(rawSource, "source", "entries", strArray) ?? DEFAULT_ENTRIES,
+		entries: opt(rawSource, "source", "entries", strArray) ?? [...DEFAULT_ENTRIES],
 		include: opt(rawSource, "source", "include", strArray),
 		exclude: opt(rawSource, "source", "exclude", strArray),
 		projectFile: opt(rawSource, "source", "projectFile", str),
-		aliases: opt(rawSource, "source", "aliases", aliases) ?? { ...DEFAULT_ALIASES },
+		aliases: opt(rawSource, "source", "aliases", aliases) ?? cloneDefaultAliases(),
 	};
 
 	// `[repo]` requires `url`, so it stays `undefined` when omitted.
@@ -405,9 +461,7 @@ export function parseConfig(tomlText: string, fallbackTitle?: string): LuauDocsC
 	try {
 		data = parseToml(tomlText);
 	} catch (error) {
-		throw new ConfigError(
-			`luaudocs.toml: ${error instanceof Error ? error.message : String(error)}`,
-		);
+		throw new ConfigError(`luaudocs.toml: ${errorMessage(error)}`);
 	}
 	return validateConfig(data, fallbackTitle);
 }
@@ -432,16 +486,14 @@ function findConfig(startDir: string): string | undefined {
 	let dir = resolve(startDir);
 	for (;;) {
 		const candidate = join(dir, "luaudocs.toml");
-		try {
-			readFileSync(candidate);
+		if (existsSync(candidate) && statSync(candidate).isFile()) {
 			return candidate;
-		} catch {
-			const parent = dirname(dir);
-			if (parent === dir) {
-				return undefined;
-			}
-			dir = parent;
 		}
+		const parent = dirname(dir);
+		if (parent === dir) {
+			return undefined;
+		}
+		dir = parent;
 	}
 }
 
@@ -468,8 +520,7 @@ function hasDluauFile(dirPath: string): boolean {
  * true, only directories containing an `init.luau`, `init.d.luau`, `init.lua`,
  * or any `.d.luau` declaration file match, so `init` never writes an entry
  * directory that would fail the first build. Config-less builds pass `false` so
- * the extractor's own `entry-missing` diagnostic reports a folder without an
- * init file.
+ * the extractor's own entry check reports a folder without an init file.
  */
 export function probeEntries(root: string, order: string[], requireInit: boolean): string[] {
 	return order.filter((dir) => {
@@ -509,8 +560,15 @@ export function defaultConfig(root: string): LuauDocsConfig {
  * root and sweeps `.vitepress/` and `api/` beneath it.
  */
 export function normalizeDocsDir(config: LuauDocsConfig, root: string): LuauDocsConfig {
-	const rel = toPosix(relative(root, resolve(root, config.docs.dir)));
-	if (rel === "" || rel === ".." || rel.startsWith("../") || isAbsolute(rel)) {
+	const raw = toPosix(config.docs.dir);
+	const rel = toPosix(relative(root, resolve(root, raw)));
+	if (
+		/^[A-Za-z]:/.test(raw) ||
+		rel === "" ||
+		rel === ".." ||
+		rel.startsWith("../") ||
+		isAbsolute(rel)
+	) {
 		fail(
 			"docs.dir",
 			`a directory inside the project, not its root or outside it (got ${JSON.stringify(config.docs.dir)})`,

@@ -9,29 +9,23 @@ import { validateConfig } from "../src/config";
 import { loadDependencies } from "../src/dependencies";
 import { parseDocModel } from "../src/docmodel";
 import { buildDependencyLinks, emitDocsFromJson } from "../src/render";
-import { makeTempDirFactory, memberBlock, modelJson, signatureLinks, testConfig } from "./helpers";
+import {
+	makeTempDirFactory,
+	memberBlock,
+	modelJson,
+	signatureLinks,
+	testConfig,
+	testFn,
+	testMod,
+	testType,
+} from "./helpers";
 
 const tempDir = makeTempDirFactory("luaudocs-deps-");
 
 const dependencyJson = modelJson([
-	{
-		id: "src/init.luau",
-		instancePath: ["Dep"],
-		name: "Dep",
+	testMod("src/init.luau", "Dep", {
 		doc: "The dependency's entry.",
-		source: { file: "src/init.luau", line: 1 },
-		members: [
-			{
-				id: "src/init.luau#fn.Dep.new",
-				name: "new",
-				kind: "function",
-				tags: { custom: [] },
-				visibility: "public",
-				errors: [],
-				signature: { callee: "Dep.new", segs: ["()"], params: [], returns: [] },
-				source: { file: "src/init.luau", line: 2 },
-			},
-		],
+		members: [testFn("src/init.luau#fn.Dep.new", "new", "Dep.new")],
 		classes: [
 			{
 				id: "src/init.luau#class.Dep",
@@ -42,37 +36,31 @@ const dependencyJson = modelJson([
 				source: { file: "src/init.luau", line: 1 },
 			},
 		],
-	},
-	{
-		id: "src/net/client.luau",
-		instancePath: ["Dep", "net", "client"],
-		name: "client",
-		source: { file: "src/net/client.luau", line: 1 },
-		types: [
+		reexports: [
 			{
-				id: "src/net/client.luau#type.Response",
+				id: "src/init.luau#reexport.Response",
 				name: "Response",
-				exported: true,
-				kind: "alias",
-				generics: [],
-				definition: [["{ status: number }"]],
-				tags: { custom: [] },
-				visibility: "public",
-				source: { file: "src/net/client.luau", line: 3 },
-			},
-			{
-				id: "src/net/client.luau#type.Private",
-				name: "Private",
-				exported: false,
-				kind: "alias",
-				generics: [],
-				definition: [["number"]],
-				tags: { custom: [] },
-				visibility: "public",
-				source: { file: "src/net/client.luau", line: 5 },
+				targetModule: "src/net/client.luau",
+				targetId: "src/net/client.luau#type.Response",
 			},
 		],
-	},
+	}),
+	testMod("src/net/client.luau", "client", {
+		instancePath: ["Dep", "net", "client"],
+		types: [
+			testType("src/net/client.luau#type.Response", "Response", [["{ status: number }"]], {
+				source: { file: "src/net/client.luau", line: 3 },
+			}),
+			testType("src/net/client.luau#type.Widen", "Widen", [["type function Widen(t)"]], {
+				kind: "typefunction",
+				source: { file: "src/net/client.luau", line: 4 },
+			}),
+			testType("src/net/client.luau#type.Private", "Private", [["number"]], {
+				exported: false,
+				source: { file: "src/net/client.luau", line: 5 },
+			}),
+		],
+	}),
 ]);
 const dependency = parseDocModel(dependencyJson);
 
@@ -89,6 +77,13 @@ describe("buildDependencyLinks and external resolution", () => {
 		expect(links.resolve({ alias: "dep", path: "net/client", name: "Response" })).toBe(
 			"https://dep.test/docs/api/client#response",
 		);
+		expect(links.resolve({ alias: "dep", path: "net/client", name: "Widen" })).toBe(
+			"https://dep.test/docs/api/client#widen",
+		);
+		// Re-exported type on the entry module resolves to its canonical target anchor.
+		expect(links.resolve({ alias: "dep", path: "", name: "Response" })).toBe(
+			"https://dep.test/docs/api/client#response",
+		);
 		expect(links.resolve({ alias: "dep", path: "", name: "Dep" })).toBe(
 			"https://dep.test/docs/api/Dep",
 		);
@@ -102,34 +97,25 @@ describe("buildDependencyLinks and external resolution", () => {
 	});
 
 	it("links external signature references through a loaded model or falls back to the base URL", () => {
-		const fn = (name: string, ref: string, line: number) => ({
-			id: `src/init.luau#fn.App.${name}`,
-			name,
-			kind: "function",
-			tags: { custom: [] },
-			visibility: "public",
-			errors: [],
-			signature: {
-				callee: `App.${name}`,
-				segs: ["(): ", { text: ref }],
-				params: [],
-				returns: [{ type: [{ text: ref }] }],
-			},
-			source: { file: "src/init.luau", line },
-		});
+		const fn = (name: string, ref: string, line: number) =>
+			testFn(`src/init.luau#fn.App.${name}`, name, `App.${name}`, ["(): ", { text: ref }], {
+				signature: {
+					callee: `App.${name}`,
+					segs: ["(): ", { text: ref }],
+					params: [],
+					returns: [{ type: [{ text: ref }] }],
+				},
+				source: { file: "src/init.luau", line },
+			});
 		const consumer = JSON.stringify({
 			...JSON.parse(
 				modelJson([
-					{
-						id: "src/init.luau",
-						instancePath: ["App"],
-						name: "App",
-						source: { file: "src/init.luau", line: 1 },
+					testMod("src/init.luau", "App", {
 						members: [
 							fn("fetch", "client.Response", 4),
 							fn("other", "client.Options", 8),
 						],
-					},
+					}),
 				]),
 			),
 			externals: {
@@ -265,6 +251,27 @@ describe("buildDependencyLinks and external resolution", () => {
 			"https://dep.test/docs/api/types#packet",
 		);
 	});
+
+	it("records indexing warnings for malformed dependency models while still resolving valid ones", () => {
+		const brokenModel = {
+			...dependency,
+			modules: [{ id: "src/broken.luau" } as unknown as (typeof dependency.modules)[number]],
+		};
+		const warnings: string[] = [];
+		const links = buildDependencyLinks(
+			[
+				{ alias: "broken", url: "https://broken.test/docs", model: brokenModel },
+				{ alias: "dep", url: "https://dep.test/docs/", model: dependency },
+			],
+			warnings,
+		);
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain("[source] aliases.broken: could not index its doc model (");
+		expect(links.resolve({ alias: "broken", path: "net/client" })).toBeUndefined();
+		expect(links.resolve({ alias: "dep", path: "net/client", name: "Response" })).toBe(
+			"https://dep.test/docs/api/client#response",
+		);
+	});
 });
 
 describe("loadDependencies", () => {
@@ -381,5 +388,16 @@ describe("loadDependencies", () => {
 		expect((await loadUrl(flakyUrl)).loaded).toEqual([]);
 		expect((await loadUrl(flakyUrl)).loaded).toHaveLength(1);
 		expect(fetchFlaky).toHaveBeenCalledTimes(2);
+
+		// Corrupt fallback cache is pruned instead of poisoning future runs, and
+		// offline fallback does not permanently memoize over a later online fetch.
+		const corruptUrl = "https://dep.test/corrupt/docmodel.json";
+		mkdirSync(join(cached(corruptUrl), ".."), { recursive: true });
+		writeFileSync(cached(corruptUrl), "{not-valid-json");
+		stubFetch(new TypeError("offline"), new Response(dependencyJson));
+		const failedCorrupt = await loadUrl(corruptUrl);
+		expect(failedCorrupt.loaded).toEqual([]);
+		expect(existsSync(cached(corruptUrl))).toBe(false);
+		expect((await loadUrl(corruptUrl)).loaded).toHaveLength(1);
 	});
 });

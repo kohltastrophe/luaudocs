@@ -7,6 +7,7 @@ import { execFile, type ExecFileException } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { compareCodePoints } from "./config";
 import { parseDocModel, type DocModel } from "./docmodel";
 import { resolveLute } from "./lute";
 
@@ -80,7 +81,9 @@ export async function extractorJson(request: ExtractRequest): Promise<string> {
 	}
 	// Sort aliases so the extractor receives a deterministic argument order
 	// regardless of JS object key order.
-	const aliases = Object.entries(request.aliases ?? {}).sort(([a], [b]) => (a < b ? -1 : 1));
+	const aliases = Object.entries(request.aliases ?? {}).sort(([a], [b]) =>
+		compareCodePoints(a, b),
+	);
 	for (const [name, { url }] of aliases) {
 		args.push("--alias", url === undefined ? name : `${name}=${url}`);
 	}
@@ -121,8 +124,16 @@ export async function extractorJson(request: ExtractRequest): Promise<string> {
 		throw new Error(`extractor was killed by ${error.signal} (out of memory?)`);
 	}
 	if (typeof error.code === "number") {
+		const combined = [stderr.trim(), stdout.trim()].filter(Boolean).join("\n");
+		// Exit code 2 carries user-facing CLI/entry validation messages from `extractor/main.luau`.
+		if (error.code === 2 && combined !== "") {
+			throw new Error(combined.replace(/^error:\s*/, ""));
+		}
+		const detail = combined.slice(0, 2000);
 		throw new Error(
-			`extractor failed (exit ${error.code})\n${stderr.trim() || stdout.trim().slice(0, 2000)}`,
+			detail === ""
+				? `extractor failed (exit ${error.code})`
+				: `extractor failed (exit ${error.code})\n${detail}`,
 		);
 	}
 	// No exit code, signal, or timeout means the spawn itself failed because the

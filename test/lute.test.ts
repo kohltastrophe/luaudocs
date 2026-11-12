@@ -88,10 +88,18 @@ describe("unzipSingleFile", () => {
 		);
 	});
 
-	it("refuses bytes that are not a zip", () => {
+	it("refuses bytes that are not a zip or carry corrupted header offsets", () => {
 		expect(() => unzipSingleFile(Buffer.from("<html>rate limited</html>"))).toThrow(
 			/not a zip archive/,
 		);
+
+		const badCentral = zip([{ name: "lute", data: BINARY, method: 0 }]);
+		badCentral.writeUInt32LE(0xdeadbeef, badCentral.length - 22 - 46 - 4);
+		expect(() => unzipSingleFile(badCentral)).toThrow(/corrupt/);
+
+		const badLocal = zip([{ name: "lute", data: BINARY, method: 0 }]);
+		badLocal.writeUInt32LE(0xdeadbeef, 0);
+		expect(() => unzipSingleFile(badLocal)).toThrow(/corrupt/);
 	});
 });
 
@@ -180,5 +188,45 @@ describe("resolveLute on first use", () => {
 		await expect(resolveLute()).rejects.toThrow(/could not download Lute/);
 		expect(log).not.toHaveBeenCalled();
 		expect(error.mock.calls.join("\n")).toContain("installing Lute");
+	});
+
+	it("validates LUAUDOCS_LUTE overrides and deduplicates concurrent in-process installs", async () => {
+		const dir = tempDir();
+		vi.stubEnv("LUAUDOCS_LUTE", join(dir, "missing-lute"));
+		await expect(resolveLute()).rejects.toThrow(/does not exist/);
+
+		vi.stubEnv("LUAUDOCS_LUTE", dir);
+		await expect(resolveLute()).rejects.toThrow(/is a directory/);
+
+		const bin = join(dir, "my-lute");
+		writeFileSync(bin, "#!/bin/sh\n");
+		vi.stubEnv("LUAUDOCS_LUTE", bin);
+		await expect(resolveLute()).resolves.toMatchObject({ command: bin });
+
+		if (
+			["linux-x64", "linux-arm64", "darwin-arm64", "win32-x64"].includes(
+				`${process.platform}-${process.arch}`,
+			)
+		) {
+			const cache = tempDir();
+			vi.stubEnv("LUAUDOCS_LUTE", "");
+			vi.stubEnv("XDG_CACHE_HOME", cache);
+			vi.stubEnv("HOME", cache);
+			vi.stubEnv("LOCALAPPDATA", cache);
+			let calls = 0;
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async () => {
+					calls += 1;
+					await new Promise((r) => setTimeout(r, 15));
+					throw new TypeError("offline");
+				}),
+			);
+			vi.spyOn(console, "error").mockImplementation(() => {});
+			const [a, b] = await Promise.allSettled([resolveLute(), resolveLute()]);
+			expect(a.status).toBe("rejected");
+			expect(b.status).toBe("rejected");
+			expect(calls).toBe(1);
+		}
 	});
 });

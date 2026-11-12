@@ -6,8 +6,10 @@ import { basename, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
 	DEFAULT_ALIASES,
+	DEFAULT_ENTRIES,
 	defaultConfig,
 	loadConfig,
+	normalizeDocsDir,
 	parseConfig,
 	parseUrlFlag,
 	probeEntries,
@@ -97,9 +99,17 @@ describe("validateConfig", () => {
 		expect(() => validateConfig(data)).toThrow(error);
 	});
 
-	it("preserves optional keys, nav dropdowns, head entries, and defaults", () => {
+	it("preserves optional keys, nav dropdowns, head entries, and frozen defaults", () => {
+		expect(Object.isFrozen(DEFAULT_ENTRIES)).toBe(true);
+		expect(Object.isFrozen(DEFAULT_ALIASES)).toBe(true);
+		expect(Object.isFrozen(DEFAULT_ALIASES.std)).toBe(true);
+
 		const defaults = validateConfig({ title: "X" });
 		expect(defaults.source).toEqual({ entries: ["src"], aliases: DEFAULT_ALIASES });
+		defaults.source.entries.push("mutated");
+		defaults.source.aliases.extra = { url: "https://extra.test" };
+		expect(DEFAULT_ENTRIES).toEqual(["src"]);
+		expect(DEFAULT_ALIASES.extra).toBeUndefined();
 		expect(defaults.docs).toEqual({
 			dir: ".luaudocs",
 			llms: true,
@@ -184,6 +194,18 @@ describe("validateConfig", () => {
 
 		for (const [alias, err] of [
 			[{ model: 1 }, /source\.aliases\.dep\.model: expected a string/],
+			[
+				{ url: "https://dep.test", model: "" },
+				/source\.aliases\.dep\.model: expected a non-empty path or http\(s\) URL/,
+			],
+			[
+				{ url: "https://dep.test", model: "   " },
+				/source\.aliases\.dep\.model: expected a non-empty path or http\(s\) URL/,
+			],
+			[
+				{ url: "https://dep.test", model: "ftp://dep.test/docmodel.json" },
+				/source\.aliases\.dep\.model: expected a local path or http\(s\) URL/,
+			],
 			[{ site: "x" }, /unknown key source\.aliases\.dep\.site/],
 			[{ model: "dep.json" }, /source\.aliases\.dep\.url: expected a URL beside model/],
 			[5, /source\.aliases\.dep: expected a URL, a table with url and model, true, or false/],
@@ -256,11 +278,27 @@ describe("loadConfig", () => {
 		}
 
 		const outside = tempDir();
-		for (const bad of [".", "", "./", "..", "../..", "sub/../", "../site", root, outside]) {
+		for (const bad of [
+			".",
+			"",
+			"./",
+			"..",
+			"../..",
+			"sub/../",
+			"../site",
+			"..\\outside",
+			"docs\\..\\..\\outside",
+			"C:\\docs",
+			root,
+			outside,
+		]) {
 			writeFileSync(join(root, "luaudocs.toml"), `[docs]\ndir = ${JSON.stringify(bad)}\n`);
 			expect(() => loadConfig(root), bad).toThrow(
 				/docs\.dir: expected a directory inside the project/,
 			);
+			expect(() =>
+				normalizeDocsDir(validateConfig({ title: "X", docs: { dir: bad } }), root),
+			).toThrow(/docs\.dir: expected a directory inside the project/);
 		}
 	});
 

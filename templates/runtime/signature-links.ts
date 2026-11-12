@@ -2,19 +2,27 @@
 //
 // Signature link decorations: the emitter writes plain ```luau fences whose
 // info string carries `luaudocs-links=[[start,end,"/api/Page#anchor"],...]`
-// (0-based byte offsets into the fence body, end-exclusive). This Shiki
-// transformer reads that token from the fence meta and turns each span into a
-// native Shiki decoration wrapping the identifier in an `<a>`. Highlighting,
-// themes, the copy button, and dual-theme CSS all remain VitePress's own, while
-// the emitted markdown stays plain Luau for `llms-full.txt`.
+// (0-based UTF-16 code-unit offsets into the fence body, end-exclusive). This
+// Shiki transformer reads that token from the fence meta and turns each span
+// into a native Shiki decoration wrapping the identifier in an `<a>`.
+// Highlighting, themes, the copy button, and dual-theme CSS all remain
+// VitePress's own, while the emitted markdown stays plain Luau for `llms-full.txt`.
 //
 // Because VitePress strips `[...]` from fence info strings before calling Shiki,
-// `relayLinks` and `decodeLinks` base64url-encode the payload across VitePress's
-// fence renderer.
+// `relayLinks` base64url-encodes the payload across VitePress's fence renderer
+// and `parseLinks` decodes either wire format directly.
 import type MarkdownIt from "markdown-it";
 import type { ShikiTransformer } from "shiki";
+import { isSafeHref } from "./markup.ts";
 
 export const LINKS_TOKEN = "luaudocs-links=";
+
+/**
+ * Base64url wire token used across VitePress's fence renderer: base64url
+ * contains no brackets, spaces, or braces, so VitePress's `[title]` and
+ * `{line-range}` strippers leave it untouched.
+ */
+export const B64_TOKEN = "luaudocs-links-b64=";
 
 /**
  * Splits `text` around `token`, reading the whitespace-free payload up to the
@@ -37,38 +45,38 @@ function splitToken(
 	};
 }
 
+function isLinkTuple(entry: unknown): entry is [number, number, string] {
+	return (
+		Array.isArray(entry) &&
+		typeof entry[0] === "number" &&
+		Number.isInteger(entry[0]) &&
+		typeof entry[1] === "number" &&
+		Number.isInteger(entry[1]) &&
+		typeof entry[2] === "string"
+	);
+}
+
+/**
+ * Parses a signature link table from either `luaudocs-links=<json>` or
+ * `luaudocs-links-b64=<base64url>` in a fence's info/meta string.
+ */
 export function parseLinks(meta: string | undefined): Array<[number, number, string]> | undefined {
-	const split = splitToken(meta, LINKS_TOKEN);
-	if (!split) {
+	const b64 = splitToken(meta, B64_TOKEN);
+	const raw = b64
+		? Buffer.from(b64.payload, "base64url").toString("utf8")
+		: splitToken(meta, LINKS_TOKEN)?.payload;
+	if (raw === undefined) {
 		return undefined;
 	}
 	try {
-		const parsed: unknown = JSON.parse(split.payload);
-		return Array.isArray(parsed) ? (parsed as Array<[number, number, string]>) : undefined;
+		const parsed: unknown = JSON.parse(raw);
+		return Array.isArray(parsed) ? parsed.filter(isLinkTuple) : undefined;
 	} catch (error) {
 		if (error instanceof SyntaxError) {
 			return undefined;
 		}
 		throw error;
 	}
-}
-
-/**
- * Base64url wire token used across VitePress's fence renderer: base64url
- * contains no brackets, spaces, or braces, so VitePress's `[title]` and
- * `{line-range}` strippers leave it untouched.
- */
-const B64_TOKEN = "luaudocs-links-b64=";
-
-/** Replaces the `from` token's payload with `to + recode(payload)`, preserving surrounding text. */
-function retoken(
-	text: string | undefined,
-	from: string,
-	to: string,
-	recode: (payload: string) => string,
-): string | undefined {
-	const split = splitToken(text, from);
-	return split && split.before + to + recode(split.payload) + split.after;
 }
 
 /**
@@ -80,29 +88,15 @@ export function relayLinks(md: MarkdownIt): void {
 	const fence = md.renderer.rules.fence!;
 	md.renderer.rules.fence = (tokens, idx, opts, env, self) => {
 		const token = tokens[idx]!;
-		const relayed = retoken(token.info, LINKS_TOKEN, B64_TOKEN, (payload) =>
-			Buffer.from(payload).toString("base64url"),
-		);
-		if (relayed !== undefined) {
-			token.info = relayed;
+		const split = splitToken(token.info, LINKS_TOKEN);
+		if (split !== undefined) {
+			token.info =
+				split.before +
+				B64_TOKEN +
+				Buffer.from(split.payload).toString("base64url") +
+				split.after;
 		}
 		return fence(tokens, idx, opts, env, self);
-	};
-}
-
-/** Decodes `relayLinks`'s base64url payload back to `luaudocs-links=`; must run before `signatureLinks()`. */
-export function decodeLinks(): ShikiTransformer {
-	return {
-		name: "luaudocs:decode-links",
-		preprocess() {
-			const meta = this.options.meta;
-			const decoded = retoken(meta?.__raw, B64_TOKEN, LINKS_TOKEN, (payload) =>
-				Buffer.from(payload, "base64url").toString(),
-			);
-			if (meta !== undefined && decoded !== undefined) {
-				meta.__raw = decoded;
-			}
-		},
 	};
 }
 
@@ -113,8 +107,9 @@ export function decodeLinks(): ShikiTransformer {
  * VitePress does not prefix `base` on them automatically.
  */
 export function signatureLinks(base = "/"): ShikiTransformer {
-	const prefix = base.replace(/\/$/, "");
-	const withBaseHref = (href: string) => (href.startsWith("/") ? `${prefix}${href}` : href);
+	const prefix = base.replace(/\/+$/, "");
+	const withBaseHref = (href: string) =>
+		href.startsWith("/") && !href.startsWith("//") ? `${prefix}${href}` : href;
 	return {
 		name: "luaudocs:signature-links",
 		preprocess(code, options) {
@@ -123,22 +118,13 @@ export function signatureLinks(base = "/"): ShikiTransformer {
 				return;
 			}
 			const decorations = (options.decorations ??= []);
-			// Shiki throws on overlapping or out-of-range decorations; skip
-			// invalid spans so a bad offset drops one link rather than failing the build.
+			// Validate tuple entries before sorting so malformed elements never
+			// throw in the comparator, and skip overlapping, out-of-range, or
+			// unsafe spans rather than failing the build.
+			const valid = links.filter(isLinkTuple).sort((a, b) => a[0] - b[0]);
 			let cursor = 0;
-			for (const entry of links.sort((a, b) => a[0] - b[0])) {
-				if (!Array.isArray(entry)) {
-					continue;
-				}
-				const [start, end, href] = entry;
-				if (
-					typeof start !== "number" ||
-					typeof end !== "number" ||
-					typeof href !== "string" ||
-					start < cursor ||
-					end > code.length ||
-					start >= end
-				) {
+			for (const [start, end, href] of valid) {
+				if (start < cursor || end > code.length || start >= end || !isSafeHref(href)) {
 					continue;
 				}
 				cursor = end;

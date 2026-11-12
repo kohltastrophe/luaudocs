@@ -8,12 +8,21 @@
  * manager. Keys the cache by version outside the package directory so
  * `npx luaudocs` runs and LuauDocs upgrades reuse an existing download.
  */
-import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import {
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	renameSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { inflateRawSync } from "node:zlib";
 import pc from "picocolors";
+import { errorMessage } from "./config";
 
 /**
  * Bumping `LUTE_VERSION` is a deliberate release step. Re-run
@@ -88,6 +97,11 @@ export async function resolveLute(): Promise<Lute> {
 		if (!existsSync(override)) {
 			throw new Error(`${OVERRIDE} is set to ${override}, which does not exist`);
 		}
+		if (statSync(override).isDirectory()) {
+			throw new Error(
+				`${OVERRIDE} is set to ${override}, which is a directory (point it at the lute binary)`,
+			);
+		}
 		return {
 			command: override,
 			hint: `could not run the Lute ${OVERRIDE} points at (${override}).`,
@@ -121,16 +135,34 @@ export async function resolveLute(): Promise<Lute> {
 	};
 }
 
+const inFlightInstalls = new Map<string, Promise<string>>();
+
+function install(asset: { zip: string; sha256: string }): Promise<string> {
+	const target = installDir();
+	const existing = inFlightInstalls.get(target);
+	if (existing !== undefined) {
+		return existing;
+	}
+	const pending = performInstall(asset, target).finally(() => {
+		inFlightInstalls.delete(target);
+	});
+	inFlightInstalls.set(target, pending);
+	return pending;
+}
+
 /**
  * Downloads, verifies, and unpacks the release archive. Unpacks into a
- * PID-suffixed sibling directory and renames it into place so a half-written
- * binary never sits at the path `resolveLute` checks, and concurrent builds
- * racing to install converge cleanly on one working binary.
+ * unique sibling directory and renames it into place so a half-written binary
+ * never sits at the path `resolveLute` checks, and concurrent builds or worker
+ * threads racing to install converge cleanly on one working binary.
  */
-async function install(asset: { zip: string; sha256: string }): Promise<void> {
+async function performInstall(
+	asset: { zip: string; sha256: string },
+	target: string,
+): Promise<string> {
 	const url = `https://github.com/luau-lang/lute/releases/download/v${LUTE_VERSION}/${asset.zip}`;
 	// Log to stderr so `bun run lute -- run ... | jq` keeps stdout clean for JSON even on first install.
-	console.error(pc.cyan(`installing Lute ${LUTE_VERSION} (${asset.zip}) into ${installDir()}`));
+	console.error(pc.cyan(`installing Lute ${LUTE_VERSION} (${asset.zip}) into ${target}`));
 
 	let zip: Buffer;
 	try {
@@ -145,7 +177,7 @@ async function install(asset: { zip: string; sha256: string }): Promise<void> {
 		throw new Error(
 			[
 				`could not download Lute ${LUTE_VERSION} from ${url}`,
-				`  ${error instanceof Error ? error.message : String(error)}`,
+				`  ${errorMessage(error)}`,
 				`If this machine has no network access, install Lute yourself and point ${OVERRIDE} at it.`,
 			].join("\n"),
 		);
@@ -153,25 +185,28 @@ async function install(asset: { zip: string; sha256: string }): Promise<void> {
 
 	verifyChecksum(zip, asset);
 
-	const staging = `${installDir()}.tmp-${process.pid}`;
+	const binaryFile = binaryName();
+	const staging = `${target}.tmp-${process.pid}-${randomUUID().slice(0, 8)}`;
 	rmSync(staging, { recursive: true, force: true });
 	mkdirSync(staging, { recursive: true });
 	try {
-		const staged = join(staging, binaryName());
+		const staged = join(staging, binaryFile);
 		writeFileSync(staged, unzipSingleFile(zip));
 		chmodSync(staged, 0o755);
-		commitInstall(staging, installDir(), binaryName());
+		commitInstall(staging, target, binaryFile);
 	} finally {
 		rmSync(staging, { recursive: true, force: true });
 	}
+	return join(target, binaryFile);
 }
 
 /**
  * Atomically renames `staging` to `target`. If another concurrent process won
  * the race and placed `binaryFile` at `target`, returns immediately without
- * disturbing the winner's install. Only removes an existing `target` directory
+ * disturbing the winner's install. Only replaces an existing `target` directory
  * when `binaryFile` is missing inside it (for example, after an interrupted
- * removal or antivirus quarantine).
+ * removal or antivirus quarantine), moving the broken directory aside before
+ * deleting it so concurrent callers never observe a half-removed install.
  */
 export function commitInstall(staging: string, target: string, binaryFile: string): void {
 	const binary = join(target, binaryFile);
@@ -186,15 +221,28 @@ export function commitInstall(staging: string, target: string, binaryFile: strin
 			throw error;
 		}
 	}
-	// An existing `target` directory missing its binary would fail `renameSync`
-	// permanently (`ENOTEMPTY` on POSIX, `EPERM` on Windows), so clear it and retry.
-	rmSync(target, { recursive: true, force: true });
+	const dead = `${target}.dead.${randomUUID().slice(0, 8)}`;
+	let movedAside = false;
+	try {
+		renameSync(target, dead);
+		movedAside = true;
+	} catch (error) {
+		if (existsSync(binary)) {
+			return;
+		}
+		if (existsSync(target)) {
+			throw error;
+		}
+	}
 	try {
 		renameSync(staging, target);
 	} catch (error) {
-		// Another process won the race between `rmSync` and `renameSync`.
 		if (!existsSync(binary)) {
 			throw error;
+		}
+	} finally {
+		if (movedAside) {
+			rmSync(dead, { recursive: true, force: true });
 		}
 	}
 }
@@ -212,14 +260,19 @@ export function verifyChecksum(zip: Buffer, asset: { zip: string; sha256: string
 	}
 }
 
+const EOCD_MAGIC = Buffer.from([0x50, 0x4b, 0x05, 0x06]);
+const CENTRAL_HEADER_MAGIC = 0x02014b50;
+const LOCAL_HEADER_MAGIC = 0x04034b50;
+
 /**
- * Extracts the single binary entry from a Lute release `.zip` archive. Runs
- * only after `verifyChecksum`, so any unexpected archive structure throws.
+ * Extracts the single binary entry from a Lute release `.zip` archive. Validates
+ * header signatures and slice bounds even after `verifyChecksum` so malformed or
+ * synthetic archives fail with a clear error instead of `ERR_OUT_OF_RANGE`.
  */
 export function unzipSingleFile(zip: Buffer): Buffer {
-	// Scan backward for the End of Central Directory (EOCD) signature (`PK\x05\x06`).
-	const eocd = zip.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
-	if (eocd === -1) {
+	// Scan backward for the 22-byte End of Central Directory (EOCD) record (`PK\x05\x06`).
+	const eocd = zip.lastIndexOf(EOCD_MAGIC);
+	if (eocd === -1 || eocd + 22 > zip.length) {
 		throw new Error("not a zip archive");
 	}
 	const entries = zip.readUInt16LE(eocd + 10);
@@ -228,14 +281,23 @@ export function unzipSingleFile(zip: Buffer): Buffer {
 	}
 
 	const central = zip.readUInt32LE(eocd + 16);
+	if (central + 46 > zip.length || zip.readUInt32LE(central) !== CENTRAL_HEADER_MAGIC) {
+		throw new Error("corrupt zip central directory header");
+	}
 	const method = zip.readUInt16LE(central + 10);
 	const compressedSize = zip.readUInt32LE(central + 20);
 	const uncompressedSize = zip.readUInt32LE(central + 24);
 	const local = zip.readUInt32LE(central + 42);
+	if (local + 30 > zip.length || zip.readUInt32LE(local) !== LOCAL_HEADER_MAGIC) {
+		throw new Error("corrupt zip local file header");
+	}
 
 	// Advance past the 30-byte local file header plus its variable-length filename and extra fields.
-	const data = local + 30 + zip.readUInt16LE(local + 26) + zip.readUInt16LE(local + 28);
-	const body = zip.subarray(data, data + compressedSize);
+	const dataStart = local + 30 + zip.readUInt16LE(local + 26) + zip.readUInt16LE(local + 28);
+	if (dataStart > zip.length || dataStart + compressedSize > zip.length) {
+		throw new Error("corrupt zip entry payload bounds");
+	}
+	const body = zip.subarray(dataStart, dataStart + compressedSize);
 	if (method !== 0 && method !== 8) {
 		throw new Error(`unsupported zip compression method ${method}`);
 	}

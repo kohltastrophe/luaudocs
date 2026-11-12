@@ -8,7 +8,6 @@ import { apiSidebar, apiTrails, buildAccessTree, type TreeNode } from "../src/na
 import type { PageModel } from "../src/pages";
 import { emitDocsFromJson } from "../src/render";
 import {
-	decodeLinks,
 	LINKS_TOKEN,
 	parseLinks,
 	relayLinks,
@@ -23,6 +22,11 @@ import {
 	signatureLinks,
 	signatureSpans,
 	testConfig,
+	testFn,
+	testMod,
+	testProp,
+	testSrc,
+	testType,
 } from "./helpers";
 
 const sampleJson = readFixture("docmodel-sample.json");
@@ -34,43 +38,11 @@ const sample = result.pages.get("Sample.md")!;
 const state = result.pages.get("State.md")!;
 const type = result.pages.get("Type.md")!;
 
-const src = (file = "src/init.luau", line = 1) => ({ file, line });
-const mod = (id: string, name: string, extra: object = {}) => ({
-	id,
-	instancePath: [name],
-	name,
-	source: src(id),
-	...extra,
-});
-const prop = (id: string, name: string, propType?: unknown[], extra: object = {}) => ({
-	id,
-	name,
-	kind: "prop",
-	type: propType,
-	tags: { custom: [] },
-	visibility: "public",
-	readonly: false,
-	source: src(),
-	...extra,
-});
-const fn = (
-	id: string,
-	name: string,
-	callee: string,
-	segs: unknown[] = ["()"],
-	extra: object = {},
-) => ({
-	id,
-	name,
-	kind: "function",
-	visibility: "public",
-	tags: { custom: [] },
-	errors: [],
-	signature: { callee, segs, params: [], returns: [] },
-	source: src("src/init.luau", 5),
-	...extra,
-});
-const cls = (id: string, name: string, extra: object = {}) => ({
+const src = testSrc;
+const mod = testMod;
+const prop = testProp;
+const fn = testFn;
+const cls = (id: string, name: string, extra: Record<string, unknown> = {}) => ({
 	id,
 	name,
 	tags: { custom: [] },
@@ -79,27 +51,21 @@ const cls = (id: string, name: string, extra: object = {}) => ({
 	source: src(),
 	...extra,
 });
-const ty = (id: string, name: string, definition?: unknown[][], extra: object = {}) => ({
-	id,
-	name,
-	exported: true,
-	kind: "alias",
-	generics: [],
-	definition,
-	tags: { custom: [] },
-	visibility: "public",
-	source: src(),
-	...extra,
-});
-const reex = (id: string, name: string, targetModule: string, extra: object = {}) => ({
+const ty = testType;
+const reex = (
+	id: string,
+	name: string,
+	targetModule: string,
+	extra: Record<string, unknown> = {},
+) => ({
 	id,
 	name,
 	targetModule,
 	...extra,
 });
-const miniFn = (name: string, extra: object = {}) =>
+const miniFn = (name: string, extra: Record<string, unknown> = {}) =>
 	fn(`src/init.luau#fn.Mini.${name}`, name, `Mini.${name}`, ["()"], extra);
-const miniPage = (extra: object, config = testConfig()) =>
+const miniPage = (extra: Record<string, unknown>, config = testConfig()) =>
 	emitDocsFromJson(modelJson([mod("src/init.luau", "Mini", extra)]), config);
 
 describe("emitDocs on the Sample fixture", () => {
@@ -282,7 +248,7 @@ describe("emitDocs on the tag-torture fixture", () => {
 });
 
 describe("types, signatures, and link boundaries", () => {
-	const decl = (name: string, extra: object = {}) =>
+	const decl = (name: string, extra: Record<string, unknown> = {}) =>
 		ty(`Mini#type.${name}`, name, undefined, extra);
 
 	it("renders verbatim signatures, field docs, synthetic interfaces, and exact link spans", () => {
@@ -966,7 +932,9 @@ describe("access-graph grouping and nav placement", () => {
 		expect(regrouped.apiIndex).toContain(
 			"    - [State](/api/State)\n        - [Query](/api/Query)",
 		);
-		expect(regrouped.apiIndex).toMatch(/#region reference -->\n\n<div class="luaudocs-tree">/);
+		expect(regrouped.apiIndex).toMatch(
+			/#region reference -->\n\n<nav class="luaudocs-tree" aria-label="API modules">/,
+		);
 	});
 
 	it("builds sidebars, trails, and access paths across shortest paths, cycles, and instance fallbacks", () => {
@@ -1115,8 +1083,12 @@ describe("doc-model parse failures and signature-links runtime transformer", () 
 			code: string,
 			options: DecoratedOptions,
 		) => void;
-		const spansOf = (code: string, table: string): Array<[number, number, string]> => {
-			const transformer = linksTransformer();
+		const spansOf = (
+			code: string,
+			table: string,
+			base = "/",
+		): Array<[number, number, string]> => {
+			const transformer = linksTransformer(base);
 			const options: DecoratedOptions = {};
 			(transformer.preprocess as unknown as Preprocess).call(
 				{ options: { meta: { __raw: `luau ${LINKS_TOKEN}${table}` } } },
@@ -1139,6 +1111,16 @@ describe("doc-model parse failures and signature-links runtime transformer", () 
 			[0, 3, "/a"],
 			[6, 8, "/e"],
 		]);
+		expect(
+			spansOf(
+				"abcdefghij",
+				'[[0,2,"/x"],[2,4,"//evil.com"],[4,6,"javascript:alert(1)"],[6,8,"data:text/html,x"]]',
+				"/repo/",
+			),
+		).toEqual([
+			[0, 2, "/repo/x"],
+			[2, 4, "//evil.com"],
+		]);
 		expect(spansOf("abc", "[[0,2")).toEqual([]);
 
 		const info = `luau ${LINKS_TOKEN}[[0,4,"/api/X"]] {1}`;
@@ -1159,11 +1141,41 @@ describe("doc-model parse failures and signature-links runtime transformer", () 
 		expect(relayed).toContain("luaudocs-links-b64=");
 		expect(relayed).not.toContain("[");
 		expect(relayed.endsWith(" {1}")).toBe(true);
+		expect(parseLinks(relayed)).toEqual([[0, 4, "/api/X"]]);
+	});
 
-		const meta = { __raw: relayed };
-		(decodeLinks().preprocess as (this: unknown) => void).call({ options: { meta } });
-		expect(meta.__raw).toBe(info);
-		expect(parseLinks(meta.__raw)).toEqual([[0, 4, "/api/X"]]);
+	it("escapes identifier-attached prose generics, widens fences for embedded backticks, and unwraps error cells", () => {
+		const out = miniPage({
+			doc: [
+				"Returns Promise<T>, Map<string, Array<number>>, and Signal<() -> ()>.",
+				'Preserves `Promise<T>`, <Badge text="ok" />, <em>inline</em>, and:',
+				"",
+				"<Frame>",
+				"",
+				"Inside frame: Box<number>.",
+				"",
+				"</Frame>",
+			].join("\n"),
+			types: [ty("src/init.luau#type.Fenced", "Fenced", [['"```"']])],
+			members: [
+				miniFn("fail", {
+					errors: [
+						{
+							type: "Err",
+							doc: "First\nline.\n\nSecond\nline with \\| and |.",
+						},
+					],
+				}),
+			],
+		});
+		const page = out.pages.get("Mini.md")!;
+		expect(page).toContain(
+			"Returns Promise\\<T\\>, Map\\<string, Array\\<number\\>\\>, and Signal\\<() -> ()\\>.",
+		);
+		expect(page).toContain('Preserves `Promise<T>`, <Badge text="ok" />, <em>inline</em>');
+		expect(page).toContain("<Frame>\n\nInside frame: Box\\<number\\>.\n\n</Frame>");
+		expect(page).toContain('````luau\ntype Fenced = "```"\n````');
+		expect(page).toContain("| `Err` | First line.<br><br>Second line with \\| and \\|. |");
 	});
 
 	it("flattens multi-paragraph field docs and recognizes nested generic pure alias re-spellings", () => {

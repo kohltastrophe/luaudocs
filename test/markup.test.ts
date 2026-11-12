@@ -7,8 +7,35 @@
  * tag-torture describe in test/emit.test.ts holds that side), and where a
  * trail's segments come from is test/site.test.ts's.
  */
-import { describe, expect, it } from "vitest";
-import { prependTrail, rewriteMarkup, type TrailSegment } from "../templates/runtime/markup";
+import { createMarkdownRenderer } from "vitepress";
+import { beforeAll, describe, expect, it } from "vitest";
+import {
+	codeSpan,
+	installMarkupRule,
+	isSafeHref,
+	prependTrail,
+	rewriteMarkup,
+	splitFences,
+	stripFrames,
+	type TrailSegment,
+} from "../templates/runtime/markup";
+import { makeTempDirFactory } from "./helpers";
+
+const tempDir = makeTempDirFactory("luaudocs-markup-");
+let renderFrame: (source: string) => { html: string; links: string[] };
+beforeAll(async () => {
+	const md = await createMarkdownRenderer(tempDir(), {}, "/");
+	installMarkupRule(md, {});
+	renderFrame = (source) => {
+		const env: { links?: string[]; path: string; relativePath: string; cleanUrls: boolean } = {
+			path: "/guide/page.md",
+			relativePath: "guide/page.md",
+			cleanUrls: true,
+		};
+		const html = md.render(source, env);
+		return { html, links: env.links ?? [] };
+	};
+});
 
 describe("tab groups", () => {
 	// one group per shape: all-code (every panel a bare fence), one mixing prose
@@ -65,7 +92,7 @@ describe("tab groups", () => {
 	// a titled fence would otherwise reach the icon plugin's fence rule, which
 	// wraps it in a title bar; that bar, not the block, becomes the panel the
 	// group shows and hides, so every tab renders at once
-	it("drops a lone-fence tab's `[title]`, which the tab strip already carries", () => {
+	it("drops a lone-fence tab's `[title]`, which the tab strip already carries, while preserving `luaudocs-links=[[...]]`", () => {
 		const group = rewriteMarkup(
 			allCode.replace("```toml", "```toml [wally.toml]").replace("```bash", "```bash [npm]"),
 		);
@@ -73,6 +100,19 @@ describe("tab groups", () => {
 		expect(group).toContain("```bash\nnpm i mini\n```");
 		expect(group).not.toContain("[wally.toml]");
 		expect(group).not.toContain("[npm]");
+
+		const withLinks = [
+			"<Tabs>",
+			'<TabItem label="Signature">',
+			"",
+			'```luau luaudocs-links=[[0,4,"/api/Mini"]]\nMini.run()\n```',
+			"",
+			"</TabItem>",
+			"</Tabs>",
+		].join("\n");
+		expect(rewriteMarkup(withLinks)).toContain(
+			'```luau luaudocs-links=[[0,4,"/api/Mini"]] active\nMini.run()\n```',
+		);
 	});
 
 	// inside a prose panel the fence is content, not the panel itself, so its
@@ -234,59 +274,73 @@ describe("frames", () => {
 	});
 
 	// a frame quotes another page's content, so its headings are not this page's
-	// structure. Writing the element directly is what keeps them out of the
-	// outline: no anchor plugin, so no id, and VitePress drops id-less headings
-	// before building its tree
-	it("writes a frame's headings as id-less elements, keeping them out of the outline", () => {
-		const out = rewriteMarkup(
+	// structure. `installFrameHeadingRule` converts framed `heading_open` /
+	// `heading_close` tokens into id-less `<hN>` tags before `anchor`, keeping
+	// them out of the outline while preserving VitePress inline rendering,
+	// `validateLink`, and dead-link recording
+	it("renders a frame's headings as id-less elements, keeping them out of the outline", () => {
+		const { html } = renderFrame(
 			'<Frame label="Out">\n\n# Flux\n\n## Properties\n\n### state <Badge text="new" />\n\n</Frame>',
 		);
-		expect(out).toContain("<h1>Flux</h1>");
-		expect(out).toContain("<h2>Properties</h2>");
-		expect(out).toContain('<h3>state <Badge text="new" /></h3>');
-		expect(out).not.toContain("ignore-header");
-		expect(out).not.toContain("# Flux");
+		expect(html).toContain("<h1>Flux</h1>");
+		expect(html).toContain("<h2>Properties</h2>");
+		expect(html).toContain('<h3>state <Badge text="new" /></h3>');
+		expect(html).not.toMatch(/<h[1-6][^>]*\sid=/);
 	});
 
-	// the element's body is raw HTML to markdown-it, so the code span a member
-	// heading is written as has to be written out as the element it renders as
-	it("writes a framed heading's code span as the <code> it would have rendered", () => {
-		const out = rewriteMarkup(
+	it("renders a framed heading's code span through VitePress's inline pipeline", () => {
+		const { html } = renderFrame(
 			'<Frame label="Out">\n\n### `state` <Badge text="new" />\n\n</Frame>',
 		);
-		expect(out).toContain('<h3><code v-pre>state</code> <Badge text="new" /></h3>');
+		expect(html).toContain('<h3><code>state</code> <Badge text="new" /></h3>');
 	});
 
-	// a page title or section heading is written escaped rather than as a code
-	// span, and the element has to show what the escape stood for
-	it("writes a framed heading's escaped characters as themselves", () => {
-		const out = rewriteMarkup('<Frame label="Out">\n\n## \\_Inner\\_ \\<T\\>\n\n</Frame>');
-		expect(out).toContain("<h2>_Inner_ &lt;T&gt;</h2>");
+	it("renders a framed heading's escaped characters as themselves", () => {
+		const { html } = renderFrame('<Frame label="Out">\n\n## \\_Inner\\_ \\<T\\>\n\n</Frame>');
+		expect(html).toContain("<h2>_Inner_ &lt;T&gt;</h2>");
 	});
 
-	// a re-export badge is a markdown link on the page, so a framed copy of its
-	// heading has to carry the anchor that link renders as
-	it("writes a framed heading's badge link as the anchor it would have rendered", () => {
-		const out = rewriteMarkup(
-			'<Frame label="Out">\n\n### `Queue` [<Badge text="Module" />](/api/Queue){.badge-link .ignore-header}\n\n</Frame>',
+	it("renders a framed heading's badge link and records it for VitePress dead-link checks", () => {
+		const { html, links } = renderFrame(
+			'<Frame label="Out" link="/api/Flux">\n\n### `Queue` [<Badge text="Module" />](/api/Queue){.badge-link .ignore-header}\n\n</Frame>',
 		);
-		expect(out).toContain(
-			'<h3><code v-pre>Queue</code> <a href="/api/Queue" class="badge-link ignore-header">' +
-				'<Badge text="Module" /></a></h3>',
+		expect(html).toContain(
+			'<h3><code>Queue</code> <a href="/api/Queue" class="badge-link ignore-header"><Badge text="Module" /></a></h3>',
 		);
+		expect(links).toEqual(expect.arrayContaining(["/api/Flux", "/api/Queue"]));
+	});
+
+	it("blocks javascript: URLs on both the frame link attribute and links inside framed headings", () => {
+		expect(
+			rewriteMarkup('<Frame label="Unsafe" link="javascript:alert(1)">\n\nBody.\n\n</Frame>'),
+		).toContain('<div class="luaudocs-frame-label">Unsafe</div>');
+
+		const { html } = renderFrame(
+			'<Frame label="Out">\n\n### [Click](javascript:alert(1))\n\n</Frame>',
+		);
+		expect(html).not.toContain("<a ");
+		expect(html).toContain("<h3>[Click](javascript:alert(1))</h3>");
 	});
 
 	it("drops the trailing hashes of a closed ATX heading", () => {
-		const out = rewriteMarkup('<Frame label="Out">\n\n## Properties ##\n\n</Frame>');
-		expect(out).toContain("<h2>Properties</h2>");
+		const { html } = renderFrame('<Frame label="Out">\n\n## Properties ##\n\n</Frame>');
+		expect(html).toContain("<h2>Properties</h2>");
 	});
 
 	it("leaves a heading inside a fenced example in the body alone", () => {
-		const out = rewriteMarkup(
+		const { html } = renderFrame(
 			'<Frame label="Out">\n\n```md\n## Not a heading\n```\n\n</Frame>',
 		);
-		expect(out).toContain("```md\n## Not a heading\n```");
-		expect(out).not.toContain("<h2>");
+		expect(html).toContain("## Not a heading");
+		expect(html).not.toContain("<h2>");
+	});
+
+	it("strips frames outside fenced code blocks in stripFrames", () => {
+		const page =
+			"Before.\n\n<Frame>\n\n## Hidden\n\n</Frame>\n\n```md\n<Frame>\n\n## Shown\n\n</Frame>\n```\n";
+		const stripped = stripFrames(page);
+		expect(stripped).not.toContain("## Hidden");
+		expect(stripped).toContain("## Shown");
 	});
 
 	it("leaves a frame shown inside a fence alone", () => {
@@ -308,21 +362,56 @@ it("returns text carrying no construct untouched", () => {
 	expect(rewriteMarkup(page)).toBe(page);
 });
 
+describe("CommonMark fences, codeSpan, and isSafeHref", () => {
+	it("splits fences using CommonMark 0-3 space indent, info-string backtick, and closer rules", () => {
+		// 4 spaces is an indented code block, not a fence opener
+		expect(splitFences("    ```md\n:::note\n:::\n    ```\n")).toEqual([
+			"    ```md\n:::note\n:::\n    ```\n",
+		]);
+		// backticks in a backtick fence's info string reject the opener (` ```a` `)
+		expect(splitFences("```luau `inline`\nbody\n```\n")).toEqual([
+			"```luau `inline`\nbody\n",
+			"```\n",
+		]);
+		// closing fence must use at least as many characters and carry no trailing text
+		const parts = splitFences("````md\n```\n``` trailing\n````\nafter\n");
+		expect(parts).toEqual(["", "````md\n```\n``` trailing\n````\n", "after\n"]);
+	});
+
+	it("wraps embedded backticks and outer spaces in CommonMark-safe codeSpan fences", () => {
+		expect(codeSpan("plain")).toBe("`plain`");
+		expect(codeSpan("a`b")).toBe("``a`b``");
+		expect(codeSpan("`edge`")).toBe("`` `edge` ``");
+		expect(codeSpan(" padded ")).toBe("`  padded  `");
+		expect(codeSpan("   ")).toBe("`   `");
+	});
+
+	it("rejects executable and data URL schemes in isSafeHref even with control whitespace", () => {
+		expect(isSafeHref("javascript:alert(1)")).toBe(false);
+		expect(isSafeHref(" \tJaVaScRiPt\n:alert(1)")).toBe(false);
+		expect(isSafeHref("vbscript:msgbox(1)")).toBe(false);
+		expect(isSafeHref("data:text/html,<script>alert(1)</script>")).toBe(false);
+		expect(isSafeHref("https://example.com/docs")).toBe(true);
+		expect(isSafeHref("/api/Sample#run")).toBe(true);
+	});
+});
+
 describe("page trails", () => {
 	const home: TrailSegment = { text: "Home", link: "/" };
 
-	it("heads a page with its trail, above the title", () => {
+	it("heads a page with its <nav> trail above the title and escapes labels and links", () => {
 		const out = prependTrail("# Queue\n\nProse.\n", [
 			home,
-			{ text: "Overview", link: "/api/" },
-			{ text: "Flux", link: "/api/Flux" },
+			{ text: "Over_view", link: "/api/" },
+			{ text: "Flux [v2]", link: "/api/Flux (v2)" },
+			{ text: "Unsafe", link: "javascript:alert(1)" },
 		]);
 		// blank lines around the links: markdown-it parses an HTML block's
 		// contents as markdown only when they stand apart from the tags
 		expect(out).toBe(
-			'<div class="luaudocs-trail">\n\n' +
-				"[Home](/) › [Overview](/api/) › [Flux](/api/Flux)\n\n" +
-				"</div>\n\n# Queue\n\nProse.\n",
+			'<nav class="luaudocs-trail" aria-label="Breadcrumb">\n\n' +
+				"[Home](/) › [Over\\_view](/api/) › [Flux \\[v2\\]](</api/Flux%20(v2)>) › Unsafe\n\n" +
+				"</nav>\n\n# Queue\n\nProse.\n",
 		);
 	});
 

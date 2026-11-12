@@ -8,8 +8,8 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { apiPageFile } from "../src/pages";
 import { emitDocsFromJson } from "../src/render";
 import { stripFrontmatter } from "../src/markdown";
-import { rewriteMarkup } from "../templates/runtime/markup";
-import { makeTempDirFactory, modelJson, readFixture, testConfig } from "./helpers";
+import { installMarkupRule } from "../templates/runtime/markup";
+import { makeTempDirFactory, modelJson, readFixture, testConfig, testFn, testMod } from "./helpers";
 
 const captures = ["docmodel-sample.json", "docmodel-tags.json"];
 const results = new Map(
@@ -21,10 +21,7 @@ const tempDir = makeTempDirFactory("luaudocs-anchors-");
 let render: (content: string, path: string) => string;
 beforeAll(async () => {
 	const md = await createMarkdownRenderer(tempDir(), {}, "/");
-	md.core.ruler.before("block", "luaudocs_docusaurus", (state) => {
-		state.src = rewriteMarkup(state.src);
-		return true;
-	});
+	installMarkupRule(md, {});
 	render = (content, path) =>
 		md.render(stripFrontmatter(content), {
 			path,
@@ -95,29 +92,11 @@ describe("anchor collision and prediction rules", () => {
 		expect(anchorOf("#fn.Sample.state")).toBe("state-1");
 	});
 
-	const fn = (name: string, extra: object = {}) => ({
-		id: `src/init.luau#fn.Mini.${name}`,
-		name,
-		kind: "function",
-		visibility: "public",
-		tags: { custom: [] },
-		errors: [],
-		signature: { callee: `Mini.${name}`, segs: ["()"], params: [], returns: [] },
-		source: { file: "src/init.luau", line: 5 },
-		...extra,
-	});
+	const fn = (name: string, extra: Record<string, unknown> = {}) =>
+		testFn(`src/init.luau#fn.Mini.${name}`, name, `Mini.${name}`, ["()"], extra);
 
 	const miniModel = (doc: string, fnName = "Connect") =>
-		modelJson([
-			{
-				id: "src/init.luau",
-				instancePath: ["Mini"],
-				name: "Mini",
-				doc,
-				source: { file: "src/init.luau", line: 1 },
-				members: [fn(fnName)],
-			},
-		]);
+		modelJson([testMod("src/init.luau", "Mini", { doc, members: [fn(fnName)] })]);
 
 	const memberId = (html: string): string | undefined =>
 		/<h3 id="([^"]*)"[^>]*><code[^>]*>Connect<\/code>/.exec(html)?.[1];
@@ -160,7 +139,7 @@ describe("anchor collision and prediction rules", () => {
 			"connect",
 		],
 		[
-			"heading inside <Frame> unlisted by rewriteMarkup",
+			"heading inside <Frame> unlisted by installMarkupRule",
 			"<Frame>\n\n## Connect\n\n</Frame>",
 			"connect",
 		],
@@ -169,20 +148,38 @@ describe("anchor collision and prediction rules", () => {
 			'<Tabs>\n<TabItem label="A">\n## Connect\n</TabItem>\n</Tabs>',
 			"connect-1",
 		],
+		[
+			"heading carrying identifier-attached generic type parameters",
+			"## Connect<T>",
+			"connect",
+		],
 	])("predicts %s", (_case, prose, expected) => {
 		const page = emitDocsFromJson(miniModel(`Intro.\n\n${prose}\n`), testConfig());
 		expect(page.pageModels[0]!.anchors["src/init.luau#fn.Mini.Connect"]).toBe(expected);
 		expect(memberId(render(page.pages.get("Mini.md")!, "/api/Mini.md"))).toBe(expected);
 	});
 
+	it("keeps prose generic headings in lockstep with VitePress slugs without double-escaping aria-label", () => {
+		const page = emitDocsFromJson(
+			modelJson([
+				testMod("src/init.luau", "Mini", {
+					doc: "Intro.\n\n## Box<T>\n\nDetails.",
+					members: [fn("Box"), fn("Box_T")],
+				}),
+			]),
+			testConfig(),
+		);
+		const html = render(page.pages.get("Mini.md")!, "/api/Mini.md");
+		expect(mintedIds(html)).toEqual(["mini", "box-t", "functions", "box", "box-t-1"]);
+		expect(page.pageModels[0]!.anchors["src/init.luau#fn.Mini.Box"]).toBe("box");
+		expect(page.pageModels[0]!.anchors["src/init.luau#fn.Mini.Box_T"]).toBe("box-t-1");
+		expect(html).not.toContain("&amp;lt;");
+	});
+
 	it("yields to headings inside a member's doc or deprecation notice", () => {
 		const emitted = emitDocsFromJson(
 			modelJson([
-				{
-					id: "src/init.luau",
-					instancePath: ["Mini"],
-					name: "Mini",
-					source: { file: "src/init.luau", line: 1 },
+				testMod("src/init.luau", "Mini", {
 					members: [
 						fn("alpha", { doc: "Body.\n\n## Details\n\nMore." }),
 						fn("beta", {
@@ -191,7 +188,7 @@ describe("anchor collision and prediction rules", () => {
 						fn("details"),
 						fn("migrate"),
 					],
-				},
+				}),
 			]),
 			testConfig(),
 		);

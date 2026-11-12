@@ -10,7 +10,7 @@ lastUpdated: false
 
 <!-- #region reference -->
 
-<div class="luaudocs-tree">
+<nav class="luaudocs-tree" aria-label="API modules">
 
 - [Sample](/api/Sample): A small sample library, written to exercise the renderer: every construct below is one the doc-model diff or a page snapshot pins.
     - [Color](/api/Color): Two nested tables, so each becomes its own section on the page.
@@ -19,6 +19,6 @@ lastUpdated: false
     - [State](/api/State)
     - [Type](/api/Type): Shared aliases, and the only module that names Roblox classes: the `New<>` arms below are what `linkRobloxTypes` resolves against, so engine linking is covered in one place instead of leaking into every other fixture module.
 
-</div>
+</nav>
 
 <!-- #endregion reference -->

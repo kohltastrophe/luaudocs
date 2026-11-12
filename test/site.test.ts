@@ -16,7 +16,8 @@ import {
 	syncSite,
 	type GuideItem,
 } from "../src/site";
-import { makeTempDirFactory, seed } from "./helpers";
+import { frontmatter } from "../src/markdown";
+import { makeTempDirFactory, outline, seed } from "./helpers";
 
 const tempDir = makeTempDirFactory("luaudocs-site-");
 
@@ -108,16 +109,27 @@ describe("generated landing page, .gitignore, and changelog", () => {
 		);
 
 		const specialHero = homeLayoutPage({
-			title: "Test",
+			title: "true",
+			tagline: "42",
 			actions: [
 				{ theme: "brand", text: "[Start] & Go!", link: "/guide/intro?x=1&y=2" },
 				{ theme: "alt", text: "API Reference", link: "/api/" },
 			],
 		});
+		expect(specialHero).toContain('name: "true"');
+		expect(specialHero).toContain('tagline: "42"');
 		expect(specialHero).toContain('text: "[Start] & Go!"');
 		expect(specialHero).toContain('link: "/guide/intro?x=1&y=2"');
 		expect(specialHero).toContain("text: API Reference");
 		expect(specialHero).toContain("link: /api/");
+
+		// `hasApi` fallback detects an on-disk `api/index.md` when `apiSidebar` is omitted.
+		const fallbackApi = project();
+		seed(fallbackApi.docsDir, { "api/index.md": "# API Reference\n" });
+		syncSite(createContext(fallbackApi.dir), { guides: [], apiSidebar: undefined });
+		expect(readFileSync(join(fallbackApi.docsDir, "index.md"), "utf8")).toContain(
+			"link: /api/",
+		);
 	});
 
 	it("rewrites README links through [repo], public/, and site base, and warns on unreachable links", () => {
@@ -336,11 +348,6 @@ describe("guides sidebar and page trails", () => {
 	const page = (title: string, ...keys: string[]): string =>
 		["---", `title: ${title}`, ...keys, "---", "", `The ${title} page.`, ""].join("\n");
 
-	const outline = (items: GuideItem[]): string[] =>
-		items.map((item) =>
-			item.items ? `${item.text} [${outline(item.items).join(", ")}]` : item.text,
-		);
-
 	function bakedSidebar(files: Record<string, string>): string {
 		const { dir, docsDir } = project();
 		writeGuides(docsDir, files);
@@ -368,9 +375,11 @@ describe("guides sidebar and page trails", () => {
 		).toEqual([
 			"RootOverview",
 			"Intro",
-			"Reference [Overview, Aardvark, CLI]",
+			"Reference > Overview",
+			"Reference > Aardvark",
+			"Reference > CLI",
 			"Deploying",
-			"Extras [One]",
+			"Extras > One",
 			"Later",
 		]);
 
@@ -391,12 +400,13 @@ describe("guides sidebar and page trails", () => {
 				}),
 			),
 		).toEqual([
-			"First [One]",
+			"First > One",
 			"Two",
-			"Mid [One]",
+			"Mid > One",
 			"Three",
-			"Nowhere [One]",
-			"Own [Overview, One]",
+			"Nowhere > One",
+			"Own > Overview",
+			"Own > One",
 		]);
 
 		// Sidecar outranking index.md + YAML sidecars (blank key, True/False booleans) + invalid JSON
@@ -410,15 +420,28 @@ describe("guides sidebar and page trails", () => {
 			"fixed/one.md": page("One"),
 		});
 		expect(outline(yamlGuides)).toEqual([
-			"Reference [Overview, CLI]",
-			"Yml [One]",
-			"Fixed Guide [One]",
+			"Reference > Overview",
+			"Reference > CLI",
+			"Yml > One",
+			"Fixed Guide > One",
 		]);
 		expect(yamlGuides.map((g) => [g.collapsed, g.collapsible])).toEqual([
 			[true, undefined],
 			[true, undefined],
 			[undefined, false],
 		]);
+
+		// Heading title extraction strips HTML comments, closing `#`s, and `{#id}`,
+		// while `frontmatterField` handles empty `---\n---` blocks and JSON escapes.
+		expect(
+			outline(
+				guidesOf({
+					"clean.md": "---\n---\n# Clean <!-- comment --> {#custom} ##\n",
+					"escaped.md": '---\ntitle: "Tab\\t\\u0041"\n---\nBody.\n',
+				}),
+			),
+		).toEqual(["Clean", "Tab\tA"]);
+		expect(frontmatter("----\ntitle: NotFrontmatter\n----\n")).toBe("");
 
 		expect(() =>
 			guidesOf({

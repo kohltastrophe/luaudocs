@@ -16,7 +16,7 @@ import {
 import { GENERATED_COMMENT_MARK, GENERATED_MARK } from "../src/pages";
 import { emitDocs, emitDocsFromJson, type EmitResult } from "../src/render";
 import { collectGuides, syncSite } from "../src/site";
-import { has, makeProjectFactory, modelJson, readFixture, testConfig } from "./helpers";
+import { has, makeProjectFactory, modelJson, readFixture, testConfig, testMod } from "./helpers";
 
 const TOML =
 	'title = "Demo"\n[source]\nentries = []\n[docs]\ndir = "docs"\nurl = "https://demo.example/"';
@@ -82,7 +82,7 @@ describe("site llms.txt and llms-full.txt", () => {
 		expect(main.full).not.toContain("first release");
 
 		const configuredDesc = buildGuideSite({
-			"luaudocs.toml": `description = "Configured, and authoritative."\n${TOML}`,
+			"luaudocs.toml": `description = """Configured,\nand authoritative."""\n${TOML}`,
 			"docs/index.md": HERO,
 			"docs/guide/getting-started.md": GETTING_STARTED,
 		});
@@ -172,6 +172,47 @@ describe("site llms.txt and llms-full.txt", () => {
 		expect(both.full).not.toContain("luaudocs-links=");
 		expect(both.full).not.toContain('<a class="source-link');
 		expect(both.full).not.toContain("<!--");
+
+		// `syncLlms` walks `result.accessTree` depth-first rather than `pageModels` array order.
+		const treeOrderedDir = project({});
+		const treeEmitted = emitDocsFromJson(
+			modelJson([
+				testMod("src/Alpha.luau", "Alpha", {
+					classes: [
+						{
+							id: "src/Alpha.luau#class.Alpha",
+							name: "Alpha",
+							doc: "Class summary fallback.",
+							tags: { custom: [] },
+							constructors: [],
+							members: [],
+							source: { file: "src/Alpha.luau", line: 1 },
+						},
+					],
+				}),
+				testMod("src/init.luau", "Zeta", {
+					doc: "Root module.",
+					reexports: [
+						{
+							id: "src/init.luau#reexport.Alpha",
+							name: "Alpha",
+							targetModule: "src/Alpha.luau",
+						},
+					],
+				}),
+			]),
+			testConfig(),
+		);
+		expect(treeEmitted.pageModels.map((p) => p.slug)).toEqual(["Alpha", "Zeta"]);
+		sync(treeOrderedDir, treeEmitted);
+		const treePublished = published(treeOrderedDir);
+		expect(entries(treePublished.index)).toEqual([
+			"- [Zeta](https://demo.example/api/Zeta): Root module.",
+			"- [Alpha](https://demo.example/api/Alpha): Class summary fallback.",
+		]);
+		expect(treePublished.full.indexOf("# Zeta")).toBeLessThan(
+			treePublished.full.indexOf("# Alpha"),
+		);
 	});
 
 	it("preserves existing files when llms = false and removes stale files when empty", () => {
@@ -360,7 +401,7 @@ describe("the checkout's llms.txt", () => {
 		);
 		expect(special).toContain('- [``Lib.quote: "`" | "\'"``](src/init.luau#L3)');
 		expect(special).toContain(
-			"\n## Tools\n\n- [Tools](<vendor/Dev Tools/init.luau>): Reached by nothing.",
+			"\n## Tools\n\n- [Tools](vendor/Dev%20Tools/init.luau): Reached by nothing.",
 		);
 	});
 });
@@ -439,5 +480,22 @@ describe("luaudocs llms CLI runner", () => {
 			quiet.mockRestore();
 		}
 		expect(read(errDir)).toBe(before);
+	});
+
+	it("unescapes prose generic brackets in llms-full.txt while keeping code spans verbatim", () => {
+		const dir = project();
+		const context = createContext(dir);
+		const result = emitDocsFromJson(
+			modelJson([
+				testMod("src/init.luau", "Gen", {
+					doc: "Returns Map<string, Array<number>> and keeps `\\<raw\\>` intact.",
+				}),
+			]),
+			context.config,
+		);
+		syncLlms(context, [], result);
+		const full = readFileSync(join(context.docsDir, "public", "llms-full.txt"), "utf8");
+		expect(full).toContain("Returns Map<string, Array<number>> and keeps `\\<raw\\>` intact.");
+		expect(full).not.toContain("Map\\<");
 	});
 });

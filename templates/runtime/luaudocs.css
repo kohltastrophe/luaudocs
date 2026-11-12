@@ -11,10 +11,10 @@
 	src: url("./FiraCode-VF.woff2") format("woff2");
 }
 
-/* Always reserve vertical scrollbar space so navigating between short and long
- * pages does not shift the layout horizontally (no-op on overlay scrollbars). */
+/* Reserve vertical scrollbar space so navigating between short and long pages
+ * does not shift the layout horizontally (no-op on overlay scrollbars). */
 html {
-	overflow-y: scroll;
+	scrollbar-gutter: stable;
 }
 
 :root {
@@ -28,10 +28,11 @@ html {
 .vp-doc img {
 	display: inline-block;
 }
-.vp-doc img[width],
+.vp-doc img[width] {
+	width: revert;
+}
 .vp-doc img[height] {
-	width: revert-layer;
-	height: revert-layer;
+	height: revert;
 }
 
 .shiki-inline span,
@@ -64,7 +65,7 @@ html {
 	transform: translateY(-50%);
 	padding: 0 8px;
 	background-color: var(--vp-c-bg);
-	color: var(--vp-c-text-3);
+	color: var(--vp-c-text-2);
 	font-size: 11px;
 	font-weight: 600;
 	letter-spacing: 0.08em;
@@ -106,25 +107,33 @@ html {
 	border-top: 0;
 }
 
-/* Below 640px VitePress bleeds code blocks to the viewport edges with square
- * corners, which would cut across the frame's border; keep them inset. */
+/* Below 640px VitePress bleeds code blocks, titled headers, and tab strips to
+ * the viewport edges with square corners, which would cut across the frame's
+ * border; keep them inset. */
 .vp-doc .luaudocs-frame div[class*="language-"] {
 	margin-left: 0;
 	margin-right: 0;
 	border-radius: 8px;
 }
 
-/* Keep titled code-block headers inset inside frames below 640px as well. */
-.vp-doc .luaudocs-frame .vp-code-block-title-bar {
+.vp-doc .luaudocs-frame .vp-code-block-title-bar,
+.vp-doc .luaudocs-frame .vp-code-group .tabs {
 	margin-left: 0;
 	margin-right: 0;
+	border-radius: 8px 8px 0 0;
 }
 
-/* Breadcrumb trail above a page's H1 title. Links inherit muted text color so
- * the trail reads as a single path rather than a row of brand-colored links. */
+.vp-doc .luaudocs-frame .vp-code-block-title div[class*="language-"],
+.vp-doc .luaudocs-frame .vp-code-group > .blocks > div[class*="language-"] {
+	border-top-left-radius: 0;
+	border-top-right-radius: 0;
+}
+
+/* Breadcrumb trail above a page's H1 title. Links inherit secondary text color
+ * so the trail reads as a single path rather than a row of brand-colored links. */
 .vp-doc .luaudocs-trail p {
 	margin: 0 0 8px;
-	color: var(--vp-c-text-3);
+	color: var(--vp-c-text-2);
 	font-size: 14px;
 	line-height: 20px;
 }
@@ -264,25 +273,37 @@ html {
 	backdrop-filter: blur(4px);
 }
 
+/* Show a focus ring on the visible tab `<label>` when the visually hidden radio
+ * `<input>` receives keyboard focus. */
+.vp-code-group input:focus-visible + label {
+	outline: 2px solid var(--vp-c-brand-1);
+	outline-offset: -2px;
+}
+
 /* Prose `<TabItem>` panels render inside `.vp-block` (`rewriteTabs` in
  * `./markup.ts`). VitePress hides `div[class*="language-"]` inside
  * `.vp-code-group` unless it has `.active`; restore visibility, margin, and
- * top border-radius for code blocks nested inside a `.vp-block` prose panel. */
-.vp-code-group .vp-block div[class*="language-"] {
+ * top border-radius for direct code blocks inside a `.vp-block` prose panel
+ * without leaking into nested `.vp-code-group` panels. */
+.vp-code-group > .blocks > .vp-block > div[class*="language-"] {
 	display: block;
 	margin-top: 16px !important;
 }
 @media (min-width: 640px) {
-	.vp-code-group .vp-block div[class*="language-"] {
+	.vp-code-group > .blocks > .vp-block > div[class*="language-"] {
 		border-top-left-radius: 8px !important;
 		border-top-right-radius: 8px !important;
 	}
 }
-.vp-code-group .vp-block .vp-code-block-title div[class*="language-"] {
+.vp-code-group > .blocks > .vp-block > .vp-code-block-title > div[class*="language-"] {
+	display: block;
 	margin-top: 0 !important;
 	border-top-left-radius: 0 !important;
 	border-top-right-radius: 0 !important;
 }
-.vp-code-group .vp-block p {
-	margin: 0;
+.vp-code-group > .blocks > .vp-block > :first-child {
+	margin-top: 0 !important;
+}
+.vp-code-group > .blocks > .vp-block > :last-child {
+	margin-bottom: 0 !important;
 }

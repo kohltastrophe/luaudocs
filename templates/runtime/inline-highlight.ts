@@ -58,26 +58,54 @@ export function inlineHighlightPlugin(
 
 	const fallback =
 		md.renderer.rules.code_inline ??
-		((tokens, idx) => `<code v-pre>${md.utils.escapeHtml(tokens[idx]?.content ?? "")}</code>`);
+		((tokens, idx, _options, _env, self) => {
+			const tok = tokens[idx];
+			return tok
+				? `<code${self.renderAttrs(tok)}>${md.utils.escapeHtml(tok.content)}</code>`
+				: "";
+		});
 
-	let loadedLangs: Set<string> | undefined;
 	md.renderer.rules.code_inline = (tokens, idx, options, env, self) => {
 		const tok = tokens[idx];
-		if (!tok?.info) return fallback(tokens, idx, options, env, self);
-
+		if (!tok?.info || !LANGUAGES.includes(tok.info)) {
+			return fallback(tokens, idx, options, env, self);
+		}
 		const hl = getHighlighter();
-		if (!hl) return fallback(tokens, idx, options, env, self);
-		loadedLangs ??= new Set(hl.getLoadedLanguages());
-		const useLang = loadedLangs.has(tok.info) ? tok.info : "text";
+		if (!hl || !hl.getLoadedLanguages().includes(tok.info)) {
+			return fallback(tokens, idx, options, env, self);
+		}
 
 		try {
 			const inner = hl.codeToHtml(tok.content, {
-				lang: useLang,
+				lang: tok.info,
 				themes: THEMES,
 				defaultColor: false,
 				structure: "inline", // emit colored spans only, without <pre>/<code>/line wrappers
 			});
-			return `<code class="shiki-inline" v-pre>${inner}</code>`;
+			// Merge `shiki-inline` and `v-pre` onto a cloned attribute list so existing
+			// attributes (`vp-code`, `{.class}`, `{#id}`) are preserved without mutating `tok`.
+			let hasVPre = false;
+			let mergedClass = false;
+			const parts: string[] = [];
+			for (const [name, value] of tok.attrs ?? []) {
+				if (name === "v-pre") {
+					hasVPre = true;
+					parts.push(value === "" ? " v-pre" : ` v-pre="${md.utils.escapeHtml(value)}"`);
+				} else if (name === "class") {
+					mergedClass = true;
+					const cls = value ? `${value} shiki-inline` : "shiki-inline";
+					parts.push(` class="${md.utils.escapeHtml(cls)}"`);
+				} else {
+					parts.push(` ${md.utils.escapeHtml(name)}="${md.utils.escapeHtml(value)}"`);
+				}
+			}
+			if (!mergedClass) {
+				parts.unshift(' class="shiki-inline"');
+			}
+			if (!hasVPre) {
+				parts.push(" v-pre");
+			}
+			return `<code${parts.join("")}>${inner}</code>`;
 		} catch {
 			return fallback(tokens, idx, options, env, self);
 		}

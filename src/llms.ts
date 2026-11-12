@@ -25,7 +25,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import type { SourceSpan } from "./docmodel";
-import { docSummary, plainMarkdown, unwrap } from "./markdown";
+import { codeSpan, docSummary, linkDestination, plainMarkdown, unwrap } from "./markdown";
 import type { TreeNode } from "./nav";
 import {
 	apiHref,
@@ -34,6 +34,8 @@ import {
 	GENERATED_COMMENT_MARK,
 	isGeneratedFile,
 	memberAccess,
+	membersByKind,
+	pageSummaryDoc,
 	syncFile,
 	toPosix,
 	writeIfChanged,
@@ -48,7 +50,6 @@ import {
 	badgeLabels,
 	genericsText,
 	inlineText,
-	MEMBER_HEADINGS,
 	READ_ONLY_LABEL,
 	reexportLabel,
 	renderProject,
@@ -80,9 +81,10 @@ function llmsIndex(
 	info: string[],
 	sections: Section[],
 ): string {
-	const lines = [`# ${title}`, ""];
-	if (summary) {
-		lines.push(`> ${summary}`, "");
+	const lines = [`# ${unwrap(title).trim()}`, ""];
+	const lead = summary ? unwrap(summary).trim() : "";
+	if (lead) {
+		lines.push(`> ${lead}`, "");
 	}
 	for (const paragraph of info) {
 		lines.push(paragraph, "");
@@ -132,6 +134,26 @@ function titled(body: string, title: string): string {
 	return body.startsWith("# ") ? body : `# ${title}\n\n${body}`;
 }
 
+/** Walks `result.accessTree` depth-first so published `llms*.txt` matches `/api/` and `runLocalLlms` order. */
+function orderedPages(result: EmitResult): PageModel[] {
+	const ordered: PageModel[] = [];
+	const seen = new Set<string>();
+	const visit = (node: TreeNode) => {
+		if (!seen.has(node.page.moduleId)) {
+			seen.add(node.page.moduleId);
+			ordered.push(node.page);
+		}
+		node.children.forEach(visit);
+	};
+	result.accessTree.forEach(visit);
+	for (const page of result.pageModels) {
+		if (!seen.has(page.moduleId)) {
+			ordered.push(page);
+		}
+	}
+	return ordered;
+}
+
 export function syncLlms(context: BuildContext, guides: GuideItem[], result: EmitResult): void {
 	const config = context.config;
 	if (!config.docs.llms) {
@@ -141,15 +163,15 @@ export function syncLlms(context: BuildContext, guides: GuideItem[], result: Emi
 	const api: Section[] = [];
 	const apiBodies: string[] = [];
 
-	if (result.pageModels.length > 0) {
+	const pages = orderedPages(result);
+	if (pages.length > 0) {
 		const entries: string[] = [];
-		for (const page of result.pageModels) {
+		for (const page of pages) {
 			entries.push(
 				entry(
 					escapeBrackets(displayTitle(page)),
 					`${siteUrl}${apiHref(page.slug)}`,
-					// Use the same lead sentence summary as the API overview page.
-					docSummary(page.doc),
+					summaryText(pageSummaryDoc(page)),
 				),
 			);
 			const rendered = result.pages.get(apiPageFile(page.slug));
@@ -195,32 +217,14 @@ export function syncLlms(context: BuildContext, guides: GuideItem[], result: Emi
 
 export const LOCAL_LLMS_FILE = "llms.txt";
 
-/**
- * Wraps `text` in a CommonMark code span that survives embedded backticks
- * (fencing with one more backtick than the longest run inside `text`, and
- * padding with spaces when `text` starts or ends with a backtick).
- */
-function codeSpan(text: string): string {
-	const longest = Math.max(0, ...(text.match(/`+/g) ?? []).map((run) => run.length));
-	const fence = "`".repeat(longest + 1);
-	const pad = text.startsWith("`") || text.endsWith("`") ? " " : "";
-	return `${fence}${pad}${text}${pad}${fence}`;
-}
-
 /** Escapes square brackets in plain link text so they cannot close the Markdown link early. */
 function escapeBrackets(text: string): string {
 	return text.replace(/[[\]]/g, "\\$&");
 }
 
-/**
- * Formats a single list entry, wrapping the destination in `<...>` when it
- * contains spaces or parentheses as required by CommonMark.
- */
+/** Formats a single list entry with a CommonMark-safe link destination. */
 function entry(title: string, target: string, notes: string): string {
-	const destination = /[\s()<>]/.test(target)
-		? `<${target.replace(/[<>]/g, encodeURIComponent)}>`
-		: target;
-	return `- [${title}](${destination})${notes ? `: ${notes}` : ""}`;
+	return `- [${title}](${linkDestination(target)})${notes ? `: ${notes}` : ""}`;
 }
 
 /** Renders a doc string's lead sentence as a single line of plain Markdown without site chrome. */
@@ -322,10 +326,8 @@ function constructorText(section: PageSection | undefined, link: Linker): string
 
 /** Lists a section's members, grouped by kind in page heading order. */
 function memberEntries(section: PageSection, link: Linker): string[] {
-	return MEMBER_HEADINGS.flatMap(({ kind }) =>
-		section.members
-			.filter((member) => member.kind === kind)
-			.map((member) => memberEntry(section, member, link)),
+	return membersByKind(section).flatMap(({ members }) =>
+		members.map((member) => memberEntry(section, member, link)),
 	);
 }
 
@@ -338,9 +340,7 @@ function moduleEntries(page: PageModel, link: Linker): string[] {
 			link.file(page.source.file),
 			notes(
 				badgeLabels(page.tags),
-				// Use the module's own doc summary, falling back to the primary
-				// class doc when a factory module documents the class block instead.
-				summaryText(page.doc) || summaryText(primary?.doc),
+				summaryText(pageSummaryDoc(page)),
 				constructorText(primary, link),
 			),
 		),
