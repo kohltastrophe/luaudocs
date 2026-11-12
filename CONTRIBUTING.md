@@ -12,7 +12,7 @@ Install [Bun](https://bun.sh) and install dependencies:
 bun install
 ```
 
-`prepare` (`npm run generate && tsup`) populates `src/generated/` and `extractor/generated/` and builds `dist/`. The [Lute](https://github.com/luau-lang/lute) binary pinned in `src/lute.ts` downloads into a per-user cache on first spawn (set `LUAUDOCS_LUTE` to override it with a local build).
+`prepare` (`npm run generate && tsup`) runs `scripts/generate.ts` via `node --experimental-strip-types` to populate `src/generated/` and `extractor/generated/`, then builds `dist/`. `overrides.esbuild` in `package.json` deduplicates `esbuild` across `tsup` and `vitepress` in `bun.lock`. The [Lute](https://github.com/luau-lang/lute) binary pinned in `src/lute.ts` downloads into a per-user cache on first spawn (set `LUAUDOCS_LUTE` to override it with a local build).
 
 ## The ladder
 
@@ -28,7 +28,7 @@ bun run build && bun run test:e2e                  # e2e against dist/cli.js
 node dist/cli.js llms --check                      # root llms.txt drift
 ```
 
-In CI, the unit-test step runs `bun run test:coverage` (see `vitest.config.ts` for coverage scope), followed on Linux by a smoke test that runs `init` and `build` from an `npm pack` tarball with production dependencies only.
+In CI, the unit-test step runs `bun run test:coverage` (see `vitest.config.ts` for coverage scope), followed on Linux by `bun run test:pack` (`scripts/smoke-pack.ts`), which runs `init` and `build --emit-only` from an `npm pack` tarball with production dependencies only.
 
 For local iteration and formatting:
 
@@ -60,41 +60,42 @@ Response headers live in `.luaudocs/public/_headers`. The root `llms.txt` is emb
 
 ## Releasing
 
-Keep commits atomic per user-visible change using [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) (`feat`, `fix`, `perf`, `security`, `revert`, `refactor`, `docs`, `test`, `build`, `ci`, `chore`). On every push to `main`, [`kohltastrophe/release`](https://github.com/kohltastrophe/release) in `.github/workflows/release.yml` validates commit headers since `v<version>`, infers the next semver step (`patch`, `minor`, or `major`), and opens or updates a standing `chore: release <version>` PR that updates `package.json` and stamps `CHANGELOG.md`.
+Keep commits atomic per user-visible change using [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) (`feat`, `fix`, `perf`, `security`, `revert`, `refactor`, `docs`, `test`, `build`, `ci`, `chore`). [`kohltastrophe/release@v1`](https://github.com/kohltastrophe/release) (`mode: check`) in `.github/workflows/ci.yml` validates commit headers and `CHANGELOG.md` on pushes and pull requests. On every push to `main`, `kohltastrophe/release@v1` (`wait-for-ci: ci.yml`) in `.github/workflows/release.yml` waits for CI, infers the next semver step (`patch`, `minor`, or `major`), and opens or updates a standing `chore: release <version>` PR that updates `package.json` and stamps `CHANGELOG.md`.
 
-When the `chore: release <version>` PR is merged to `main`, `.github/workflows/release.yml` runs the full CI ladder and tarball smoke test, publishes to npm with provenance, and creates the `v<version>` tag and GitHub Release.
+When `should_build == 'true'` (merging the `chore: release <version>` PR or dispatching a release build), the `publish` job in `.github/workflows/release.yml` runs `bun run generate`, `bun run build`, and `bun run test:pack`. When `should_release == 'true'`, it publishes to npm with provenance (`npm publish --ignore-scripts`) and runs `kohltastrophe/release@v1` (`mode: publish`) to create the `v<version>` tag and GitHub Release.
 
 ## Architecture
 
 ```
 .luau sources
-   │  extractor/ (Luau on Lute): parse via @std/syntax, symbolically evaluate
+   │  extractor/ (Luau on Lute, --!strict): parse via @std/syntax, symbolically evaluate
    ▼
 doc-model JSON  ← the only interface between the halves (schemaVersion 1)
    │  src/ (TypeScript on Node): render pages, bake the site, drive VitePress
    ▼
-<docs>/api/*.md + <docs>/.vitepress/**  →  vitepress dev/build
+<docs>/api/*.md + <docs>/.vitepress/**  ->  vitepress dev/build
 ```
 
-- **Extractor** (`extractor/`, entry `main.luau`, spawned by `src/extract.ts`):
-  1. `parse` (the only module touching Lute's CST) and `comments`.
-  2. `surface`: symbolic evaluation to the module's return value, including `setmetatable(M, { __index = Proto })` delegation, `Key: typeof(require(...))` table-type mounts, and `returnedRequire` tracking for `return require(...)` loaders.
-  3. `requires` (string requires with Rojo `$path` fallback, `.luaurc` and runtime aliases, and Roblox instance paths) and `graph`.
-  4. `tags`, `segs` (signature display segments), `detect` (yield/realm badges, guard-derived property realms, and owning-table type lookup), and `infer` (value-based inference for unannotated members).
-  5. `model/` in two passes: `build` assembles each module in isolation (with container type fallback for unannotated or `:: any` properties), and `finalize` runs whole-graph resolution, `expandRespelledTypes` for re-exported type aliases, `returnedRequire` return-type inference, and cross-linking.
-  6. `emit`: deterministic JSON with sorted keys.
+- **Extractor** (`extractor/`, `--!strict` across every module, entry `main.luau` spawned by `src/extract.ts`), layered one-way from `main.luau` -> `model/*` -> `core/*` -> `generated/engine.luau`:
+  1. `core/util` and `core/engine`: path/string helpers and the generated Roblox API dump wrapper.
+  2. `core/parse` and `core/comments`: `parse` invokes `@std/syntax`, normalizes `.d.luau` declarations, scans `@[deprecated]` attributes, and provides shared CST span and type-unwrapping helpers (`comments`, `requires`, `surface`, `segs`, `detect`, and `infer` also inspect CST nodes on `ParsedModule`, while `model/*` stays CST-free).
+  3. `core/surface`: symbolic evaluation to the module's return value, including `setmetatable(M, { __index = Proto })` and self-indexing metatable delegation, `Key: typeof(require(...))` table-type mounts, companion `.d.luau` declarations, and `returnedRequire` tracking for `return require(...)` loaders.
+  4. `core/requires` (string requires with Rojo `$path` fallback, `.luaurc` and runtime aliases, and Roblox instance paths) and `core/graph`.
+  5. `core/tags`, `core/segs` (signature display segments and table-type field scanning), `core/detect` (yield/realm badges, guard-derived property realms, and owning-table type lookup), and `core/infer` (value-based inference for unannotated members).
+  6. `model/{init,members,build,finalize}` in two passes: `members` holds shared tag parsing and member/type body assembly, `build` assembles each module in isolation (with container type fallback for unannotated or `:: any` properties), and `finalize` runs whole-graph resolution, `expandRespelledTypes` for re-exported type aliases, `returnedRequire` return-type inference, and cross-linking.
+  7. `core/emit`: deterministic JSON serialization with sorted keys.
 - **Renderer** (`src/`): `runBuild` (`src/build.ts`) is the shared extract-render-write pipeline for `build` and `dev`, while `llms` runs only the extract-and-render half (`renderProject` in `src/render.ts`). `nav.ts` builds the API sidebar from the **public access path** (falling back to the Rojo/folder hierarchy only for unmounted modules, with no manual ordering overrides). Setting `[source] entries = []` in `luaudocs.toml` skips the extractor for guide-only sites. Every module opens with a header comment explaining what it owns.
 
 ## Invariants
 
-- **Schema version.** `extractor/model/init.luau` and `src/docmodel.ts` define the doc model at `schemaVersion = 1`, evolving in place while the major version is `0`. Lute specs and `regen:docmodels --check` verify extractor output, so `parseDocModel` validates only user-triggerable failures (malformed JSON, mismatched `schemaVersion`, or a non-doc-model file in `[source.aliases]`).
+- **Schema version.** `extractor/model/init.luau` and `src/docmodel.ts` define the doc model at `schemaVersion = 1`, evolving in place while the major version is `0`. Lute specs and `regen:docmodels --check` verify extractor output, and `parseDocModel` validates `schemaVersion`, `project.entryPoints`, `modules` array shape, `diagnostics`, and optional `externals` so malformed JSON or a non-doc-model file in `[source.aliases]` fails cleanly.
 - **Checked-in doc-models.** `test/fixtures/docmodel-{sample,tags}.json` are both the extractor's expected output and the renderer unit tests' input, letting `bun run test` run without spawning Lute. Regenerate them with `bun run regen:docmodels`.
 - **Ownership is by directory.** `syncDir` (`src/pages.ts`) owns `<docs>/api/` and `<docs>/.vitepress/`, deleting stale files inside them (except VitePress's `dist/`, `cache/`, and temporary config bundles) and never deleting user files elsewhere. At the docs root, builds overwrite `changelog.md`, `public/llms*.txt`, `public/docmodel.json`, `package.json`, and `index.md` (only while `index.md` starts with `# Generated by luaudocs`). Turning off `[docs] model` deletes `public/docmodel.json`, whereas `[docs] llms = false` leaves `public/llms*.txt` untouched. At the project root, only `luaudocs llms` writes `llms.txt` (guarded by `<!-- Generated by luaudocs` on line 1, where removing the marker claims the file via `isGeneratedFile` in `src/pages.ts`), and `.gitignore` is created only when missing.
 - **Extraction errors never delete pages.** When the doc model has any `error` diagnostic, the build updates pages that succeeded and skips directory sweeps and rewrites of `.vitepress/generated/api-nav.ts`, `trails.ts`, `llms*.txt`, and `changelog.md`. Keeping the API sidebar in `.vitepress/generated/api-nav.ts` preserves the last good API nav while still updating guide navigation in `sidebar.ts`.
-- **Scaffold-once vs. runtime templates.** `templates/site/**` and `templates/project/**` use `@TOKEN@` placeholders and are written once by `luaudocs init`. `templates/runtime/**` is copied into `<docs>/.vitepress/generated/` on every `build` and `init` as raw `Buffer` bytes so binary assets like `FiraCode-VF.woff2` are not corrupted by UTF-8 decoding. Runtime modules cannot import from `src/`, so `src/markdown.ts` re-exports shared helpers from `templates/runtime/` instead.
-- **Generated Roblox data is not committed.** `scripts/generate.ts` fetches a pinned `Roblox-Client-Tracker` dump and writes `src/generated/roblox-names.json` (Roblox type links) and `extractor/generated/engine.luau` (yield/plugin badges and return-type/datatype/enum inference, with built-in fallbacks when absent). Fixtures (`sample-project`, `tags-project`) must not use dump-only names so dump updates never alter `docmodel-*.json`. Dump-backed inference is tested in `extractor/tests/infer.spec.luau`.
+- **Scaffold-once vs. runtime templates.** `templates/site/**` and `templates/project/**` use `@TOKEN@` placeholders and are written once by `luaudocs init`. `templates/runtime/**` (`markup.ts` with its pre-anchor `<Frame>` heading rule and `codeSpan`, `signature-links.ts` decoding `luaudocs-links` and `luaudocs-links-b64` directly in `parseLinks`, `inline-highlight.ts`, `whitespace.ts`, `search-cache.ts`, `icons.ts`, and `luaudocs.css`) is copied into `<docs>/.vitepress/generated/` alongside the generated data modules (`api-nav.ts`, `trails.ts`, and `sidebar.ts`) on every `build` and `init` as raw `Buffer` bytes so binary assets like `FiraCode-VF.woff2` are not corrupted by UTF-8 decoding. Runtime modules cannot import from `src/`, so `src/markdown.ts` re-exports shared helpers from `templates/runtime/` instead.
+- **Generated Roblox data is not committed.** `scripts/generate.ts` (run via `node --experimental-strip-types`) fetches a pinned `Roblox-Client-Tracker` dump and writes `src/generated/roblox-names.json` (Roblox type links) and `extractor/generated/engine.luau` (stamped with the dump commit and datatype fingerprint, with built-in fallbacks when absent). Fixtures (`sample-project`, `tags-project`) must not use dump-only names so dump updates never alter `docmodel-*.json`. Dump-backed inference is tested in `extractor/tests/infer.spec.luau`.
 - **Lute has no stderr write API.** Fatal extractor usage errors print to `stdout` and exit `2`. Recoverable issues emit as doc-model diagnostics, and error gating (`--strict` and skipping VitePress) lives in the TypeScript CLI.
-- **Paths are normalized on both sides.** `toPosix` (`src/config.ts`) and `relPath` (`extractor/util.luau`) convert `\` to `/` so module IDs and relative paths match on Linux and Windows.
+- **Paths are normalized on both sides.** `toPosix` (`src/config.ts`) and `relPath` (`extractor/core/util.luau`) convert `\` to `/` so module IDs and relative paths match on Linux and Windows, and `normalizeDocsDir` converts backslashes before containment checks so `[docs] dir` cannot escape the project root.
 - **Links are never speculative.** VitePress dead-link checking stays enabled, so `src/render.ts` only emits links that resolve to a project symbol, an `@external` declaration, a runtime alias URL, or a known Roblox type.
 - **Anchors are predicted, never written.** `mintAnchors` (`src/render.ts`) predicts VitePress heading IDs by walking `pageSteps` and applying `headingSlug` (`src/markdown.ts`, vendored from `@mdit-vue/shared`), verified against VitePress in `test/anchors.test.ts`. Headings must not contain HTML that adds slug text: member names use backtick code spans, badges and source links are self-closing components, and re-export badge links use `class="ignore-header"`.
 - **Pinned VitePress, site dependencies, and Lute.** `src/site.ts` copies the exact `devDependencies.vitepress` version into `<docs>/package.json`, and `SITE_DEPENDENCIES` (`src/pages.ts`) is the single dependency list shared with `ensureVitepress` (`src/build.ts`). `src/lute.ts` holds the pinned Lute version, asset names, and four platform SHA-256 digests (falling back to `PATH` only on platforms without prebuilt binaries). Bumping Lute requires updating all four digests and running `bun run regen:docmodels`.

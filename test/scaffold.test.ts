@@ -177,6 +177,7 @@ describe("init", () => {
 
 		for (const remote of [
 			"git@github.com:user/mylib.git",
+			"ssh://git@github.com/user/mylib.git",
 			"https://user:tok@github.com/user/mylib.git",
 		]) {
 			const repoDir = tempDir();
@@ -254,6 +255,11 @@ describe("init --from-moonwave", () => {
 
 		const converted = readFileSync(join(dir, "luaudocs.toml"), "utf8");
 		await expect(converted).toMatchFileSnapshot("__snapshots__/moonwave-full-luaudocs.toml");
+		// `--from-moonwave` writes `luaudocs.toml` once rather than scaffolding a throwaway starter first.
+		const configActions = lines
+			.map((line) => line.replace(/\x1b\[[0-9;]*m/g, "").trim())
+			.filter((line) => /^(?:created|skipped\s+\(exists\))\s+luaudocs\.toml$/.test(line));
+		expect(configActions).toHaveLength(1);
 
 		const loaded = loadConfig(dir);
 		expect(loaded.config.title).toBe("Brume");
@@ -522,16 +528,47 @@ describe("the scaffolded Pages workflow", () => {
 		const yaml = readFileSync(workflowPath(dir), "utf8");
 		expect(yaml).not.toContain("rokit");
 		expect(yaml).not.toContain("lute");
-		expect(yaml).toContain('build --url "${{ steps.pages.outputs.base_url }}"');
+		expect(yaml).toContain("actions/checkout@v7");
+		expect(yaml).toContain("actions/setup-node@v7");
+		expect(yaml).toContain("actions/cache@v6");
+		expect(yaml).toContain("LUAUDOCS_VERSION: ${{ vars.LUAUDOCS_VERSION }}");
+		expect(yaml).toContain("PAGES_BASE_URL: ${{ steps.pages.outputs.base_url }}");
+		expect(yaml).toContain(
+			'npx --yes "luaudocs@${LUAUDOCS_VERSION:-latest}" build --url "$PAGES_BASE_URL"',
+		);
 		expect(yaml).toContain('path: ".luaudocs/.vitepress/dist"');
-		expect(yaml).toContain("npx luaudocs@latest ");
 		expect(yaml).toContain(`node-version: "${/\d+/.exec(toolPkg.engines.node)![0]}"`);
 		expect(yaml).toContain('branches: "main"');
 
 		const trunkDir = tempDir();
 		execFileSync("git", ["init", "--initial-branch", "trunk"], { cwd: trunkDir });
+		execFileSync("git", ["remote", "add", "origin", "https://github.com/user/mylib.git"], {
+			cwd: trunkDir,
+		});
 		await initProject({ targetDir: trunkDir });
 		expect(readFileSync(workflowPath(trunkDir), "utf8")).toContain('branches: "trunk"');
+		expect(loadConfig(trunkDir).config.repo).toEqual({
+			url: "https://github.com/user/mylib",
+			branch: "trunk",
+		});
+
+		// `refs/remotes/origin/HEAD` takes precedence over a checked-out feature branch.
+		const featureDir = tempDir();
+		execFileSync("git", ["init", "--initial-branch", "feat/wip"], { cwd: featureDir });
+		execFileSync("git", ["remote", "add", "origin", "https://github.com/user/mylib.git"], {
+			cwd: featureDir,
+		});
+		execFileSync(
+			"git",
+			["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/develop"],
+			{ cwd: featureDir },
+		);
+		await initProject({ targetDir: featureDir });
+		expect(readFileSync(workflowPath(featureDir), "utf8")).toContain('branches: "develop"');
+		expect(loadConfig(featureDir).config.repo).toEqual({
+			url: "https://github.com/user/mylib",
+			branch: "develop",
+		});
 
 		const custom = await runInit({
 			"luaudocs.toml": 'title = "X"\n[source]\nentries = []\n[docs]\ndir = "./docs/"\n',

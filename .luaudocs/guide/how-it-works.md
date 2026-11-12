@@ -42,7 +42,7 @@ Without any tags, the extractor discovers:
 - Cast types (`:: T`) and container type annotations. Unannotated or `:: any` properties inherit their field type and doc comment from the owning table's type annotation, and `Key: typeof(require(...))` fields synthesize module mounts.
 - Re-exported requires, lazy loader functions (`function M.sub() return require(...) end`), and member imports (`isState = State.isState`).
 - Conditional mounts (`if IsClient then M.UI = require(...) end` and `RunService:IsServer() and require(...)`).
-- String requires (`./x` and `@self/x`, which fall back to the Rojo tree when no sibling file matches on disk, plus `@alias/x` via `.luaurc`) and runtime aliases (`@lute/fs`, `@lune/net`) configured under [`[source.aliases]`](/guide/configuration).
+- String requires (`./x` and `@self/x`, which fall back to the Rojo tree when no sibling file matches on disk, plus `@alias/x` via `.luaurc`) and runtime aliases (`@lute/fs`, `@lune/net`) configured under [`[source.aliases]`](/guide/configuration#source-aliases).
 - Roblox instance requires (`script.Parent.X`, `:WaitForChild("X")`), including Rojo `*.project.json` mounts and nested project files.
 - Behavioral badges inferred from code for yielding functions, realm-restricted calls (server, client, or plugin), realm-guarded properties, and `table.freeze` or `read`-typed properties. See [Adding badges](/guide/overriding-with-tags#adding-badges).
 - Property types inferred from assigned values when unannotated (see [Property types come from the value](#property-types-come-from-the-value)).
@@ -108,7 +108,7 @@ export type Queue<T> = typeof(setmetatable(
 
 </Frame>
 
-Type references in signatures link to their declaration. Roblox types (`CFrame`, `Instance`, enums) link to Creator Documentation (controlled by [`[api] linkRobloxTypes`](/guide/configuration)). Types reached through a [runtime alias](/guide/configuration) (`fs.File`) link to the runtime's documentation or remote doc model.
+Type references in signatures link to their declaration. Roblox types (`CFrame`, `Instance`, enums) link to Creator Documentation (controlled by [`[api] linkRobloxTypes`](/guide/configuration)). Types reached through a [runtime alias](/guide/configuration#source-aliases) (`fs.File`) link to the runtime's documentation or remote doc model.
 
 ## Property types come from the value
 

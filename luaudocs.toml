@@ -27,5 +27,6 @@ favicon = "/logo.svg"
 
 [docs]
 url = "https://luaudocs.kohl.gg"
-# Publish model.json so external sites can link into Flux's types.
+# Write .luaudocs/public/docmodel.json (served at /docmodel.json; use
+# `luaudocs build --model <file>` for a custom path) so external sites can link into Flux's types.
 model = true

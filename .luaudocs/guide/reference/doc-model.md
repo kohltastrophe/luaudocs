@@ -27,7 +27,7 @@ luaudocs build --emit-only --model api.json
 }
 ```
 
-`externals` maps external type or module names to either a URL string (from [`@external`](/guide/reference/tags#data)) or `{ url?, alias, path, name? }` (for modules and types reached through a [runtime alias](/guide/configuration)). It's omitted when empty. Runtime module re-exports record the require string as `targetModule` (with optional `url`), and re-exports carry optional `realm` and `within` fields.
+`externals` maps external type or module names to either a URL string (from [`@external`](/guide/reference/tags#data)) or `{ url?, alias, path, name? }` (for modules and types reached through a [runtime alias](/guide/configuration#source-aliases)). It's omitted when empty. Runtime module re-exports record the require string as `targetModule` (with optional `url`), and re-exports carry optional `realm` and `within` fields.
 
 Each module contains `id`, `name`, `classes`, `members`, `types`, `reexports`, `instancePath`, `source`, optional `doc`, and optional `aliasOf` (for passthrough `return require(X)` modules, which get no page of their own). Here is the function entry for [`Flux.state`](/api/Flux#state-1):
 

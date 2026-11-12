@@ -79,7 +79,7 @@ Signatures come straight from your Luau annotations, so you never duplicate para
 - [`Flux.isState(value: any): boolean`](examples/Flux/State.luau#L20-L22): [from State] Reports whether `value` is a state.
 ```
 
-Run `luaudocs dev` to preview a searchable VitePress site with live reload, or `luaudocs llms` to write a compact `llms.txt` index linking every guide and public symbol to its `file:line` declaration. Need custom tooling? Run `luaudocs build --model` to export your full API as JSON.
+Run `luaudocs dev` to preview a searchable VitePress site with live reload, or `luaudocs llms` to write a compact `llms.txt` index linking every guide and public symbol to its `file:line` declaration. For custom tooling, run `luaudocs build --model model.json` to export your full API as JSON.
 
 </div>
 </div>
@@ -108,7 +108,7 @@ cd my-luau-library
 luaudocs dev
 ```
 
-Already using [Moonwave](https://github.com/evaera/moonwave)? Run `luaudocs init --from-moonwave` before `dev` to convert your project in place.
+If you're migrating from [Moonwave](https://github.com/evaera/moonwave), run `luaudocs init --from-moonwave` before `dev` to convert your project in place.
 
 Read the **[Getting Started](https://luaudocs.kohl.gg/guide/getting-started)** guide or browse the **[Example API](https://luaudocs.kohl.gg/api/)** generated from [`examples/Flux`](https://github.com/kohltastrophe/luaudocs/tree/main/examples/Flux).
 

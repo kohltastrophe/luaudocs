@@ -6,13 +6,19 @@
  * either way. Everything here re-derives the original and asserts the page
  * still shows it, so a template edit fails until the guide follows.
  */
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { createMarkdownRenderer } from "vitepress";
 import { describe, expect, it } from "vitest";
 import pkg from "../package.json";
 import { packageRoot } from "../src/extract";
 import { LOCAL_LLMS_FILE } from "../src/llms";
+import { outsideFences, stripFrontmatter } from "../src/markdown";
 import { isGeneratedFile } from "../src/pages";
+import { installMarkupRule } from "../templates/runtime/markup";
+import { filesUnder, makeTempDirFactory } from "./helpers";
+
+const tempDir = makeTempDirFactory("luaudocs-docs-site-");
 
 const root = packageRoot();
 const deployingPage = join(root, ".luaudocs", "guide", "deploying.md");
@@ -63,18 +69,30 @@ describe("the site quotes its sources verbatim", () => {
 	});
 
 	// every `npx luaudocs` command across the guides and the root llms.txt must
-	// pass `@latest` so npx does not run a cached older release
+	// pass `@latest` (or `${LUAUDOCS_VERSION:-latest}` in the workflow) so npx
+	// does not run a cached older release
 	it.each([
-		["deploying.md, in the workflow and on Cloudflare", deployingPage, 2],
-		["coding-agents.md, in the agent notes and the CI step", agentsPage, 4],
-		["the root llms.txt, in its regeneration command", rootLlms, 1],
-	])("uses @latest in %s", (_where, file, least) => {
+		[
+			"deploying.md, in the workflow and on Cloudflare",
+			deployingPage,
+			["${LUAUDOCS_VERSION:-latest}", "latest"],
+		],
+		[
+			"coding-agents.md, in the agent notes and the CI step",
+			agentsPage,
+			["latest", "latest", "latest", "latest"],
+		],
+		["the root llms.txt, in its regeneration command", rootLlms, ["latest"]],
+	])("uses @latest in %s", (_where, file, expectedTags) => {
 		const text = readFileSync(file, "utf8");
-		const tags = [...text.matchAll(/npx luaudocs(?:@([^\s`]+))?(?=[\s`])/g)].map(
-			(match) => match[1],
-		);
-		expect(tags.length).toBeGreaterThanOrEqual(least);
-		expect(tags).toEqual(tags.map(() => "latest"));
+		if (file === deployingPage) {
+			expect(text).toContain('"luaudocs@${LUAUDOCS_VERSION:-latest}"');
+			expect(text).toContain("npx luaudocs@latest");
+		}
+		const tags = [
+			...text.matchAll(/npx(?:\s+--yes)?\s+"?luaudocs(?:@([^\s"`]+))?"?(?=[\s`])/g),
+		].map((match) => match[1]);
+		expect(tags).toEqual(expectedTags);
 	});
 
 	// the guide shows the file the command wrote for this repository; a pasted
@@ -96,5 +114,84 @@ describe("the site quotes its sources verbatim", () => {
 		expect(changelog).toContain(
 			`[${pkg.version}]: https://github.com/kohltastrophe/luaudocs/releases/tag/v${pkg.version}`,
 		);
+	});
+
+	it("resolves every intra-doc and cross-guide #fragment link across README, CONTRIBUTING, and .luaudocs", async () => {
+		const md = await createMarkdownRenderer(tempDir(), {}, "/");
+		installMarkupRule(md, {});
+
+		const guideDir = join(root, ".luaudocs", "guide");
+		const docFiles = [
+			join(root, "README.md"),
+			join(root, "CONTRIBUTING.md"),
+			join(root, ".luaudocs", "index.md"),
+			...filesUnder(guideDir).filter((file) => file.endsWith(".md")),
+		];
+
+		const slugsCache = new Map<string, Set<string>>();
+		const slugsFor = (absFile: string): Set<string> => {
+			let cached = slugsCache.get(absFile);
+			if (!cached) {
+				const raw = readFileSync(absFile, "utf8");
+				const html = md.render(stripFrontmatter(raw), {
+					path: absFile,
+					relativePath: absFile,
+					cleanUrls: true,
+				});
+				cached = new Set(
+					[...html.matchAll(/<h[1-6][^>]*\sid="([^"]+)"/g)].map((m) => m[1]!),
+				);
+				slugsCache.set(absFile, cached);
+			}
+			return cached;
+		};
+
+		const resolveDocPath = (fromFile: string, rawPath: string): string | undefined => {
+			if (rawPath === "") {
+				return fromFile;
+			}
+			if (rawPath.startsWith("/api/")) {
+				return undefined;
+			}
+			const candidates = rawPath.startsWith("/")
+				? [
+						join(root, ".luaudocs", `${rawPath.slice(1)}.md`),
+						join(root, ".luaudocs", rawPath.slice(1), "index.md"),
+						join(root, ".luaudocs", rawPath.slice(1)),
+					]
+				: [
+						resolve(dirname(fromFile), rawPath),
+						resolve(dirname(fromFile), `${rawPath}.md`),
+						resolve(dirname(fromFile), rawPath, "index.md"),
+					];
+			return candidates.find((candidate) => existsSync(candidate));
+		};
+
+		let checked = 0;
+		for (const file of docFiles) {
+			const prose = outsideFences(stripFrontmatter(readFileSync(file, "utf8"))).join("\n");
+			const withoutInlineCode = prose.replace(/(`+)[\s\S]*?\1/g, "");
+			for (const [, rawTarget = "", fragment = ""] of withoutInlineCode.matchAll(
+				/\[[^\]]+\]\(([^)#\s]*)#([^)\s]+)\)/g,
+			)) {
+				if (/^[a-z][a-z0-9+.-]*:/i.test(rawTarget) || rawTarget.startsWith("//")) {
+					continue;
+				}
+				const targetFile = resolveDocPath(file, rawTarget);
+				if (rawTarget.startsWith("/api/")) {
+					continue;
+				}
+				expect(
+					targetFile,
+					`${file}: unresolved target file for (${rawTarget}#${fragment})`,
+				).toBeDefined();
+				expect(
+					slugsFor(targetFile!),
+					`${file} -> ${rawTarget}#${fragment} missing on ${targetFile}`,
+				).toContain(fragment);
+				checked += 1;
+			}
+		}
+		expect(checked).toBeGreaterThan(5);
 	});
 });

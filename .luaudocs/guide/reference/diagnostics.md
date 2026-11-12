@@ -33,7 +33,7 @@ Extractor diagnostics carry a file location and code. Renderer and site-sync war
 
 | Code                     | What it means                                                                                                          |
 | :----------------------- | :--------------------------------------------------------------------------------------------------------------------- |
-| `require-unresolved`     | A require target could not be resolved (missing file, unknown `.luaurc` alias, path outside the project, or dynamic argument). Runtime aliases (`@lute`, `@lune`, or [`[source.aliases]`](/guide/configuration)) are treated as external instead. |
+| `require-unresolved`     | A surfaced require target could not be resolved (missing file, unknown `.luaurc` alias, path outside the project, or top-level dynamic assignment such as `M.Sub = require(target)`). Dynamic helper parameters inside functions (`return require(mod)`) do not warn, and runtime aliases (`@lute`, `@lune`, or [`[source.aliases]`](/guide/configuration#source-aliases)) are treated as external. |
 | `orphaned-within`        | `@within Name` names no known class or module.                                                                         |
 | `duplicate-within`       | Two members collide under the same name after `@within` relocation. The second is dropped.                             |
 | `duplicate-class`        | Two blocks in one module declare `@class` with the same name. The duplicate is dropped (see also [Info](#info)).       |
@@ -67,7 +67,7 @@ Prefixed with `renderer:`:
 | :------------------------------------------------- | :--------------------------------------------------------------------------------------------------------- |
 | `page name collision`                              | Two modules share a page slug. The second gets a numbered slug and a parent-qualified title (`Defaults (Flux)`). |
 | `ambiguous reference name dropped from link table` | A `[Ref]` name matches two equal-standing targets (modules outrank same-named types without warning). Qualify the reference (`[Module.State]`) or rename. |
-| `aliases.<name>: could not load its doc model`     | A [`[source.aliases]`](/guide/configuration) `model` URL or path could not be loaded, so links fall back to module pages. Counts toward `--strict`. |
+| `aliases.<name>: could not load its doc model`     | A [`[source.aliases]`](/guide/configuration#source-aliases) `model` URL or path could not be loaded, so links fall back to module pages. Counts toward `--strict`. |
 
 ## Site-sync warnings
 

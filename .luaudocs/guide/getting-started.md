@@ -98,7 +98,7 @@ Each command takes an optional project directory (defaults to `.`):
 - `luaudocs init`: scaffolds `luaudocs.toml` and starter pages. See [Configuration](/guide/configuration).
 - `luaudocs llms`: writes a repository-root `llms.txt` for coding agents. See [Coding Agents](/guide/coding-agents).
 
-Pass `--help` or see [Reference: CLI](/guide/reference/cli) for all flags.
+Pass `-h` / `--help` or see [Reference: CLI](/guide/reference/cli) for all flags.
 
 ## Next steps
 

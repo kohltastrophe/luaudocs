@@ -21,15 +21,17 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with: { node-version: "@NODE_MAJOR@" }
       - id: luaudocs
-        run: echo "version=$(npm view luaudocs version)" >> "$GITHUB_OUTPUT"
+        env:
+          LUAUDOCS_VERSION: ${{ vars.LUAUDOCS_VERSION }}
+        run: echo "version=$(npm view "luaudocs@${LUAUDOCS_VERSION:-latest}" version)" >> "$GITHUB_OUTPUT"
       # Cache the npm cache, the generated site's node_modules, and the Lute
       # binary downloaded into ~/.cache/luaudocs across runs, keyed on the
       # resolved luaudocs release so a new release refreshes the cache.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.npm
@@ -38,7 +40,10 @@ jobs:
           key: ${{ runner.os }}-luaudocs-${{ steps.luaudocs.outputs.version }}
       - id: pages
         uses: actions/configure-pages@v6
-      - run: npx luaudocs@latest build --url "${{ steps.pages.outputs.base_url }}"
+      - env:
+          LUAUDOCS_VERSION: ${{ vars.LUAUDOCS_VERSION }}
+          PAGES_BASE_URL: ${{ steps.pages.outputs.base_url }}
+        run: npx --yes "luaudocs@${LUAUDOCS_VERSION:-latest}" build --url "$PAGES_BASE_URL"
       - uses: actions/upload-pages-artifact@v5
         with: { path: "@DOCS_DIR@/.vitepress/dist" }
       - id: deployment

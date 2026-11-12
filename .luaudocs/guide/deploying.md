@@ -33,12 +33,14 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with: { node-version: "22" }
       - id: luaudocs
-        run: echo "version=$(npm view luaudocs version)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v4
+        env:
+          LUAUDOCS_VERSION: ${{ vars.LUAUDOCS_VERSION }}
+        run: echo "version=$(npm view "luaudocs@${LUAUDOCS_VERSION:-latest}" version)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.npm
@@ -47,7 +49,10 @@ jobs:
           key: ${{ runner.os }}-luaudocs-${{ steps.luaudocs.outputs.version }}
       - id: pages
         uses: actions/configure-pages@v6
-      - run: npx luaudocs@latest build --url "${{ steps.pages.outputs.base_url }}" # [!code highlight]
+      - env:
+          LUAUDOCS_VERSION: ${{ vars.LUAUDOCS_VERSION }}
+          PAGES_BASE_URL: ${{ steps.pages.outputs.base_url }}
+        run: npx --yes "luaudocs@${LUAUDOCS_VERSION:-latest}" build --url "$PAGES_BASE_URL" # [!code highlight]
       - uses: actions/upload-pages-artifact@v5
         with: { path: ".luaudocs/.vitepress/dist" }
       - id: deployment
@@ -65,7 +70,7 @@ Deploying doesn't require a committed `luaudocs.toml` or `.luaudocs/` folder. Th
 Node is the only prerequisite. `build` runs `npm install` inside `.luaudocs/` when the pinned VitePress package isn't installed yet, and `actions/cache` caches npm packages and the Lute binary across runs.
 
 - **`--url`** passes the URL from `configure-pages` (overriding `[docs] url`), so project-pages base paths and custom domains work automatically.
-- **`luaudocs@latest`** ensures `npx` always uses the current release instead of a cached older version. Replace `@latest` with `@<version>` if you want to pin a specific release.
+- **`LUAUDOCS_VERSION`** defaults to `latest` so `npx` always uses the current release instead of a cached older version. Set a `LUAUDOCS_VERSION` repository variable (for example, `0.3.2`) to pin a specific release across both the cache key and the build step.
 
 ## Cloudflare Pages
 

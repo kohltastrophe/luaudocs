@@ -13,7 +13,7 @@ sidebar_position: 1
 | `luaudocs dev [dir] [-- <vitepress args>]`                                          | Watch sources and serve a live preview (HMR)           |
 | `luaudocs llms [dir] [--out <file>] [--check]`                                      | Write `llms.txt` for coding agents in a checkout       |
 
-`dir` defaults to `.`. `--help` prints this summary, and `--version` prints the installed version.
+`dir` defaults to `.`. `-h` / `--help` prints this summary, and `-v` / `--version` prints the installed version.
 
 ## Flags
 
@@ -31,6 +31,12 @@ sidebar_position: 1
 ## What `dev` watches
 
 `dev` rebuilds when you edit source files, root project files (`CHANGELOG.md`, `README.md`, the Rojo project file, `.luaurc`), the docs directory, or `luaudocs.toml`. Invalid edits to `luaudocs.toml` log an error and keep the server running on the last valid config. Only changing `[docs] dir` stops the session.
+
+## Exit codes
+
+- **`0`**: success.
+- **`1`**: build, `--check`, or diagnostic failure (extraction errors, warnings under `--strict`, stale `llms.txt`, or subprocess failure).
+- **`2`**: CLI usage or configuration error.
 
 ## Environment
 
