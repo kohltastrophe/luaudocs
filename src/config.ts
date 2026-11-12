@@ -551,6 +551,12 @@ export function defaultConfig(root: string): LuauDocsConfig {
 	return validateConfig({ source: { entries } }, basename(root) || "Documentation");
 }
 
+export interface PathOps {
+	resolve: (...paths: string[]) => string;
+	relative: (from: string, to: string) => string;
+	isAbsolute: (path: string) => boolean;
+}
+
 /**
  * Normalizes `[docs] dir` to a clean POSIX path relative to `root` (with no
  * leading `./` or trailing slash) so edit links, the Pages workflow's artifact
@@ -559,15 +565,24 @@ export function defaultConfig(root: string): LuauDocsConfig {
  * since the build owns `index.md`, `package.json`, and `.gitignore` in the docs
  * root and sweeps `.vitepress/` and `api/` beneath it.
  */
-export function normalizeDocsDir(config: LuauDocsConfig, root: string): LuauDocsConfig {
+export function normalizeDocsDir(
+	config: LuauDocsConfig,
+	root: string,
+	pathOps: PathOps = { resolve, relative, isAbsolute },
+): LuauDocsConfig {
 	const raw = toPosix(config.docs.dir);
-	const rel = toPosix(relative(root, resolve(root, raw)));
+	const resolvedRoot = pathOps.resolve(root);
+	const rel = toPosix(pathOps.relative(resolvedRoot, pathOps.resolve(resolvedRoot, raw)));
+	// Reject drive-relative inputs (`C:docs`), any remaining drive prefix in `rel`
+	// (a cross-drive path on Windows, or a Windows path like `C:\docs` on POSIX),
+	// the project root itself, and paths that escape `root`.
 	if (
-		/^[A-Za-z]:/.test(raw) ||
+		/^[A-Za-z]:(?![/])/.test(raw) ||
+		/^[A-Za-z]:/.test(rel) ||
 		rel === "" ||
 		rel === ".." ||
 		rel.startsWith("../") ||
-		isAbsolute(rel)
+		pathOps.isAbsolute(rel)
 	) {
 		fail(
 			"docs.dir",

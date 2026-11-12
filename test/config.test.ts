@@ -2,7 +2,7 @@
  * Tests for the `luaudocs.toml` validator and loader (`src/config.ts`).
  */
 import { mkdirSync, writeFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, join, posix, win32 } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
 	DEFAULT_ALIASES,
@@ -300,6 +300,44 @@ describe("loadConfig", () => {
 				normalizeDocsDir(validateConfig({ title: "X", docs: { dir: bad } }), root),
 			).toThrow(/docs\.dir: expected a directory inside the project/);
 		}
+
+		const winRoot = "C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\luaudocs-proj";
+		for (const [dir, expected] of [
+			[`${winRoot}\\site`, "site"],
+			[`${winRoot.toLowerCase()}/site/docs/`, "site/docs"],
+			[".\\docs\\", "docs"],
+		] as const) {
+			expect(
+				normalizeDocsDir(validateConfig({ title: "X", docs: { dir } }), winRoot, win32).docs
+					.dir,
+				dir,
+			).toBe(expected);
+		}
+		for (const bad of [
+			winRoot,
+			"C:\\docs",
+			"D:\\luaudocs-proj\\site",
+			"C:site",
+			"\\site",
+			"\\\\server\\share\\site",
+		]) {
+			expect(
+				() =>
+					normalizeDocsDir(
+						validateConfig({ title: "X", docs: { dir: bad } }),
+						winRoot,
+						win32,
+					),
+				bad,
+			).toThrow(/docs\.dir: expected a directory inside the project/);
+		}
+		expect(() =>
+			normalizeDocsDir(
+				validateConfig({ title: "X", docs: { dir: "C:\\docs" } }),
+				"/tmp/proj",
+				posix,
+			),
+		).toThrow(/docs\.dir: expected a directory inside the project/);
 	});
 
 	it("probes init.d.luau and nested .d.luau directories while skipping dot-entries and non-.d.luau files", () => {

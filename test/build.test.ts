@@ -83,17 +83,48 @@ describe("syncDir", () => {
 		expect(existsSync(join(foreign, "generated/stale.ts"))).toBe(false);
 
 		const recased = tempDir();
-		seed(recased, { "widget.md": "old\n", "sub/leaf.md": "old\n" });
-		syncDir(
-			recased,
-			new Map([
-				["Widget.md", "new\n"],
-				["Sub/Leaf.md", "nested\n"],
-			]),
-		);
+		seed(recased, {
+			"widget.md": "old\n",
+			"sub/leaf.md": "old\n",
+			"deep/inner/same.md": "kept\n",
+			"replaced/gone.md": "stale\n",
+		});
+		expect(
+			syncDir(
+				recased,
+				new Map([
+					["Widget.md", "new\n"],
+					["Sub/Leaf.md", "nested\n"],
+					["Deep/Inner/same.md", "kept\n"],
+					["Replaced/Fresh.md", "fresh\n"],
+				]),
+			),
+		).toEqual({ written: 3, deleted: 1, unchanged: 1 });
 		expect(readFileSync(join(recased, "Widget.md"), "utf8")).toBe("new\n");
 		expect(readFileSync(join(recased, "Sub/Leaf.md"), "utf8")).toBe("nested\n");
-		expect(readdirSync(recased).sort()).toEqual(["Sub", "Widget.md"]);
+		expect(readFileSync(join(recased, "Deep/Inner/same.md"), "utf8")).toBe("kept\n");
+		expect(readFileSync(join(recased, "Replaced/Fresh.md"), "utf8")).toBe("fresh\n");
+		expect(readdirSync(recased).sort()).toEqual(["Deep", "Replaced", "Sub", "Widget.md"]);
+		expect(readdirSync(join(recased, "Sub"))).toEqual(["Leaf.md"]);
+		expect(readdirSync(join(recased, "Deep"))).toEqual(["Inner"]);
+		expect(readdirSync(join(recased, "Deep", "Inner"))).toEqual(["same.md"]);
+		expect(readdirSync(join(recased, "Replaced"))).toEqual(["Fresh.md"]);
+
+		if (!existsSync(join(recased, "widget.md"))) {
+			const splitCase = tempDir();
+			seed(splitCase, { "sub/leaf.md": "kept\n", "Sub/existing.md": "stay\n" });
+			expect(
+				syncDir(
+					splitCase,
+					new Map([
+						["Sub/Leaf.md", "kept\n"],
+						["Sub/existing.md", "stay\n"],
+					]),
+				),
+			).toEqual({ written: 0, deleted: 0, unchanged: 2 });
+			expect(readdirSync(splitCase)).toEqual(["Sub"]);
+			expect(readdirSync(join(splitCase, "Sub")).sort()).toEqual(["Leaf.md", "existing.md"]);
+		}
 
 		const emptied = tempDir();
 		seed(emptied, { "stale.md": "old\n" });

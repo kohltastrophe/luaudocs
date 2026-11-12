@@ -5,6 +5,7 @@
  * that `src/nav.ts` follows. `mintAnchors` in `src/render.ts` populates heading
  * anchors afterward.
  */
+import { randomUUID } from "node:crypto";
 import {
 	existsSync,
 	mkdirSync,
@@ -17,7 +18,7 @@ import {
 	statSync,
 	writeFileSync,
 } from "node:fs";
-import { dirname, join, relative } from "node:path";
+import { dirname, join, posix, relative } from "node:path";
 import type {
 	Badges,
 	Class,
@@ -146,16 +147,50 @@ export interface SyncSummary {
 	unchanged: number;
 }
 
+function addAncestorDirs(target: Set<string>, relPath: string): void {
+	for (let slash = relPath.indexOf("/"); slash !== -1; slash = relPath.indexOf("/", slash + 1)) {
+		target.add(relPath.slice(0, slash));
+	}
+}
+
+function indexUniqueLower(items: Iterable<string>): Map<string, string | null> {
+	const byLower = new Map<string, string | null>();
+	for (const item of items) {
+		const lower = item.toLowerCase();
+		byLower.set(lower, byLower.has(lower) ? null : item);
+	}
+	return byLower;
+}
+
+function renameEntryCase(parentPath: string, fromName: string, toName: string): void {
+	const from = join(parentPath, fromName);
+	const to = join(parentPath, toName);
+	// Hop through a distinct sibling name because Windows `MoveFileExW` can
+	// treat a direct case-only directory rename as a no-op.
+	const temp = join(parentPath, `.luaudocs-case-${randomUUID().slice(0, 8)}`);
+	renameSync(from, temp);
+	try {
+		renameSync(temp, to);
+	} catch (error) {
+		try {
+			renameSync(temp, from);
+		} catch {
+			// Best-effort rollback if the second rename fails.
+		}
+		throw error;
+	}
+}
+
 /**
  * Syncs `dir` to contain the exact `files` map. `deleteStale: false` skips the
  * stale-file sweep (on error builds), and `keepForeign` exempts paths owned by
  * another process inside a tool-owned tree (such as VitePress's `dist/` and `cache/`).
  *
  * On case-insensitive, case-preserving filesystems (macOS and Windows), writing
- * a re-cased slug updates the existing file in place without changing its
- * directory-entry casing. Because slugs never collide case-insensitively within
- * a build (`claimSlug`), the sweep renames any entry that matches a kept file
- * only case-insensitively (`widget.md` -> `Widget.md`) instead of deleting it.
+ * a re-cased slug or directory updates the existing entry in place without
+ * changing its directory-entry casing. Because slugs never collide
+ * case-insensitively within a build (`claimSlug`), the sweep re-cases matching
+ * directories and files in place instead of deleting them.
  */
 export function syncDir(
 	dir: string,
@@ -170,44 +205,128 @@ export function syncDir(
 	mkdirSync(dir, { recursive: true });
 
 	const keep = new Set<string>();
+	const keepDirs = new Set<string>();
 	for (const relPath of files.keys()) {
 		// Record the normalized relative path (`filesUnder` uses the same form) so a
 		// non-canonical key (`./Foo.md`) is not written and then swept.
-		keep.add(toPosix(relative(dir, join(dir, relPath))));
+		const canonical = toPosix(relative(dir, join(dir, relPath)));
+		keep.add(canonical);
+		addAncestorDirs(keepDirs, canonical);
 	}
 
-	const subdirs: string[] = [];
 	if (deleteStale) {
-		const onDisk: Array<{ abs: string; rel: string }> = [];
-		const present = new Set<string>();
+		const onDiskFiles: Array<{ abs: string; rel: string }> = [];
+		const onDiskDirs: Array<{ name: string; abs: string; rel: string }> = [];
+		const presentFiles = new Set<string>();
+		const presentDirs = new Set<string>();
+		const foreignDirs = new Set<string>();
 		for (const entry of readdirSync(dir, { recursive: true, withFileTypes: true })) {
 			const abs = join(entry.parentPath, entry.name);
 			const rel = toPosix(relative(dir, abs));
 			if (keepForeign?.(rel)) {
+				addAncestorDirs(foreignDirs, rel);
 				continue;
 			}
 			if (entry.isDirectory()) {
-				subdirs.push(abs);
+				onDiskDirs.push({ name: entry.name, abs, rel });
+				presentDirs.add(rel);
 			} else if (entry.isFile() || entry.isSymbolicLink()) {
-				onDisk.push({ abs, rel });
-				present.add(rel);
+				onDiskFiles.push({ abs, rel });
+				presentFiles.add(rel);
 			}
 		}
-		let keepByLower: Map<string, string> | undefined;
-		for (const { abs, rel } of onDisk) {
+
+		let keepFileByLower: Map<string, string | null> | undefined;
+		const survivorsToRecase: Array<{ rel: string; kept: string }> = [];
+		for (const { abs, rel } of onDiskFiles) {
 			if (keep.has(rel)) {
 				continue;
 			}
-			keepByLower ??= new Map([...keep].map((item) => [item.toLowerCase(), item]));
-			const kept = keepByLower.get(rel.toLowerCase());
-			if (kept !== undefined && !present.has(kept)) {
-				const dest = join(dir, kept);
-				mkdirSync(dirname(dest), { recursive: true });
-				renameSync(abs, dest);
+			keepFileByLower ??= indexUniqueLower(keep);
+			const kept = keepFileByLower.get(rel.toLowerCase());
+			if (kept != null && !presentFiles.has(kept)) {
+				presentFiles.add(kept);
+				survivorsToRecase.push({ rel, kept });
 				continue;
 			}
 			rmSync(abs);
 			summary.deleted += 1;
+		}
+
+		// Remove emptied directories deepest-first before re-casing surviving ones.
+		const liveDirs: Array<{ name: string; rel: string }> = [];
+		onDiskDirs.sort((a, b) => b.rel.length - a.rel.length);
+		for (const { name, abs, rel } of onDiskDirs) {
+			if (!foreignDirs.has(rel)) {
+				try {
+					rmdirSync(abs);
+					presentDirs.delete(rel);
+					continue;
+				} catch {
+					// Non-empty directory holds a surviving kept or foreign file.
+				}
+			}
+			liveDirs.push({ name, rel });
+		}
+
+		// Re-case surviving directories shallowest-first, tracking each directory's
+		// live path on disk so nested renames address the updated parent.
+		let keepDirByLower: Map<string, string | null> | undefined;
+		const dirMap = new Map<string, string>();
+		liveDirs.reverse();
+		for (const { name, rel } of liveDirs) {
+			const parentRel = posix.dirname(rel);
+			const actualParent = parentRel === "." ? "." : (dirMap.get(parentRel) ?? parentRel);
+			const currentRel = actualParent === "." ? name : `${actualParent}/${name}`;
+			if (keepDirs.has(currentRel) || foreignDirs.has(rel)) {
+				dirMap.set(rel, currentRel);
+				continue;
+			}
+			keepDirByLower ??= indexUniqueLower(keepDirs);
+			const keptDir = keepDirByLower.get(rel.toLowerCase());
+			if (
+				keptDir != null &&
+				actualParent === posix.dirname(keptDir) &&
+				!presentDirs.has(keptDir)
+			) {
+				presentDirs.delete(rel);
+				presentDirs.add(keptDir);
+				const keptName = posix.basename(keptDir);
+				if (name !== keptName) {
+					renameEntryCase(
+						actualParent === "." ? dir : join(dir, actualParent),
+						name,
+						keptName,
+					);
+				}
+				dirMap.set(rel, keptDir);
+			} else {
+				dirMap.set(rel, currentRel);
+			}
+		}
+
+		for (const { rel, kept } of survivorsToRecase) {
+			const relDir = posix.dirname(rel);
+			const curDir = relDir === "." ? "." : (dirMap.get(relDir) ?? relDir);
+			const keptDir = posix.dirname(kept);
+			const oldName = posix.basename(rel);
+			const keptName = posix.basename(kept);
+			if (curDir === keptDir) {
+				if (oldName !== keptName) {
+					renameEntryCase(keptDir === "." ? dir : join(dir, keptDir), oldName, keptName);
+				}
+				continue;
+			}
+			const dest = join(dir, kept);
+			mkdirSync(dirname(dest), { recursive: true });
+			renameSync(join(dir, curDir === "." ? oldName : `${curDir}/${oldName}`), dest);
+			for (let cur = curDir; cur !== "."; cur = posix.dirname(cur)) {
+				try {
+					rmdirSync(join(dir, cur));
+				} catch {
+					break;
+				}
+			}
 		}
 	}
 
@@ -219,16 +338,11 @@ export function syncDir(
 		}
 	}
 
-	// Remove directories emptied by the sweep (including `dir` itself when
-	// `files.size === 0`), deepest first; non-empty ones throw and stay.
 	if (deleteStale && files.size === 0) {
-		subdirs.push(dir);
-	}
-	for (const emptied of subdirs.sort((a, b) => b.length - a.length)) {
 		try {
-			rmdirSync(emptied);
+			rmdirSync(dir);
 		} catch {
-			// Directory still holds kept or foreign files.
+			// Root directory still holds foreign files.
 		}
 	}
 	return summary;
